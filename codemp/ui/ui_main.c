@@ -10887,7 +10887,7 @@ static qboolean GameType_Parse(char **p, qboolean join) {
 		if (Q_stricmp(token, "}") == 0) {
 			count = join ? &uiInfo.numJoinGameTypes : &uiInfo.numGameTypes;
 			types = join ? uiInfo.joinGameTypes : uiInfo.gameTypes;
-			for (gt = GT_JVM; gt <= GT_JOM; gt++) {
+			for (gt = GT_ARCADE; gt <= GT_JOM; gt++) {
 				for (i = 0; i < *count; i++)
 					if (types[i].gtEnum == gt)
 						break;
