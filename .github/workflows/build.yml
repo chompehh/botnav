@@ -6,6 +6,7 @@ on:
     branches:
       - master
       - beta
+      - main
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -14,6 +15,7 @@ on:
     branches:
       - master
       - beta
+      - main
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -146,6 +148,8 @@ jobs:
         working-directory: ${{ github.workspace }}/build/bin/JediAcademy
         shell: bash
         run: |
+          mkdir -p japro
+          cp -r "${{ github.workspace }}/assets/japro/"* japro/
           7z a -r TaystJK-windows-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.portable }}${{ matrix.sanitizer == 'AddressSanitizer' && '-AddressSanitizer' || '' }}.zip *
 
       - uses: actions/upload-artifact@6027e3dd177782cd8ab9af838c04fd81a07f1d47 # v4.6.2
