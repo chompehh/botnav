@@ -198,6 +198,21 @@ static inline float BotSFJ_StopDistanceFor(float startDistance)
 	return startDistance * (BOT_SFJ_PURSUIT_STOP_DISTANCE / BOT_SFJ_PURSUIT_START_DISTANCE);
 }
 
+/*
+ * Escape strafes may start once the bot is outside saber range instead of waiting for
+ * the full bot_minstrafe gap: humans escaped at strafe speed almost as often as they
+ * chased (396 vs 472 episodes), bots rarely (49 vs 122). bot_minstrafe below this
+ * still wins, and 0 keeps "no minimum".
+ */
+#define BOT_SFJ_ESCAPE_MIN_DISTANCE 128.0f
+
+static inline float BotSFJ_EscapeStartDistance(float minStrafe)
+{
+	if (minStrafe <= 0.0f)
+		return 0.0f;
+	return minStrafe < BOT_SFJ_ESCAPE_MIN_DISTANCE ? minStrafe : BOT_SFJ_ESCAPE_MIN_DISTANCE;
+}
+
 static inline int BotSFJ_CanOwnInput(int enabled, int freshIntent, int eligible,
 	bot_sfj_phase_t phase)
 {
@@ -477,6 +492,51 @@ static inline int BotSFJ_RouteSafetyAllows(int arcClear, int hazardFree,
 {
 	return arcClear && hazardFree && staticLanding &&
 		landingNormalZ >= 0.7f && routeContinuity >= 0.8f;
+}
+
+/*
+ * Re-jumps inside a running chain: a landing that is safe (hazard, trigger, floor
+ * slope, drop and fall-speed checks all passed) is accepted outside the corridor
+ * tolerance as long as it still heads roughly along the route. Bunny hopping past
+ * a ledge or along a wall beats cancelling the next hop. First takeoffs keep the
+ * strict corridor rule.
+ */
+#define BOT_SFJ_CHAIN_MIN_CONTINUITY 0.5f
+
+static inline int BotSFJ_ChainLandingAllows(int chainRunning, int strictAllows,
+	float landingNormalZ, float routeContinuity)
+{
+	if (strictAllows)
+		return 1;
+	return chainRunning && landingNormalZ >= 0.7f &&
+		routeContinuity >= BOT_SFJ_CHAIN_MIN_CONTINUITY;
+}
+
+/*
+ * A brief wall scrape drops speed below ground speed for a frame or two. Keep the
+ * chain for a short grace period and only release once it stays slowed out.
+ */
+#define BOT_SFJ_WALL_SCRAPE_GRACE_MS 200
+
+static inline int BotSFJ_SlowedOutShouldRelease(int slowedOut, int slowedSince, int now)
+{
+	if (!slowedOut || slowedSince <= 0)
+		return 0;
+	return now - slowedSince >= BOT_SFJ_WALL_SCRAPE_GRACE_MS;
+}
+
+/*
+ * Crouching on the ground at strafe speed starts a roll and ends the hop chain
+ * (strafe-track humans crouched airborne 789 frames vs 8 grounded). Navigation and
+ * combat-hop crouches are skipped while grounded above ground speed; deliberate
+ * roll escapes pass allowRoll.
+ */
+static inline int BotSFJ_GroundCrouchAllowed(int grounded, float horizontalSpeed,
+	float groundSpeed, int allowRoll)
+{
+	if (allowRoll || !grounded || groundSpeed <= 0.0f)
+		return 1;
+	return horizontalSpeed <= groundSpeed;
 }
 
 /*

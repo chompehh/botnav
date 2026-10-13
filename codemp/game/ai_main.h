@@ -576,6 +576,7 @@ typedef struct bot_state_s
 	qboolean			sfjArcSafe;
 	int					sfjDebugNextTime;
 	float				sfjPeakSpeed;		// fastest horizontal speed this strafe (BotSFJ_SlowedOut)
+	int					sfjSlowedSince;		// level.time speed first fell below ground speed (wall-scrape grace)
 	int					sfjRoute;			// recorded multi-node route being followed + 1 (0 = none)
 	int					sfjRouteNode;		// next landing node on sfjRoute
 	int					sfjRouteTime;		// level.time the route was last advanced
