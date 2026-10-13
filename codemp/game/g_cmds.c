@@ -1759,24 +1759,31 @@ void Cmd_Team_f( gentity_t *ent ) {
 	if (level.gametype == GT_JOM && trap->Argc() == 2) {
 		trap->Argv(1, s, sizeof(s));
 		if (!Q_stricmp(s, "jedi") || !Q_stricmp(s, "merc") || !Q_stricmp(s, "tank") ||
+			!Q_stricmp(s, "free") || !Q_stricmp(s, "f") ||
+			!Q_stricmp(s, "join") || !Q_stricmp(s, "j") ||
+			!Q_stricmp(s, "enter") || !Q_stricmp(s, "auto") ||
 			JVM_TeamArgClass(s) >= 0) {
 			/* Spectators join the game first, then take the requested class. */
 			if (ent->client->sess.sessionTeam == TEAM_SPECTATOR) {
 				int playerClass = !Q_stricmp(s, "merc") ? JVM_MERC : !Q_stricmp(s, "tank") ? JVM_TANK :
-					!Q_stricmp(s, "jedi") ? JVM_JEDI : JVM_TeamArgClass(s);
-				if (ent->client->switchTeamTime > level.time) {
-					trap->SendServerCommand( ent-g_entities, va("print \"%s\n\"", G_GetStringEdString("MP_SVGAME", "NOSWITCH")) );
-					return;
-				}
+					!Q_stricmp(s, "jedi") ? JVM_JEDI :
+					JVM_TeamArgClass(s) >= 0 ? JVM_TeamArgClass(s) :
+					ent->client->sess.jvmClass;
+				playerClass = Com_Clampi(JVM_JEDI, JVM_TANK, playerClass);
 				if (gEscaping)
 					return;
 				ent->client->sess.jvmClass = playerClass;
 				ent->client->jvmNextClass = 0;
-				ent->client->ps.fd.forceDoInit = 1;
+				ent->client->sess.setForce = qtrue;
 				SetTeam(ent, "free", qfalse);
-				if (oldTeam != ent->client->sess.sessionTeam)
-					ent->client->switchTeamTime = level.time + 5000;
+				ent->client->switchTeamTime = level.time + 5000;
 				G_WriteClientSessionData(ent->client);
+				return;
+			}
+			/* If already in game, treat free/f/join as a no-op so they are not suicided */
+			if (!Q_stricmp(s, "free") || !Q_stricmp(s, "f") ||
+				!Q_stricmp(s, "join") || !Q_stricmp(s, "j") ||
+				!Q_stricmp(s, "enter") || !Q_stricmp(s, "auto")) {
 				return;
 			}
 			Cmd_Class_f(ent);
@@ -2080,6 +2087,10 @@ void Cmd_SiegeClass_f( gentity_t *ent )
 Cmd_ForceChanged_f
 =================
 */
+static void Cmd_Profile_f( gentity_t *ent ) {
+	trap->SendServerCommand( ent - g_entities, "spc" );
+}
+
 void Cmd_ForceChanged_f( gentity_t *ent )
 {
 	char fpChStr[1024];
@@ -9196,6 +9207,7 @@ command_t commands[] = {
 	{ "follownext",			Cmd_FollowNext_f,			CMD_NOINTERMISSION },
 	{ "followprev",			Cmd_FollowPrev_f,			CMD_NOINTERMISSION },
 	{ "forcechanged",		Cmd_ForceChanged_f,			0 },
+	{ "profile",			Cmd_Profile_f,				0 },
 
 	{ "gc",					Cmd_GameCommand_f,			CMD_NOINTERMISSION },
 	{ "give",				Cmd_Give_f,					CMD_CHEAT|CMD_ALIVE|CMD_NOINTERMISSION },

@@ -146,6 +146,9 @@ void G_ReadSessionData( gclient_t *client )
 		);
 
 	client->sess.sessionTeam	= (team_t)tempSessionTeam;
+	if (JVM_IsMode(level.gametype) || level.gametype == GT_ARCADE) {
+		client->sess.setForce = qtrue;
+	}
 	client->sess.jvmClass = JVM_Class(GT_JOM, TEAM_FREE,
 		trap->Cvar_VariableIntegerValue(va("jvmclass%i", client - level.clients)));
 	client->sess.spectatorState	= (spectatorState_t)tempSpectatorState;
@@ -187,6 +190,9 @@ void G_InitSessionData( gclient_t *client, char *userinfo, qboolean isBot ) {
 	const char		*value;
 
 	sess = &client->sess;
+	if (JVM_IsMode(level.gametype) || level.gametype == GT_ARCADE) {
+		sess->setForce = qtrue;
+	}
 	if (level.gametype == GT_JOM) {
 		value = Info_ValueForKey(userinfo, "class");
 		sess->jvmClass = !Q_stricmp(value, "jedi") ? JVM_JEDI :

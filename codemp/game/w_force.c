@@ -247,6 +247,11 @@ void WP_InitForcePowers( gentity_t *ent ) {
 	else
 		warnClient = !(BG_LegalizedForcePowers( forcePowers, sizeof (forcePowers), g_maxForceRank.integer, HasSetSaberOnly(), 0, level.gametype, g_forcePowerDisable.integer ));
 
+	if ( warnClient && ent->s.number < MAX_CLIENTS && ent->s.eType != ET_NPC ) {
+		Info_SetValueForKey( userinfo, "forcepowers", forcePowers );
+		trap->SetUserinfo( ent->s.number, userinfo );
+	}
+
 	//rww - parse through the string manually and eat out all the appropriate data
 	i = 0;
 	i_r = 0;
@@ -365,28 +370,34 @@ void WP_InitForcePowers( gentity_t *ent ) {
 			trap->SendServerCommand( ent-g_entities, "scl" );
 		}
 	}
+	else if ( JVM_IsMode( level.gametype ) ) {
+		// In JvM and JoM, class loadouts and abilities are managed by G_JVMApplyClass.
+		// Never kick players to spectator or trigger the force powers profile popup.
+		ent->client->sess.setForce = qtrue;
+	}
 	else {
-		if ( warnClient || !ent->client->sess.setForce ) {
-			// the client's rank is too high for the server and has been autocapped, so tell them
+		if ( !ent->client->sess.setForce ) {
+			// Initial connect: offer force power setup if not autojoin and not arcade
 			if ( level.gametype != GT_HOLOCRON && level.gametype != GT_JEDIMASTER ) {
 				didEvent = qtrue;
-
 				if ( !(ent->r.svFlags & SVF_BOT) && ent->s.eType != ET_NPC ) {
 					if ( !g_teamAutoJoin.integer && level.gametype != GT_ARCADE ) {
-						// make them a spectator so they can set their powerups up without being bothered.
 						ent->client->sess.sessionTeam = TEAM_SPECTATOR;
 						ent->client->sess.spectatorState = SPECTATOR_FREE;
 						ent->client->sess.spectatorClient = 0;
-
 						ent->client->pers.teamState.state = TEAM_BEGIN;
 						trap->SendServerCommand( ent-g_entities, "spc" ); // Fire up the profile menu
 					}
 				}
-
-				// event isn't very reliable, I made it a string. This way I can send it to just one client also,
-				//	as opposed to making a broadcast event.
 				trap->SendServerCommand( ent->s.number, va( "nfr %i %i %i", g_maxForceRank.integer, 1, ent->client->sess.sessionTeam ) );
-				// arg1 is new max rank, arg2 is non-0 if force menu should be shown, arg3 is the current team
+			}
+			ent->client->sess.setForce = qtrue;
+		}
+		else if ( warnClient ) {
+			// Powers were autocapped; do not kick an already playing client to spectator.
+			if ( level.gametype != GT_HOLOCRON && level.gametype != GT_JEDIMASTER ) {
+				didEvent = qtrue;
+				trap->SendServerCommand( ent->s.number, va( "nfr %i %i %i", g_maxForceRank.integer, 0, ent->client->sess.sessionTeam ) );
 			}
 			ent->client->sess.setForce = qtrue;
 		}

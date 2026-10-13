@@ -4086,9 +4086,10 @@ void ClientSpawn(gentity_t *ent) {
 	client = ent->client;
 	if (level.gametype == GT_JOM && client->jvmNextClass &&
 		client->sess.sessionTeam != TEAM_SPECTATOR) {
-		client->sess.jvmClass = client->jvmNextClass - 1;
+		client->sess.jvmClass = Com_Clampi(JVM_JEDI, JVM_TANK, client->jvmNextClass - 1);
 		client->jvmNextClass = 0;
-		client->ps.fd.forceDoInit = 1;
+		client->sess.setForce = qtrue;
+		client->ps.fd.forceDoInit = 0;
 		ClientUserinfoChanged(index);
 		G_WriteClientSessionData(client);
 		BroadcastTeamChange(client, client->sess.sessionTeam);
