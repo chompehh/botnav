@@ -4147,7 +4147,6 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	return bs->sfjArcSafe;
 }
 
-/* A previous hop's intent is not proof that walking input may cross this gap. */
 /* Grounded crouch at strafe speed starts a roll and ends the hop chain. */
 static qboolean BotNav_GroundCrouchAllowed(bot_state_t *bs)
 {
@@ -4158,6 +4157,7 @@ static qboolean BotNav_GroundCrouchAllowed(bot_state_t *bs)
 		(float)ps->speed, 0) ? qtrue : qfalse;
 }
 
+/* A previous hop's intent is not proof that walking input may cross this gap. */
 static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs)
 {
 	bot_input_t queued;
@@ -21284,7 +21284,7 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 	{
 		NewBotAI_SelectSaberFooting(bs, ps, phase, &command);
 		VectorCopy(bs->saberFootingWorldDir, bi->dir);
-		if (NewBotAI_SaberCommittedSwingDropsBackpedal((int)bs->settings.skill,
+		if (bs->currentEnemy && NewBotAI_SaberCommittedSwingDropsBackpedal((int)bs->settings.skill,
 			PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove) ||
 			(ps->saberMove >= LS_A_TL2BR && ps->saberMove <= LS_A_T2B),
 			bs->saberDefenseActive))
