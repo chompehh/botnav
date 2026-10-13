@@ -2800,6 +2800,7 @@ static void BotSFJ_Clear(bot_state_t *bs)
 		return;
 	bs->sfjPhase = BOT_SFJ_PHASE_OFF;
 	bs->sfjPeakSpeed = 0.0f;
+	bs->sfjSlowedSince = 0;
 	bs->sfjRoute = 0;
 	bs->sfjRouteNode = 0;
 	bs->sfjIntent = BOT_SFJ_INTENT_NONE;
@@ -2833,6 +2834,7 @@ static void BotSFJ_Abort(bot_state_t *bs, int time)
 	bs->sfjPhaseTime = time;
 	bs->sfjCooldownUntil = time + BOT_SFJ_ABORT_COOLDOWN_MS;
 	bs->sfjPeakSpeed = 0.0f;
+	bs->sfjSlowedSince = 0;
 	bs->sfjRoute = 0;
 	bs->sfjRouteNode = 0;
 	bs->sfjIntent = BOT_SFJ_INTENT_NONE;
@@ -2860,6 +2862,7 @@ static void BotSFJ_Release(bot_state_t *bs, int time)
 	bs->sfjCorridorValid = qfalse;
 	bs->sfjCorridorForwardGoal = qfalse;
 	bs->sfjPeakSpeed = 0.0f;
+	bs->sfjSlowedSince = 0;
 	bs->sfjRoute = 0;
 	bs->sfjRouteNode = 0;
 	bs->sfjArcCheckedTime = 0;
@@ -4101,17 +4104,25 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		return slowedAt >= BOT_SFJ_MIN_USEFUL_FLIGHT_S ? qtrue : qfalse;
 	VectorSubtract(trace.endpos, ps->origin, traveled);
 	traveled[2] = 0.0f;
-	if (VectorLength(traveled) > 1.0f &&
-		!BotSFJ_RouteSafetyAllows(qtrue, qtrue, qtrue, trace.plane.normal[2],
-			DotProduct(traveled, routeDirection) / VectorLength(traveled)))
-		return qfalse;
-	if (!BotSFJ_LandingWithinCorridor(ps->origin[0], ps->origin[1],
-		routeDestination[0], routeDestination[1], trace.endpos[0], trace.endpos[1],
-		BotSFJ_Tolerance(), bs->sfjRoute ?
-			BotSFJ_ClampSetting(sqrtf(ps->velocity[0] * ps->velocity[0] +
-				ps->velocity[1] * ps->velocity[1]) * 0.75f, 96.0f, 512.0f) : 96.0f))
-		return qfalse;
-	return qtrue;
+	{
+		const float traveledLength = VectorLength(traveled);
+		const float continuity = traveledLength > 1.0f ?
+			DotProduct(traveled, routeDirection) / traveledLength : 1.0f;
+		const qboolean strict = ((traveledLength <= 1.0f ||
+			BotSFJ_RouteSafetyAllows(qtrue, qtrue, qtrue, trace.plane.normal[2], continuity)) &&
+			BotSFJ_LandingWithinCorridor(ps->origin[0], ps->origin[1],
+				routeDestination[0], routeDestination[1], trace.endpos[0], trace.endpos[1],
+				BotSFJ_Tolerance(), bs->sfjRoute ?
+					BotSFJ_ClampSetting(sqrtf(ps->velocity[0] * ps->velocity[0] +
+						ps->velocity[1] * ps->velocity[1]) * 0.75f, 96.0f, 512.0f) : 96.0f)) ?
+			qtrue : qfalse;
+		const qboolean chainRunning = (bs->sfjPhase == BOT_SFJ_PHASE_AIR ||
+			bs->sfjPhase == BOT_SFJ_PHASE_LANDING || bs->sfjPhase == BOT_SFJ_PHASE_REJUMP) ?
+			qtrue : qfalse;
+
+		return BotSFJ_ChainLandingAllows(chainRunning, strict, trace.plane.normal[2],
+			continuity) ? qtrue : qfalse;
+	}
 }
 
 #define BOT_SFJ_ARC_CACHE_MS 100
@@ -4134,6 +4145,16 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		commandMsec, sliceMsec);
 	bs->sfjArcCheckedTime = time;
 	return bs->sfjArcSafe;
+}
+
+/* Grounded crouch at strafe speed starts a roll and ends the hop chain. */
+static qboolean BotNav_GroundCrouchAllowed(bot_state_t *bs)
+{
+	const playerState_t *ps = &bs->cur_ps;
+
+	return BotSFJ_GroundCrouchAllowed(ps->groundEntityNum != ENTITYNUM_NONE,
+		sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]),
+		(float)ps->speed, 0) ? qtrue : qfalse;
 }
 
 /* A previous hop's intent is not proof that walking input may cross this gap. */
@@ -4347,7 +4368,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		const float alignment = DotProduct(routeDirection, toEnemy);
 		const float stopDistance = BotSFJ_StopDistanceFor(minStrafe);
 
-		if (retreating && alignment < -0.25f && enemyDistance >= minStrafe)
+		if (retreating && alignment < -0.25f &&
+			enemyDistance >= BotSFJ_EscapeStartDistance(minStrafe))
 			purpose = BOT_SFJ_INTENT_RETREAT;
 		else if ((bs->sfjPursuitLatched ||
 				(bot_onlystrafes.integer && enemyDistance >= minStrafe) ||
@@ -4438,6 +4460,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		bs->sfjPhase = BOT_SFJ_PHASE_PREPARE;
 		bs->sfjPhaseTime = level.time;
 		bs->sfjPeakSpeed = 0.0f;
+		bs->sfjSlowedSince = 0;
 		g_botSfjStats.starts++;
 		if (bot_strafejumps_debug.integer > 1)
 		{
@@ -4522,7 +4545,8 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 				conflictReason = "visible enemy in saber range";
 			}
 		}
-		else if (separation < BotSFJ_StopDistanceFor(BotSFJ_MinStrafeDistance()))
+		else if (separation < BotSFJ_StopDistanceFor(bs->sfjIntent == BOT_SFJ_INTENT_RETREAT ?
+			BotSFJ_EscapeStartDistance(BotSFJ_MinStrafeDistance()) : BotSFJ_MinStrafeDistance()))
 		{
 			eligible = qfalse;
 			conflictReason = "enemy inside stop distance";
@@ -4559,10 +4583,17 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			bs->sfjPhase == BOT_SFJ_PHASE_REJUMP) &&
 		BotSFJ_ContinuitySlowedOut(bs->sfjPeakSpeed, horizontalSpeed, (float)ps->speed))
 	{
-		BotSFJ_DebugReject(bs, "slowed well below ground speed, resuming navigation");
-		BotSFJ_Release(bs, time);
-		return;
+		if (bs->sfjSlowedSince <= 0)
+			bs->sfjSlowedSince = time;
+		if (BotSFJ_SlowedOutShouldRelease(qtrue, bs->sfjSlowedSince, time))
+		{
+			BotSFJ_DebugReject(bs, "slowed well below ground speed, resuming navigation");
+			BotSFJ_Release(bs, time);
+			return;
+		}
 	}
+	else
+		bs->sfjSlowedSince = 0;
 	/*
 	 * Circle-jump start: from a slow standing start, spend a few ground frames
 	 * swinging the view across the route before the first takeoff so the jump
@@ -14572,7 +14603,9 @@ void NewBotAI_GetMovement(bot_state_t *bs)
 					NewBotAI_RetreatDiagonal(bs, (level.framenum & 1) ? qtrue : qfalse);
 				}
 				trap->EA_Jump(bs->client);
-				trap->EA_Crouch(bs->client);
+				//Crouch overrides jump in the command; at speed on the ground it rolls instead of hopping.
+				if (BotNav_GroundCrouchAllowed(bs))
+					trap->EA_Crouch(bs->client);
 				NewBotAI_ConsumeCombatHop(bs);
 				if (NewBotAI_IsBeingPulledTowardEnemy(bs) &&
 					!(g_forcePowerDisable.integer & (1 << FP_DRAIN)) &&
@@ -21251,6 +21284,26 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 	{
 		NewBotAI_SelectSaberFooting(bs, ps, phase, &command);
 		VectorCopy(bs->saberFootingWorldDir, bi->dir);
+		if (bs->currentEnemy && NewBotAI_SaberCommittedSwingDropsBackpedal((int)bs->settings.skill,
+			PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove) ||
+			(ps->saberMove >= LS_A_TL2BR && ps->saberMove <= LS_A_T2B),
+			bs->saberDefenseActive))
+		{
+			vec3_t toEnemy, stripped;
+
+			VectorSubtract(bs->currentEnemy->r.currentOrigin, ps->origin, toEnemy);
+			toEnemy[2] = 0.0f;
+			VectorCopy(bi->dir, stripped);
+			if (VectorNormalize(toEnemy) > 0.0f &&
+				NewBotAI_StripBackwardComponent(&stripped[0], &stripped[1], toEnemy[0], toEnemy[1]))
+			{
+				if (VectorLengthSquared(stripped) < 0.01f)
+					VectorClear(bi->dir);
+				else if (NewBotAI_SaberSafeFootwork(bs, ps->origin, vectoyaw(stripped), 1, 0,
+					command.jump))
+					VectorCopy(stripped, bi->dir);
+			}
+		}
 		bi->speed = VectorLengthSquared(bi->dir) > 0.01f ? 400.0f : 0.0f;
 	}
 	if (command.jump) plannedFlags |= ACTION_JUMP;
@@ -24559,7 +24612,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		}
 	}
 
-	if (bs->duckTime > level.time)
+	if (bs->duckTime > level.time && BotNav_GroundCrouchAllowed(bs))
 	{
 		trap->EA_Crouch(bs->client);
 	}

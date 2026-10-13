@@ -457,8 +457,10 @@ static inline newbotai_saber_tactic_t NewBotAI_ApplySaberChoiceGrade(
 	switch (grade)
 	{
 	case NEWBOTAI_SABER_GRADE_GOOD:
+		// A chain that is still landing hits keeps going (humans idle->swing x3:
+		// 96% wins, +16.8 net per sample); only an unproductive chain resets early.
 		if (tactic == NEWBOTAI_SABER_TACTIC_CHAIN &&
-			context.chainLength >= NEWBOTAI_SABER_GOOD_CHAIN_LENGTH)
+			context.chainLength >= NEWBOTAI_SABER_GOOD_CHAIN_LENGTH && !context.landedHit)
 		{
 			return NEWBOTAI_SABER_TACTIC_REPOSITION;
 		}
@@ -882,6 +884,51 @@ static inline int NewBotAI_SaberAttackForward(newbotai_saber_tactic_t tactic, fl
 	return enemyDistance > NEWBOTAI_SABER_COMMIT_PEAK_RANGE ? 1 : 0;
 }
 
+// Saber-length freeze: an attacking tactic that cannot swing yet (window not open, own
+// swing still recovering) used to plan no movement at all. Bots stood still in 37.7% of
+// close-range samples vs 22.8-32.1% for humans, who mostly advanced (50-57%) or strafed.
+// Keep closing to the swing-peak range and circle on the planned side meanwhile.
+static inline void NewBotAI_SaberWaitingFooting(newbotai_saber_tactic_t tactic,
+	float enemyDistance, int side, int *forward, int *right)
+{
+	if (*forward || *right)
+		return;
+	switch (tactic)
+	{
+	case NEWBOTAI_SABER_TACTIC_ATTACK:
+	case NEWBOTAI_SABER_TACTIC_CHAIN:
+	case NEWBOTAI_SABER_TACTIC_COUNTER:
+		*forward = enemyDistance > NEWBOTAI_SABER_COMMIT_PEAK_RANGE ? 1 : 0;
+		*right = side < 0 ? -1 : 1;
+		break;
+	default:
+		break;
+	}
+}
+
+// Humans almost never backpedal once their swing is committed (start, attack or chain
+// transition: 19 of 4,225 account-human close swing starts vs 404 of 1,406 for bots,
+// mostly from RESET/REPOSITION footing chosen mid-swing). Above the low-skill band the
+// backward part of the footing is dropped until the swing ends; real defense keeps it.
+static inline int NewBotAI_SaberCommittedSwingDropsBackpedal(int skill, int committedSwing,
+	int defenseActive)
+{
+	return committedSwing && !defenseActive && skill >= NEWBOTAI_SABER_BACKPEDAL_SWING_MAX_SKILL;
+}
+
+// Remove the component of (x, y) that points away from the enemy (enemy direction
+// (ex, ey), unit length). Lateral and forward parts are kept. Returns 1 when changed.
+static inline int NewBotAI_StripBackwardComponent(float *x, float *y, float ex, float ey)
+{
+	const float along = *x * ex + *y * ey;
+
+	if (along >= 0.0f)
+		return 0;
+	*x -= along * ex;
+	*y -= along * ey;
+	return 1;
+}
+
 static inline newbotai_saber_command_t NewBotAI_PlanSaberCommand(
 	newbotai_saber_tactic_context_t context, newbotai_saber_tactic_t tactic,
 	newbotai_saber_family_t family, int stage, int direction, int grounded,
@@ -913,6 +960,9 @@ static inline newbotai_saber_command_t NewBotAI_PlanSaberCommand(
 	command.attack = grounded && attackLegal &&
 		NewBotAI_SaberTacticAllowsSwingStart(tactic, context.enemyDistance) &&
 		NewBotAI_SaberFreshSwingWindowAllows(context, tactic);
+	if (grounded && !command.attack)
+		NewBotAI_SaberWaitingFooting(tactic, context.enemyDistance, side,
+			&command.forward, &command.right);
 	if (command.attack)
 	{
 		command.right = side;

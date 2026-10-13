@@ -2300,6 +2300,113 @@ BOOST_AUTO_TEST_CASE( nav_progress_stall )
 	BOOST_CHECK( BotNav_ProgressStalled( 1000, 1000 + BOT_NAV_PROGRESS_STALL_MS ) );
 }
 
+
+BOOST_AUTO_TEST_CASE( saber_good_grade_keeps_a_chain_that_is_landing_hits )
+{
+	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+
+	context.chainLength = 3;
+	context.landedHit = 1;
+	BOOST_CHECK_EQUAL( NewBotAI_ApplySaberChoiceGrade( context, NEWBOTAI_SABER_TACTIC_CHAIN, NEWBOTAI_SABER_GRADE_GOOD ),
+		NEWBOTAI_SABER_TACTIC_CHAIN );
+	context.landedHit = 0;
+	BOOST_CHECK_EQUAL( NewBotAI_ApplySaberChoiceGrade( context, NEWBOTAI_SABER_TACTIC_CHAIN, NEWBOTAI_SABER_GRADE_GOOD ),
+		NEWBOTAI_SABER_TACTIC_REPOSITION );
+}
+
+BOOST_AUTO_TEST_CASE( saber_attack_tactics_never_freeze_while_the_swing_window_is_closed )
+{
+	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	const newbotai_saber_tactic_t attacking[] = { NEWBOTAI_SABER_TACTIC_ATTACK,
+		NEWBOTAI_SABER_TACTIC_CHAIN, NEWBOTAI_SABER_TACTIC_COUNTER };
+
+	for (const auto tactic : attacking)
+	{
+		// attackLegal = 0: own swing still recovering.
+		const newbotai_saber_command_t waiting = NewBotAI_PlanSaberCommand( context, tactic,
+			NEWBOTAI_SABER_HORIZONTAL, 0, -1, 1, 1, 0, 0 );
+		BOOST_CHECK_EQUAL( waiting.attack, 0 );
+		BOOST_CHECK_EQUAL( waiting.forward, 1 );
+		BOOST_CHECK_EQUAL( waiting.right, -1 );
+	}
+	// Inside the swing-peak range: circle, do not walk through the opponent.
+	context.enemyDistance = 40.0f;
+	const newbotai_saber_command_t close = NewBotAI_PlanSaberCommand( context,
+		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_HORIZONTAL, 0, 1, 1, 1, 0, 0 );
+	BOOST_CHECK_EQUAL( close.forward, 0 );
+	BOOST_CHECK_EQUAL( close.right, 1 );
+	// STAND_SWING is the mediocre "swing in place" grade and keeps its standstill.
+	const newbotai_saber_command_t stand = NewBotAI_PlanSaberCommand( context,
+		NEWBOTAI_SABER_TACTIC_STAND_SWING, NEWBOTAI_SABER_HORIZONTAL, 0, 1, 1, 1, 0, 0 );
+	BOOST_CHECK_EQUAL( stand.forward, 0 );
+	BOOST_CHECK_EQUAL( stand.right, 0 );
+	// Airborne footwork is unchanged.
+	const newbotai_saber_command_t air = NewBotAI_PlanSaberCommand( context,
+		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_HORIZONTAL, 0, 1, 0, 1, 0, 0 );
+	BOOST_CHECK_EQUAL( air.forward, -1 );
+}
+
+BOOST_AUTO_TEST_CASE( committed_swings_drop_backpedal_above_low_skill )
+{
+	BOOST_CHECK( NewBotAI_SaberCommittedSwingDropsBackpedal( 7, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberCommittedSwingDropsBackpedal( 10, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberCommittedSwingDropsBackpedal( 6, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberCommittedSwingDropsBackpedal( 10, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberCommittedSwingDropsBackpedal( 10, 1, 1 ) );
+
+	// Back-left diagonal while the enemy is ahead on +x: only the lateral part survives.
+	float x = -0.7071f, y = 0.7071f;
+	BOOST_CHECK( NewBotAI_StripBackwardComponent( &x, &y, 1.0f, 0.0f ) );
+	BOOST_CHECK_SMALL( x, 0.0001f );
+	BOOST_CHECK_CLOSE( y, 0.7071f, 0.01f );
+	// Forward or lateral input is untouched.
+	x = 0.5f; y = 0.5f;
+	BOOST_CHECK( !NewBotAI_StripBackwardComponent( &x, &y, 1.0f, 0.0f ) );
+	BOOST_CHECK_EQUAL( x, 0.5f );
+	// Pure backpedal becomes no movement.
+	x = -1.0f; y = 0.0f;
+	BOOST_CHECK( NewBotAI_StripBackwardComponent( &x, &y, 1.0f, 0.0f ) );
+	BOOST_CHECK_SMALL( x * x + y * y, 0.0001f );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_chain_rejumps_accept_safe_landings_off_corridor )
+{
+	// Strict rule still accepts everything it accepted before.
+	BOOST_CHECK( BotSFJ_ChainLandingAllows( 0, 1, 1.0f, 1.0f ) );
+	// First takeoff outside the corridor is still rejected.
+	BOOST_CHECK( !BotSFJ_ChainLandingAllows( 0, 0, 1.0f, 0.9f ) );
+	// Running chain: off-corridor but safe and heading along the route.
+	BOOST_CHECK( BotSFJ_ChainLandingAllows( 1, 0, 1.0f, 0.6f ) );
+	// Never steep floors or landings that turn back.
+	BOOST_CHECK( !BotSFJ_ChainLandingAllows( 1, 0, 0.6f, 0.9f ) );
+	BOOST_CHECK( !BotSFJ_ChainLandingAllows( 1, 0, 1.0f, 0.4f ) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_chain_survives_brief_wall_scrapes )
+{
+	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 0, 1000, 5000 ) );
+	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 1, 0, 5000 ) );
+	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 1, 1000, 1000 + BOT_SFJ_WALL_SCRAPE_GRACE_MS - 1 ) );
+	BOOST_CHECK( BotSFJ_SlowedOutShouldRelease( 1, 1000, 1000 + BOT_SFJ_WALL_SCRAPE_GRACE_MS ) );
+}
+
+BOOST_AUTO_TEST_CASE( no_grounded_crouch_roll_at_strafe_speed )
+{
+	BOOST_CHECK( !BotSFJ_GroundCrouchAllowed( 1, 450.0f, 250.0f, 0 ) );
+	BOOST_CHECK( BotSFJ_GroundCrouchAllowed( 1, 250.0f, 250.0f, 0 ) );
+	BOOST_CHECK( BotSFJ_GroundCrouchAllowed( 0, 600.0f, 250.0f, 0 ) );	// air crouch is fine
+	BOOST_CHECK( BotSFJ_GroundCrouchAllowed( 1, 450.0f, 250.0f, 1 ) );	// deliberate roll
+	BOOST_CHECK( BotSFJ_GroundCrouchAllowed( 1, 450.0f, 0.0f, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_EscapeStartDistance( 320.0f ), BOT_SFJ_ESCAPE_MIN_DISTANCE );
+	BOOST_CHECK_EQUAL( BotSFJ_EscapeStartDistance( 64.0f ), 64.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_EscapeStartDistance( 0.0f ), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_EscapeStartDistance( -5.0f ), 0.0f );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE_END()
