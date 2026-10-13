@@ -226,7 +226,7 @@
 			forecolor			1 .682 0 1
 			backcolor			0 0 0 0
 			visible			1
-			cvartest			"g_gametype"
+			cvartest			"ui_about_gametype"
 			showcvar			{ "7" }
 			action 
 			{ 
@@ -271,7 +271,7 @@
 			forecolor			1 .682 0 1
 			backcolor			0 0 0 0
 			visible				1
-			cvartest			"g_gametype"
+			cvartest			"ui_about_gametype"
 			hideCvar			{ "7" }
 			action 
 			{ 
@@ -317,7 +317,7 @@
 			forecolor			1 .682 0 1
 			backcolor			0 0 0 0
 			visible				1
-			cvartest			"g_gametype"
+			cvartest			"ui_about_gametype"
 			showcvar			{ "7" }
 			action 
 			{ 

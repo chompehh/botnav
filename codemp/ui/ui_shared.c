@@ -2241,18 +2241,6 @@ qboolean Item_EnableShowViaCvar(itemDef_t *item, int flag) {
 		char buff[2048];
 	  DC->getCVarString(item->cvarTest, buff, sizeof(buff));
 
-		// Profile button in ingame menu: visible for all gametypes except Siege (GT_SIEGE = 7)
-		if (item->window.name && (!Q_stricmp(item->window.name, "player") || !Q_stricmp(item->window.name, "playerButton"))) {
-			if (!Q_stricmp(item->cvarTest, "g_gametype") || !Q_stricmp(item->cvarTest, "ui_about_gametype")) {
-				int gt = atoi(buff);
-				if (gt != 7) {
-					return qtrue;
-				} else {
-					return qfalse;
-				}
-			}
-		}
-
     Q_strncpyz(script, item->enableCvar, 2048);
     p = script;
     while (1) {

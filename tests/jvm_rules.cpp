@@ -40,6 +40,18 @@ BOOST_AUTO_TEST_CASE(classes_are_not_jom_teams)
 	BOOST_CHECK_LT(JVM_ACTIVE | JVM_CLASS_MASK | JVM_FLIPKICK | JVM_COUNTERGRIP | JVM_PUSHPULL, 32768);
 }
 
+BOOST_AUTO_TEST_CASE(class_modes_never_require_force_profile_to_join_or_respawn)
+{
+	for (int mode = GT_FFA; mode <= GT_JOM; ++mode) {
+		for (int warned = 0; warned <= 1; ++warned) {
+			for (int configured = 0; configured <= 1; ++configured) {
+				BOOST_CHECK_EQUAL(JVM_ForceProfileRequired(mode, warned, configured),
+					mode != GT_JVM && mode != GT_JOM && (warned || !configured));
+			}
+		}
+	}
+}
+
 BOOST_AUTO_TEST_CASE(pickup_categories)
 {
 	/* categories: weapon, ammo, health, armor, other (holdable/powerup) */
@@ -452,6 +464,21 @@ BOOST_AUTO_TEST_CASE(cycle_only_schedules_an_actual_death_not_class_or_team_chan
 			}
 		}
 	}
+}
+
+BOOST_AUTO_TEST_CASE(cycled_classes_keep_joining_without_a_force_profile)
+{
+	int playerClass = JVM_JEDI;
+	for (int death = 0; death < 6; ++death) {
+		const int next = JVM_DeathNextClass(GT_JOM, playerClass, 1, 1, 0, 0, 0);
+		BOOST_REQUIRE_NE(next, 0);
+		playerClass = JVM_Class(GT_JOM, TEAM_FREE, next - 1);
+		BOOST_CHECK_EQUAL(playerClass, (death + 1) % 3);
+		BOOST_CHECK(!JVM_ForceProfileRequired(GT_JOM, 1, 0));
+		BOOST_CHECK(!JVM_ForceProfileRequired(GT_JOM, 0, 1));
+	}
+	BOOST_CHECK_EQUAL(JVM_Class(GT_JOM, TEAM_FREE, -1), JVM_JEDI);
+	BOOST_CHECK_EQUAL(JVM_Class(GT_JOM, TEAM_FREE, 3), JVM_JEDI);
 }
 
 BOOST_AUTO_TEST_CASE(disabled_passive_absorb_defers_every_power_to_ordinary_behavior)

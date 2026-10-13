@@ -20,6 +20,10 @@ static inline int JVM_IsMode(int gametype) {
 	return gametype == 11 || gametype == 12;
 }
 
+static inline int JVM_ForceProfileRequired(int gametype, int warnClient, int setForce) {
+	return !JVM_IsMode(gametype) && (warnClient || !setForce);
+}
+
 static inline int JVM_IsTeamGame(int gametype) {
 	/* Preserve legacy Arcade behaviour at call sites with their own exclusion. */
 	return gametype >= 6 && gametype != 12;

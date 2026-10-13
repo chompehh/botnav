@@ -6,7 +6,6 @@ on:
     branches:
       - master
       - beta
-      - main
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -15,7 +14,6 @@ on:
     branches:
       - master
       - beta
-      - main
     paths-ignore:
       - "**.md"
       - ".gitignore"
@@ -148,12 +146,6 @@ jobs:
         working-directory: ${{ github.workspace }}/build/bin/JediAcademy
         shell: bash
         run: |
-          mkdir -p japro taystjk
-          cp -r "${{ github.workspace }}/assets/japro/"* japro/
-          cp -r "${{ github.workspace }}/assets/japro/"* taystjk/
-          (cd "${{ github.workspace }}/assets/japro" && 7z a -tzip "${{ github.workspace }}/build/bin/JediAcademy/japro/z_japro_assets.pk3" *)
-          cp "${{ github.workspace }}/build/bin/JediAcademy/japro/z_japro_assets.pk3" "${{ github.workspace }}/build/bin/JediAcademy/taystjk/z_taystjk_assets.pk3"
-          cp taystjk/ui* japro/ 2>/dev/null || true
           7z a -r TaystJK-windows-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.portable }}${{ matrix.sanitizer == 'AddressSanitizer' && '-AddressSanitizer' || '' }}.zip *
 
       - uses: actions/upload-artifact@6027e3dd177782cd8ab9af838c04fd81a07f1d47 # v4.6.2
@@ -229,14 +221,7 @@ jobs:
         if: ${{ matrix.build_type == 'Release' }}
         working-directory: ${{ github.workspace }}/install/JediAcademy
         shell: bash
-        run: |
-          mkdir -p japro taystjk
-          cp -r "${{ github.workspace }}/assets/japro/"* japro/
-          cp -r "${{ github.workspace }}/assets/japro/"* taystjk/
-          (cd "${{ github.workspace }}/assets/japro" && zip -r "${{ github.workspace }}/install/JediAcademy/japro/z_japro_assets.pk3" .)
-          cp "${{ github.workspace }}/install/JediAcademy/japro/z_japro_assets.pk3" "${{ github.workspace }}/install/JediAcademy/taystjk/z_taystjk_assets.pk3"
-          cp taystjk/ui* japro/ 2>/dev/null || true
-          tar -czvf TaystJK-linux-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.portable }}.tar.gz *
+        run: tar -czvf TaystJK-linux-${{ matrix.arch }}-${{ matrix.build_type }}-${{ matrix.portable }}.tar.gz  *
 
       - uses: actions/upload-artifact@6027e3dd177782cd8ab9af838c04fd81a07f1d47 # v4.6.2
         if: ${{ matrix.build_type == 'Release' }}
