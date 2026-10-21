@@ -64,8 +64,9 @@ typedef enum
 
 /* Separate technique namespace: never reinterpret the persisted action-token IDs.
  * Attack indices use the engine's seven ordinary attacks (TL2BR through T2B).
- * Only the alternating-horizontal prior is observationally supported; the other
- * complete three-attack recipes are experimental, not demonstrated human combos. */
+ * All twelve complete recipes are experimental, not demonstrated intentional or
+ * effective human combos. Recorded horizontal alternation supports a frequency
+ * prior only; the mixed recipes receive a lower exploratory prior. */
 #define BOTLEARN_SABER_SEQUENCE_COUNT 12
 #define BOTLEARN_SABER_SEQUENCE_LENGTH 3
 

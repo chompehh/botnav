@@ -21007,11 +21007,12 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 	{
 		const int endQuad = saberMoveData[ps->saberMove].endQuad;
 		if (NewBotAI_SaberCommittedLearningDecision(1, bs->saberTechniqueCommand.attack,
-			bs->saberDefenseActive) && bs->saberLearnedStimulus != BOTLEARN_TOK_NONE)
+			bs->saberDefenseActive))
 		{
-			G_BotLearnDecision(&g_entities[bs->client], bs->currentEnemy,
-				bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
-				bs->saberLearnedPreference);
+			if (bs->saberLearnedStimulus != BOTLEARN_TOK_NONE)
+				G_BotLearnDecision(&g_entities[bs->client], bs->currentEnemy,
+					bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
+					bs->saberLearnedPreference);
 			G_BotLearnSaberAccepted(&g_entities[bs->client], bs->currentEnemy,
 				NewBotAI_SaberSequenceId((newbotai_saber_family_t)bs->saberTechniqueFamily),
 				bs->saberTacticChainLength, ps->saberMove - LS_A_TL2BR);
@@ -21049,9 +21050,7 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 {
 	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
 	int sequence, total = 0, roll;
-	if (!context.fanStance || family == NEWBOTAI_SABER_BASIC ||
-		family == NEWBOTAI_SABER_BURST || family == NEWBOTAI_SABER_COUNTER_ENTRY ||
-		family == NEWBOTAI_SABER_FINISH ||
+	if (!context.fanStance || !NewBotAI_SaberFamilyMaySelectRecipe(family) ||
 		NewBotAI_SaberNeedsSafetyExit(context))
 		return family;
 	for (sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)

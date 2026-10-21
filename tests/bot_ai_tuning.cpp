@@ -993,6 +993,45 @@ BOOST_AUTO_TEST_CASE( human_saber_sequence_uses_engine_accepted_attacks_only )
 		NEWBOTAI_SABER_HORIZONTAL, 0, 1, 1, 1, 1, 0 ).forward, 0 );
 }
 
+BOOST_AUTO_TEST_CASE( experimental_recipes_preserve_finish_counter_burst_and_zero_bias )
+{
+	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	BOOST_CHECK( NewBotAI_SaberFamilyMaySelectRecipe( NEWBOTAI_SABER_HORIZONTAL ) );
+	BOOST_CHECK( NewBotAI_SaberFamilyMaySelectRecipe( NEWBOTAI_SABER_DIAGONAL_VERTICAL ) );
+	for (auto family : { NEWBOTAI_SABER_BASIC, NEWBOTAI_SABER_FINISH,
+		NEWBOTAI_SABER_COUNTER_ENTRY, NEWBOTAI_SABER_BURST })
+		BOOST_CHECK( !NewBotAI_SaberFamilyMaySelectRecipe( family ) );
+	for (int roll = 1; roll <= 100; ++roll)
+	{
+		const auto family = NewBotAI_SelectSaberFamily( context, 0, roll );
+		BOOST_CHECK_EQUAL( family, NEWBOTAI_SABER_BASIC );
+		BOOST_CHECK( !NewBotAI_SaberFamilyMaySelectRecipe( family ) );
+		BOOST_CHECK_EQUAL( NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_ATTACK,
+			family, 0, 1, 1, 1, 1, 0 ).attack, 1 );
+	}
+	context.fanStance = 1;
+	context.enemyTotalHealth = 30;
+	context.landedHit = 1;
+	auto family = NewBotAI_SelectSaberFamily( context, 100, 1 );
+	BOOST_CHECK_EQUAL( family, NEWBOTAI_SABER_FINISH );
+	BOOST_CHECK( !NewBotAI_SaberFamilyMaySelectRecipe( family ) );
+	const auto finish = NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_CHAIN,
+		family, NEWBOTAI_SABER_FAN_FINISH_STAGE, 1, 1, 1, 1, 0 );
+	BOOST_CHECK_EQUAL( finish.attack, 1 );
+	BOOST_CHECK_EQUAL( finish.forward, 1 );
+	BOOST_CHECK_EQUAL( finish.right, 0 );
+	context.enemyTotalHealth = 150;
+	context.landedHit = 0;
+	context.recentlyHurt = 1;
+	context.counterReady = 1;
+	context.enemyRecovering = 1;
+	family = NewBotAI_SelectSaberFamily( context, 100, 1 );
+	BOOST_CHECK_EQUAL( family, NEWBOTAI_SABER_COUNTER_ENTRY );
+	BOOST_CHECK( !NewBotAI_SaberFamilyMaySelectRecipe( family ) );
+	BOOST_CHECK_EQUAL( NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_COUNTER,
+		family, 0, 1, 1, 1, 1, 0 ).attack, 1 );
+}
+
 BOOST_AUTO_TEST_CASE( human_saber_mix_is_deliberate_and_horizontal_sweeps_remain_primary )
 {
 	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
