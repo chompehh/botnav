@@ -300,6 +300,8 @@ int WaitingForNow(bot_state_t *bs, vec3_t goalpos);
 static void BotSFJ_SelectIntent(bot_state_t *bs);
 static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int elapsedTime);
 static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
+static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
+	const vec3_t end);
 static qboolean NewBotAI_ShouldConserveForce(bot_state_t *bs);
 static qboolean NewBotAI_HasWaypointNavigation(void);
 static qboolean NewBotAI_ShouldSkipPullForNaturalFlipkickPTK(bot_state_t *bs);
@@ -1047,6 +1049,13 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bs->sfjLastRandomUse = BotInputToUserCommand(&bi, &bs->lastucmd,
 		bs->cur_ps.delta_angles, time,
 		bs->noUseTime, bs->sfjOwnsInput ? qfalse : qtrue);
+	if (bs->sfjOwnsInput)
+	{
+		if (bs->lastucmd.upmove >= 10)
+			bs->sfjJumpReleaseTime = 0;
+		else if (!bs->sfjJumpReleaseTime)
+			bs->sfjJumpReleaseTime = bs->lastucmd.serverTime;
+	}
 	if (JVM_BotGunAttack(level.gametype,
 		JVM_ReplicatedClass(bs->cur_ps.stats[STAT_RESTRICTIONS]),
 		bs->lastucmd.weapon, bs->cur_ps.weapon, WP_NUM_WEAPONS, WP_MELEE, WP_SABER) &&
@@ -2810,6 +2819,10 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjCooldownUntil = 0;
 	bs->sfjNextStartTime = 0;
 	bs->sfjStartFrequency = 0;
+	bs->sfjStrafeOnly = qfalse;
+	bs->sfjJumpReleaseTime = 0;
+	bs->sfjNavPauseUntil = 0;
+	bs->sfjNavPauseForJump = qfalse;
 	bs->sfjOwnsInput = qfalse;
 	bs->sfjLastRandomUse = qfalse;
 	bs->sfjPursuitLatched = qfalse;
@@ -2819,6 +2832,7 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjArcCheckedTime = 0;
 	bs->sfjArcSafe = qfalse;
 	bs->sfjCorridorValid = qfalse;
+	bs->sfjCorridorPointCount = 0;
 	bs->sfjCorridorForwardGoal = qfalse;
 	VectorClear(bs->sfjIntentDirection);
 	VectorClear(bs->sfjIntentDestination);
@@ -2833,6 +2847,7 @@ static void BotSFJ_Abort(bot_state_t *bs, int time)
 	bs->sfjPhase = BOT_SFJ_PHASE_ABORT;
 	bs->sfjPhaseTime = time;
 	bs->sfjCooldownUntil = time + BOT_SFJ_ABORT_COOLDOWN_MS;
+	bs->sfjJumpReleaseTime = 0;
 	bs->sfjPeakSpeed = 0.0f;
 	bs->sfjSlowedSince = 0;
 	bs->sfjRoute = 0;
@@ -2855,6 +2870,7 @@ static void BotSFJ_Release(bot_state_t *bs, int time)
 	bs->sfjPhase = BOT_SFJ_PHASE_OFF;
 	bs->sfjPhaseTime = time;
 	bs->sfjCooldownUntil = 0;
+	bs->sfjJumpReleaseTime = 0;
 	bs->sfjIntent = BOT_SFJ_INTENT_NONE;
 	bs->sfjIntentTime = 0;
 	bs->sfjSafetyUntil = 0;
@@ -2934,9 +2950,20 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 		BOT_SFJ_HARD("kick technique owns movement");
 	if (bs->escapeYawOverrideUntil > level.time)
 		BOT_SFJ_HARD("escape yaw override");
-	if (bs->beStill >= level.time || WaitingForNow(bs, bs->goalPosition) ||
-		bs->isCamping > level.time || bs->wpCamping)
-		BOT_SFJ_HARD("holding position (beStill/waiting/camping)");
+	if (bs->wpCurrent && (bs->wpCurrent->flags || bs->wpCurrent->forceJumpTo))
+		BOT_SFJ_HARD("required waypoint interaction");
+	if (bs->beStill >= level.time)
+	{
+		if (bs->beStill == bs->sfjNavPauseUntil)
+			BOT_SFJ_HARD(bs->sfjNavPauseForJump ?
+				"holding position: navigation jump release pause" :
+				"holding position: navigation hazard pause");
+		BOT_SFJ_HARD("holding position: beStill navigation/combat timer");
+	}
+	if (WaitingForNow(bs, bs->goalPosition))
+		BOT_SFJ_HARD("holding position: waiting for interaction");
+	if (bs->isCamping > level.time || bs->wpCamping)
+		BOT_SFJ_HARD("holding position: camping");
 	if (bi->actionflags & hardActions)
 		BOT_SFJ_HARD("queued force power or ski");
 	if (BotSFJ_UseIsConflict(bi->actionflags & ACTION_USE,
@@ -3054,26 +3081,44 @@ static qboolean BotWaypointSkipPathSafe(bot_state_t *bs, const vec3_t destinatio
 }
 
 /*
- * Walk forward along the bot's waypoint trail and return a straight, flat
+ * Walk forward along the bot's waypoint trail and return a gently curving
  * corridor up to BOT_SFJ_CORRIDOR_LOOKAHEAD units long.  The steering direction
  * aims at a look-ahead point on the trail (path smoothing) instead of the very
  * next waypoint, so a strafe jump can carry the bot past several waypoints.
  */
+static qboolean BotSFJ_CorridorSegmentIsClear(bot_state_t *bs,
+	const vec3_t start, const vec3_t end)
+{
+	vec3_t mins = {-15.0f, -15.0f, DEFAULT_MINS_2};
+	vec3_t maxs = {15.0f, 15.0f, DEFAULT_MAXS_2};
+	const int hazards = CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP;
+	trace_t trace;
+
+	JP_Trace(&trace, (float *)start, mins, maxs, (float *)end, bs->client,
+		MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	return !trace.startsolid && !trace.allsolid && trace.fraction >= 1.0f &&
+		!(trace.contents & hazards) && !(trap->PointContents((float *)end, bs->client) & hazards) &&
+		!BotSFJ_TriggerAlongSegment(bs, start, end);
+}
+
 static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t destination)
 {
 	const int waypointBudget = BotSFJ_WaypointBudget(bot_strafejumpwaypoints.integer);
 	const qboolean grounded = bs && bs->cur_ps.groundEntityNum != ENTITYNUM_NONE;
-	vec3_t lastPoint, firstDirection, steerPoint;
+	vec3_t lastPoint, firstDirection, previousDirection, steerPoint;
+	vec3_t points[BOT_SFJ_MAX_CORRIDOR_POINTS];
 	wpobject_t *wp;
 	wpobject_t *previous = NULL;
 	float total = 0.0f;
 	float baseZ;
+	float steerDistance;
 	qboolean haveDirection = qfalse;
 	qboolean haveSteer = qfalse;
 	qboolean reachedEnd = qfalse;
 	int step;
 	int index;
 	int count;
+	int pointCount = 1;
 
 	if (!bs || !bs->wpCurrent || bs->doingFallback ||
 		bs->wpCurrent->index < 0 || bs->wpCurrent->index >= gWPNum ||
@@ -3088,12 +3133,18 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	VectorCopy(bs->origin, lastPoint);
 	/* Flight height is not a change in the underlying trail's elevation. */
 	baseZ = grounded ? bs->origin[2] : bs->wpCurrent->origin[2];
+	lastPoint[2] = baseZ;
+	VectorCopy(lastPoint, points[0]);
+	steerDistance = BotSFJ_ClampSetting(sqrtf(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] +
+		bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) * 0.4f, 96.0f,
+		BOT_SFJ_CORRIDOR_STEER_DISTANCE);
 	VectorClear(firstDirection);
+	VectorClear(previousDirection);
 	VectorClear(steerPoint);
 	index = bs->wpCurrent->index;
 	for (count = 0; count < waypointBudget; count++, index += step)
 	{
-		vec3_t segment;
+		vec3_t segment, segmentEnd;
 		float segmentLength;
 
 		if (index < 0 || index >= gWPNum)
@@ -3124,28 +3175,43 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 		segmentLength = VectorNormalize(segment);
 		if (!previous && segmentLength > 640.0f)
 			return qfalse;
+		VectorCopy(wp->origin, segmentEnd);
+		if (total + segmentLength > BOT_SFJ_CORRIDOR_LOOKAHEAD)
+		{
+			const float fraction = (BOT_SFJ_CORRIDOR_LOOKAHEAD - total) / segmentLength;
+			VectorMA(lastPoint, BOT_SFJ_CORRIDOR_LOOKAHEAD - total, segment, segmentEnd);
+			segmentEnd[2] = lastPoint[2] + fraction * (wp->origin[2] - lastPoint[2]);
+		}
+		if (!BotSFJ_CorridorSegmentIsClear(bs, lastPoint, segmentEnd))
+		{
+			BotSFJ_DebugReject(bs, "linked lookahead segment blocked or hazardous");
+			break;
+		}
 		if (segmentLength > 1.0f)
 		{
 			/* A waypoint the bot has nearly reached says little about direction. */
 			const qboolean nearlyReached = !previous && segmentLength < 48.0f;
 
-			if (haveDirection &&
-				DotProduct(segment, firstDirection) < BOT_SFJ_CORRIDOR_STRAIGHTNESS)
+			if (haveDirection && !BotSFJ_CurveSegmentAllows(
+				DotProduct(segment, previousDirection), DotProduct(segment, firstDirection)))
 				break;
 			if (!haveDirection && !nearlyReached)
 			{
 				VectorCopy(segment, firstDirection);
 				haveDirection = qtrue;
 			}
-			if (!haveSteer && total + segmentLength >= BOT_SFJ_CORRIDOR_STEER_DISTANCE)
+			if (haveDirection)
+				VectorCopy(segment, previousDirection);
+			if (!haveSteer && total + segmentLength >= steerDistance)
 			{
-				VectorMA(lastPoint, BOT_SFJ_CORRIDOR_STEER_DISTANCE - total, segment, steerPoint);
+				VectorMA(lastPoint, steerDistance - total, segment, steerPoint);
 				haveSteer = qtrue;
 			}
+			VectorCopy(segmentEnd, points[pointCount]);
+			pointCount++;
 			if (total + segmentLength >= BOT_SFJ_CORRIDOR_LOOKAHEAD)
 			{
-				VectorMA(lastPoint, BOT_SFJ_CORRIDOR_LOOKAHEAD - total,
-					segment, lastPoint);
+				VectorCopy(segmentEnd, lastPoint);
 				total = BOT_SFJ_CORRIDOR_LOOKAHEAD;
 				previous = wp;
 				reachedEnd = qtrue;
@@ -3172,7 +3238,7 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	VectorSubtract(steerPoint, bs->origin, direction);
 	direction[2] = 0.0f;
 	if (VectorNormalize(direction) <= 0.0f ||
-		DotProduct(direction, firstDirection) < BOT_SFJ_CORRIDOR_STRAIGHTNESS)
+		DotProduct(direction, firstDirection) < 0.5f)
 		return qfalse;
 	VectorCopy(lastPoint, destination);
 	VectorCopy(bs->origin, bs->sfjCorridorStart);
@@ -3180,8 +3246,35 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	bs->sfjCorridorFirst = bs->wpCurrent->index;
 	bs->sfjCorridorLast = previous->index;
 	bs->sfjCorridorStep = step;
+	VectorCopy(lastPoint, points[pointCount - 1]);
+	for (index = 0; index < pointCount; index++)
+		VectorCopy(points[index], bs->sfjCorridorPoints[index]);
+	bs->sfjCorridorPointCount = pointCount;
 	bs->sfjCorridorValid = qtrue;
 	return qtrue;
+}
+
+/* Membership follows the validated polyline, not a chord across a bend. */
+static qboolean BotSFJ_WithinWaypointCorridor(const bot_state_t *bs,
+	const vec3_t destination, const vec3_t position, float endTolerance)
+{
+	int index;
+	const int pointCount = bs->sfjCorridorPointCount;
+
+	if (pointCount < 2 || pointCount > BOT_SFJ_MAX_CORRIDOR_POINTS ||
+		!VectorCompare(destination, bs->sfjCorridorPoints[pointCount - 1]))
+		return qfalse;
+	for (index = 1; index < pointCount; index++)
+	{
+		const float *start = bs->sfjCorridorPoints[index - 1];
+		const float *end = bs->sfjCorridorPoints[index];
+
+		if (BotSFJ_LandingWithinCorridor(start[0], start[1], end[0], end[1],
+			position[0], position[1], BotSFJ_Tolerance(),
+			index == pointCount - 1 ? endTolerance : 0.0f))
+			return qtrue;
+	}
+	return qfalse;
 }
 
 /*
@@ -3214,9 +3307,7 @@ static void BotSFJ_AdvancePassedWaypoints(bot_state_t *bs)
 	}
 	step = bs->wpDirection ? -1 : 1;
 	if (step != bs->sfjCorridorStep ||
-		!BotSFJ_LandingWithinCorridor(bs->sfjCorridorStart[0], bs->sfjCorridorStart[1],
-			bs->sfjIntentDestination[0], bs->sfjIntentDestination[1],
-			bs->origin[0], bs->origin[1], BotSFJ_Tolerance(), 0.0f))
+		!BotSFJ_WithinWaypointCorridor(bs, bs->sfjIntentDestination, bs->origin, 0.0f))
 	{
 		BotSFJ_DebugReject(bs, "safe advance: outside validated intent corridor");
 		return;
@@ -3260,7 +3351,7 @@ static void BotSFJ_AdvancePassedWaypoints(bot_state_t *bs)
 		/* A far new first point would fail the corridor's 640-unit entry bound. */
 		clippedTarget = BotSFJ_UseClippedForwardTarget(1, endpointProgress,
 			VectorLength(delta)) ? qtrue : qfalse;
-		if (!BotSFJ_AdvanceDropLinkAllows(next->flags || next->forceJumpTo,
+		if (!BotSFJ_AdvanceCurveLinkAllows(next->flags || next->forceJumpTo,
 			BotSFJ_WaypointsLinked(current, nextIndex), PassWayCheck(bs, nextIndex),
 			next->origin[2] - current->origin[2],
 			next->origin[2] - bs->sfjCorridorStart[2], alignment,
@@ -3825,9 +3916,6 @@ static qboolean BotSFJ_GetRouteHintCorridor(bot_state_t *bs, const playerState_t
  * predicted velocity.  Liquid, nodrop or a kill volume coming up ends the strafe
  * cleanly; walls are allowed until speed falls well below ground speed.
  */
-static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
-	const vec3_t end);
-
 static qboolean BotSFJ_HazardAhead(bot_state_t *bs, const playerState_t *ps)
 {
 	static vec3_t playerMins = {-15.0f, -15.0f, DEFAULT_MINS_2};
@@ -3931,10 +4019,12 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	trace_t trace;
 	float routeYaw;
 	float gravity;
+	float endTolerance = 96.0f;
 	float elapsed = 0.0f;
 	float previousVertical;
 	float launchStartZ;
 	int heldRemaining;
+	int steeringRemaining = 0;
 	int steps;
 	int side;
 	int wallContacts = 0;
@@ -3979,11 +4069,33 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	gravity = (float)ps->gravity;
 	routeYaw = vectoyaw(routeDirection);
 	side = bs->sfjStrafeSide ? bs->sfjStrafeSide : 1;
+	if (bs->sfjStrafeOnly)
+		side = -side;
+	if (launched && forceEligible && ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_1)
+	{
+		vec3_t sideEnd;
+		vec3_t specialMins = {-15.0f, -15.0f, 0.0f};
+		vec3_t specialMaxs = {15.0f, 15.0f, 24.0f};
+		int forwardMove, rightMove;
+		const float wishYaw = BotSFJ_CommandYaw(routeYaw, velocity[0], velocity[1],
+			(float)ps->speed, pm_airaccelerate, (float)sliceMsec / 1000.0f, side);
+		float viewYaw;
+
+		BotSFJ_HalfBeatAxes(bs->sfjStrafeSide, bs->sfjStrafeOnly, &forwardMove, &rightMove);
+		viewYaw = BotSFJ_ViewYawForAxes(wishYaw, forwardMove, rightMove) * 0.017453292519943295f;
+		VectorCopy(position, sideEnd);
+		sideEnd[0] += (rightMove < 0 ? -16.0f : 16.0f) * sinf(viewYaw);
+		sideEnd[1] -= (rightMove < 0 ? -16.0f : 16.0f) * cosf(viewYaw);
+		/* PM_CheckJump would turn these axes into a wall-run/flip, not this arc. */
+		JP_Trace(&trace, position, specialMins, specialMaxs, sideEnd,
+			bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
+		if (trace.startsolid || trace.allsolid || trace.fraction < 1.0f)
+			return qfalse;
+	}
 
 	for (steps = 0; steps < BOT_SFJ_MAX_ARC_STEPS && elapsed < 2.0f; steps++)
 	{
-		/* Coarse 50 ms steps once the jump command has been applied. */
-		int msec = (heldRemaining > 0 || sliceMsec >= 50) ? sliceMsec : 50;
+		int msec = sliceMsec;
 		float stepSeconds;
 		float commandYaw;
 		float radians;
@@ -3999,10 +4111,20 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		if (msec < 1)
 			break;
 		stepSeconds = (float)msec / 1000.0f;
-		commandYaw = BotSFJ_CommandYaw(routeYaw, velocity[0], velocity[1],
-			(float)ps->speed, pm_airaccelerate, stepSeconds, side);
-		radians = commandYaw * 0.017453292519943295f;
-		VectorSet(wishDirection, cosf(radians), sinf(radians), 0.0f);
+		if (steeringRemaining <= 0)
+		{
+			commandYaw = BotSFJ_CommandYaw(routeYaw, velocity[0], velocity[1],
+				(float)ps->speed, pm_airaccelerate, (float)sliceMsec / 1000.0f, side);
+			radians = commandYaw * 0.017453292519943295f;
+			VectorSet(wishDirection, cosf(radians), sinf(radians), 0.0f);
+			steeringRemaining = commandMsec;
+		}
+		if (msec > steeringRemaining)
+		{
+			msec = steeringRemaining;
+			stepSeconds = (float)msec / 1000.0f;
+		}
+		steeringRemaining -= msec;
 		currentSpeed = DotProduct(velocity, wishDirection);
 		addSpeed = (float)ps->speed - currentSpeed;
 		/* Once a wall has slowed the strafe out, navigation takes over: no more air strafing. */
@@ -4098,6 +4220,25 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 
 	if (!predictedLanding)
 		return qfalse;
+	if (bs->sfjRoute > 0 && bs->sfjRoute <= g_botSfjTrackRouteCount &&
+		bs->sfjRouteNode + 1 < g_botSfjTrackRoutes[bs->sfjRoute - 1].nodeCount)
+	{
+		/* Intermediate recording nodes remain progress markers, not route ends. */
+		endTolerance = BotSFJ_ClampSetting(sqrtf(ps->velocity[0] * ps->velocity[0] +
+			ps->velocity[1] * ps->velocity[1]) * 0.75f, 96.0f, 512.0f);
+	}
+	if (bs->sfjCorridorValid)
+	{
+		/* A waypoint boundary is strict, even for a wall slide or chained hop. */
+		endTolerance = 0.0f;
+		if (!BotSFJ_PolylineEndpointAllows(bs->sfjCorridorPoints,
+			bs->sfjCorridorPointCount, trace.endpos[0], trace.endpos[1], endTolerance))
+			return qfalse;
+	}
+	/* Even a safe wall slide or chain continuation must not pass the route end. */
+	if (!BotSFJ_EndpointAllows(ps->origin[0], ps->origin[1],
+		routeDestination[0], routeDestination[1], trace.endpos[0], trace.endpos[1], endTolerance))
+		return qfalse;
 
 	/* Slowed out by a wall: a safe landing is enough, the corridor no longer applies. */
 	if (slowedByWall)
@@ -4110,11 +4251,11 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 			DotProduct(traveled, routeDirection) / traveledLength : 1.0f;
 		const qboolean strict = ((traveledLength <= 1.0f ||
 			BotSFJ_RouteSafetyAllows(qtrue, qtrue, qtrue, trace.plane.normal[2], continuity)) &&
+			((bs->sfjCorridorValid && BotSFJ_WithinWaypointCorridor(bs,
+				routeDestination, trace.endpos, endTolerance)) ||
 			BotSFJ_LandingWithinCorridor(ps->origin[0], ps->origin[1],
 				routeDestination[0], routeDestination[1], trace.endpos[0], trace.endpos[1],
-				BotSFJ_Tolerance(), bs->sfjRoute ?
-					BotSFJ_ClampSetting(sqrtf(ps->velocity[0] * ps->velocity[0] +
-						ps->velocity[1] * ps->velocity[1]) * 0.75f, 96.0f, 512.0f) : 96.0f)) ?
+				BotSFJ_Tolerance(), endTolerance))) ?
 			qtrue : qfalse;
 		const qboolean chainRunning = (bs->sfjPhase == BOT_SFJ_PHASE_AIR ||
 			bs->sfjPhase == BOT_SFJ_PHASE_LANDING || bs->sfjPhase == BOT_SFJ_PHASE_REJUMP) ?
@@ -4129,9 +4270,8 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 
 /*
  * The arc simulation is the expensive part of the controller, so the result is
- * cached per bot.  It runs at most once per BOT_SFJ_ARC_CACHE_MS while the bot is
- * deciding whether to jump, plus once at each takeoff/rejump; while airborne the
- * cheap BotSFJ_HazardAhead look-ahead is used instead.
+ * cached briefly for an unchanged route and input pattern. Every takeoff is
+ * refreshed; airborne steering changes also require a new landing check.
  */
 static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	const vec3_t routeDirection, const vec3_t routeDestination,
@@ -4139,12 +4279,53 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 {
 	if (!forceRefresh && bs->sfjArcCheckedTime > 0 &&
 		time >= bs->sfjArcCheckedTime &&
-		time - bs->sfjArcCheckedTime < BOT_SFJ_ARC_CACHE_MS)
+		time - bs->sfjArcCheckedTime < BOT_SFJ_ARC_CACHE_MS &&
+		VectorCompare(bs->sfjArcDirection, routeDirection) &&
+		VectorCompare(bs->sfjArcDestination, routeDestination) &&
+		bs->sfjArcSide == bs->sfjStrafeSide &&
+		bs->sfjArcStrafeOnly == bs->sfjStrafeOnly)
 		return bs->sfjArcSafe;
 	bs->sfjArcSafe = BotSFJ_ArcIsSafe(bs, ps, routeDirection, routeDestination,
 		commandMsec, sliceMsec);
+	if (!bs->sfjArcSafe && !bs->sfjOwnsInput &&
+		(bs->sfjPhase == BOT_SFJ_PHASE_OFF || bs->sfjPhase == BOT_SFJ_PHASE_ABORT ||
+		 bs->sfjPhase == BOT_SFJ_PHASE_PREPARE))
+	{
+		bs->sfjStrafeSide = -bs->sfjStrafeSide;
+		bs->sfjArcSafe = BotSFJ_ArcIsSafe(bs, ps, routeDirection, routeDestination,
+			commandMsec, sliceMsec);
+	}
 	bs->sfjArcCheckedTime = time;
+	VectorCopy(routeDirection, bs->sfjArcDirection);
+	VectorCopy(routeDestination, bs->sfjArcDestination);
+	bs->sfjArcSide = bs->sfjStrafeSide;
+	bs->sfjArcStrafeOnly = bs->sfjStrafeOnly;
 	return bs->sfjArcSafe;
+}
+
+static qboolean BotSFJ_GroundWishIsSafe(bot_state_t *bs,
+	const playerState_t *ps, float wishYaw, int commandMsec)
+{
+	vec3_t end, wish;
+	const float seconds = (float)commandMsec / 1000.0f;
+	const float yaw = wishYaw * 0.017453292519943295f;
+
+	VectorSet(wish, cosf(yaw), sinf(yaw), 0.0f);
+	/* Bound ground acceleration as well as existing momentum before any yaw swing. */
+	VectorMA(ps->origin, seconds, ps->velocity, end);
+	VectorMA(end, seconds * (float)ps->speed, wish, end);
+	end[2] = ps->origin[2];
+	return BotWaypointSkipPathSafe(bs, end, BOT_SFJ_CORRIDOR_LOOKAHEAD);
+}
+
+static qboolean BotSFJ_CirclePreparationIsSafe(bot_state_t *bs,
+	const playerState_t *ps, int time, int commandMsec)
+{
+	const float swing = 30.0f * (1.0f - (float)(time - bs->sfjPhaseTime) / 120.0f);
+	const float wishYaw = vectoyaw(bs->sfjIntentDirection) -
+		(bs->sfjStrafeSide < 0 ? -swing : swing);
+
+	return BotSFJ_GroundWishIsSafe(bs, ps, wishYaw, commandMsec);
 }
 
 /* Grounded crouch at strafe speed starts a roll and ends the hop chain. */
@@ -4347,9 +4528,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		 * the still-fresh, previously accepted corridor, never invent a new one. */
 		if (airborneJump && previousCorridorValid &&
 			BotSFJ_IntentIsFresh(level.time, bs->sfjIntentTime) &&
-			BotSFJ_LandingWithinCorridor(bs->sfjCorridorStart[0], bs->sfjCorridorStart[1],
-				bs->sfjIntentDestination[0], bs->sfjIntentDestination[1],
-				ps->origin[0], ps->origin[1], BotSFJ_Tolerance(), 0.0f))
+			BotSFJ_WithinWaypointCorridor(bs, bs->sfjIntentDestination, ps->origin, 0.0f))
 		{
 			VectorCopy(bs->sfjIntentDirection, routeDirection);
 			VectorCopy(bs->sfjIntentDestination, routeDestination);
@@ -4359,7 +4538,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	}
 	if (!haveRoute)
 	{
-		BotSFJ_Reject(bs, "no straight open corridor along movement");
+		BotSFJ_Reject(bs, "no safe linked lookahead along movement");
 		return;
 	}
 
@@ -4396,13 +4575,13 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 			vectoyaw(routeDirection), 12.0f) * 0.017453292519943295f;
 		VectorSet(routeDirection, cosf(yaw), sinf(yaw), 0.0f);
 	}
-	if (bs->sfjPhase == BOT_SFJ_PHASE_OFF || bs->sfjPhase == BOT_SFJ_PHASE_ABORT ||
-		bs->sfjPhase == BOT_SFJ_PHASE_PREPARE || bs->sfjPhase == BOT_SFJ_PHASE_LANDING)
+	if (bs->sfjPhase == BOT_SFJ_PHASE_OFF || bs->sfjPhase == BOT_SFJ_PHASE_ABORT)
 	{
 		bs->sfjStrafeSide = BotSFJ_SelectSide(vectoyaw(routeDirection),
 			ps->velocity[0], ps->velocity[1], bs->sfjStrafeSide ?
 			bs->sfjStrafeSide : ((bs->client & 1) ? -1 : 1));
-		/* Recorded routes replay the human's strafe key for this hop. */
+		bs->sfjStrafeOnly = qfalse;
+		/* The recording seeds the first half-beat; subsequent hops alternate. */
 		{
 			const int recordedSide = BotSFJ_TrackRouteSide(bs);
 
@@ -4417,13 +4596,20 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		BotSFJ_Reject(bs, "unsupported command timing");
 		return;
 	}
-	/* Mid-jump the takeoff arc was already validated; only watch for hazards. */
+	/* A changed curve heading needs a new arc, not just the old takeoff's safety. */
 	airborneJump = (bs->sfjPhase == BOT_SFJ_PHASE_TAKEOFF ||
 		bs->sfjPhase == BOT_SFJ_PHASE_REJUMP ||
 		bs->sfjPhase == BOT_SFJ_PHASE_AIR) && ps->groundEntityNum == ENTITYNUM_NONE;
-	if (airborneJump ? BotSFJ_HazardAhead(bs, ps) :
-		!BotSFJ_CachedArcIsSafe(bs, ps, routeDirection, routeDestination,
-			commandMsec, sliceMsec, level.time, qfalse))
+	if (airborneJump ? (BotSFJ_HazardAhead(bs, ps) ||
+		((fabsf(BotSFJ_AngleDelta(vectoyaw(routeDirection),
+			vectoyaw(bs->sfjArcDirection))) > 5.0f ||
+		 (bs->sfjArcDestination[0] - routeDestination[0]) * routeDirection[0] +
+		 (bs->sfjArcDestination[1] - routeDestination[1]) * routeDirection[1] > 16.0f) &&
+		 !BotSFJ_CachedArcIsSafe(bs, ps, routeDirection, routeDestination,
+			commandMsec, sliceMsec, level.time, qtrue))) :
+		((bs->sfjPhase != BOT_SFJ_PHASE_AIR && bs->sfjPhase != BOT_SFJ_PHASE_LANDING) &&
+		 !BotSFJ_CachedArcIsSafe(bs, ps, routeDirection, routeDestination,
+			commandMsec, sliceMsec, level.time, qfalse)))
 	{
 		BotSFJ_Reject(bs, airborneJump ? "hazard ahead in flight" :
 			"predicted jump arc unsafe (wall, drop, hazard or lands off route)");
@@ -4488,6 +4674,8 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	qboolean circleJump;
 	int commandMsec;
 	int sliceMsec;
+	int forwardMove;
+	int rightMove;
 
 	if (!bs || !bi)
 		return;
@@ -4602,18 +4790,35 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	circleJump = (bs->sfjPhase == BOT_SFJ_PHASE_PREPARE && grounded && fresh &&
 		eligible && horizontalSpeed < 250.0f && time - bs->sfjPhaseTime < 120) ?
 		qtrue : qfalse;
-	nextPhase = circleJump ? BOT_SFJ_PHASE_PREPARE :
-		BotSFJ_NextPhase(bs->sfjPhase, qtrue, fresh, eligible, grounded,
-			time - bs->sfjPhaseTime);
 	if (!BotSFJ_GetCommandTiming(ps, time, elapsedTime, &commandMsec, &sliceMsec))
 	{
 		BotSFJ_DebugReject(bs, "unsupported command timing");
 		BotSFJ_Abort(bs, time);
 		return;
 	}
+	if (circleJump && !BotSFJ_CirclePreparationIsSafe(bs, ps, time, commandMsec))
+	{
+		bs->sfjStrafeSide = -bs->sfjStrafeSide;
+		if (!BotSFJ_CirclePreparationIsSafe(bs, ps, time, commandMsec))
+		{
+			circleJump = qfalse;
+			if (time == bs->sfjPhaseTime)
+			{
+				bs->sfjOwnsInput = qfalse;
+				return;
+			}
+		}
+	}
+	nextPhase = circleJump ? BOT_SFJ_PHASE_PREPARE :
+		BotSFJ_ReleasedNextPhase(bs->sfjPhase, grounded,
+			time - bs->sfjPhaseTime,
+			BotSFJ_JumpReleaseConfirmed(bs->sfjJumpReleaseTime, ps->commandTime,
+				ps->pm_flags & PMF_JUMP_HELD));
 	if ((nextPhase == BOT_SFJ_PHASE_TAKEOFF || nextPhase == BOT_SFJ_PHASE_REJUMP) &&
 		nextPhase != bs->sfjPhase)
 	{
+		if (nextPhase == BOT_SFJ_PHASE_REJUMP)
+			bs->sfjStrafeOnly = !bs->sfjStrafeOnly;
 		/* Landing position and route may have changed since the cached check. */
 		if (!BotSFJ_CachedArcIsSafe(bs, ps, bs->sfjIntentDirection,
 				bs->sfjIntentDestination, commandMsec, sliceMsec, time, qtrue))
@@ -4631,13 +4836,10 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	}
 	if (nextPhase != bs->sfjPhase)
 	{
-		if (nextPhase == BOT_SFJ_PHASE_TAKEOFF)
+		if (nextPhase == BOT_SFJ_PHASE_TAKEOFF || nextPhase == BOT_SFJ_PHASE_REJUMP)
 			g_botSfjStats.takeoffs++;
 		bs->sfjPhase = nextPhase;
 		bs->sfjPhaseTime = time;
-		if (nextPhase == BOT_SFJ_PHASE_LANDING)
-			bs->sfjStrafeSide = BotSFJ_SelectSide(vectoyaw(bs->sfjIntentDirection),
-				ps->velocity[0], ps->velocity[1], -bs->sfjStrafeSide);
 	}
 	if (bs->sfjPhase == BOT_SFJ_PHASE_ABORT || bs->sfjPhase == BOT_SFJ_PHASE_OFF)
 	{
@@ -4649,7 +4851,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	commandYaw = BotSFJ_CommandYaw(routeYaw, ps->velocity[0], ps->velocity[1],
 		(float)ps->speed, pm_airaccelerate,
 		(float)sliceMsec / 1000.0f,
-		bs->sfjStrafeSide);
+		bs->sfjStrafeOnly ? -bs->sfjStrafeSide : bs->sfjStrafeSide);
 	if (circleJump)
 	{
 		const float swing = 30.0f * (1.0f - (float)(time - bs->sfjPhaseTime) / 120.0f);
@@ -4657,12 +4859,16 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			(bs->sfjStrafeSide < 0 ? -swing : swing));
 	}
 	candidate = *bi;
-	candidate.viewangles[YAW] = commandYaw;
+	BotSFJ_HalfBeatAxes(bs->sfjStrafeSide, bs->sfjStrafeOnly,
+		&forwardMove, &rightMove);
+	candidate.viewangles[YAW] = BotSFJ_ViewYawForAxes(commandYaw, forwardMove, rightMove);
 	VectorClear(candidate.dir);
 	candidate.speed = 400.0f;
 	candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
 		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_WALK);
-	candidate.actionflags |= ACTION_MOVEFORWARD;
+	if (forwardMove)
+		candidate.actionflags |= ACTION_MOVEFORWARD;
+	candidate.actionflags |= rightMove < 0 ? ACTION_MOVELEFT : ACTION_MOVERIGHT;
 	if (BotSFJ_JumpPressed(bs->sfjPhase, grounded))
 		candidate.actionflags |= ACTION_JUMP;
 	if (!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
@@ -4671,10 +4877,17 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		BotSFJ_Abort(bs, time);
 		return;
 	}
+	if (grounded && !circleJump && !BotSFJ_JumpPressed(bs->sfjPhase, grounded) &&
+		!BotSFJ_GroundWishIsSafe(bs, ps, commandYaw, commandMsec))
+	{
+		/* A release/preparation command is walking, not the accepted jump arc. */
+		candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVELEFT | ACTION_MOVERIGHT);
+		candidate.speed = 0.0f;
+	}
 	*bi = candidate;
 	bs->sfjOwnsInput = qtrue;
-	bs->viewangles[YAW] = commandYaw;
-	bs->ideal_viewangles[YAW] = commandYaw;
+	bs->viewangles[YAW] = candidate.viewangles[YAW];
+	bs->ideal_viewangles[YAW] = candidate.viewangles[YAW];
 }
 
 //check of the potential enemy is a valid one
@@ -20794,10 +21007,16 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 	{
 		const int endQuad = saberMoveData[ps->saberMove].endQuad;
 		if (NewBotAI_SaberCommittedLearningDecision(1, bs->saberTechniqueCommand.attack,
-			bs->saberDefenseActive) && bs->saberLearnedStimulus != BOTLEARN_TOK_NONE)
-			G_BotLearnDecision(&g_entities[bs->client], bs->currentEnemy,
-				bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
-				bs->saberLearnedPreference);
+			bs->saberDefenseActive))
+		{
+			if (bs->saberLearnedStimulus != BOTLEARN_TOK_NONE)
+				G_BotLearnDecision(&g_entities[bs->client], bs->currentEnemy,
+					bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
+					bs->saberLearnedPreference);
+			G_BotLearnSaberAccepted(&g_entities[bs->client], bs->currentEnemy,
+				NewBotAI_SaberSequenceId((newbotai_saber_family_t)bs->saberTechniqueFamily),
+				bs->saberTacticChainLength, ps->saberMove - LS_A_TL2BR);
+		}
 		bs->saberTacticChainLength++;
 		bs->saberTechniqueActualDir = NewBotAI_SaberHorizontalDirection(ps->saberMove, LS_A_L2R, LS_A_R2L);
 		// Engine-imposed attacks (e.g. parry responses) can differ from our request.
@@ -20824,6 +21043,33 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 	bs->saberTacticLastMove = ps->saberMove;
 	return NewBotAI_SaberYawPhase(basicAttack, preparing,
 		basicAttack && ps->weaponTime <= 0 ? 0 : remaining, bs->saberTechniqueAnimDuration);
+}
+
+static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
+	newbotai_saber_tactic_context_t context, newbotai_saber_family_t family)
+{
+	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
+	int sequence, total = 0, roll;
+	if (!context.fanStance || !NewBotAI_SaberFamilyMaySelectRecipe(family) ||
+		NewBotAI_SaberNeedsSafetyExit(context))
+		return family;
+	for (sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)
+	{
+		weights[sequence] = 0;
+		if (!NewBotAI_SaberSequenceAllowed(context, sequence))
+			continue;
+		weights[sequence] = BotLearn_SaberSequenceWeight(sequence,
+			G_BotLearnSaberBonus(&g_entities[bs->client], bs->currentEnemy, sequence, bs->settings.skill));
+		total += weights[sequence];
+	}
+	roll = Q_irand(1, total);
+	for (sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)
+	{
+		roll -= weights[sequence];
+		if (roll <= 0)
+			return (newbotai_saber_family_t)(NEWBOTAI_SABER_SEQUENCE_FIRST + sequence);
+	}
+	return family;
 }
 
 static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
@@ -20917,7 +21163,8 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 		bs->saberTacticGradeUntil = level.time;
 	}
 	if (!bs->saberDefenseActive && (!bs->saberTechniqueFamilyUntil ||
-		bs->saberTechniqueFamilyUntil != bs->saberTechniqueAcceptedTime))
+		(bs->saberTechniqueFamilyUntil != bs->saberTechniqueAcceptedTime &&
+		NewBotAI_SaberSequenceBoundary(context.chainLength))))
 	{
 		bs->saberLearnedStimulus = context.enemyAttacking || context.enemyRecovering ?
 			BOTLEARN_TOK_SWING : BOTLEARN_TOK_IDLE;
@@ -20930,6 +21177,8 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 			bot_fanbias.value > 0.0f ? Com_Clampi(0, 100,
 				(int)BotGetChanceBiasPercent(bot_fanbias.value) + bs->saberLearnedPreference) : 0,
 			Q_irand(1, 100));
+		bs->saberTechniqueFamily = NewBotAI_SelectSaberSequence(bs, context,
+			(newbotai_saber_family_t)bs->saberTechniqueFamily);
 		bs->saberTechniqueFamilyUntil = bs->saberTechniqueAcceptedTime;
 	}
 	tactic = NewBotAI_GetCorrectSaberTactic(context);
@@ -21249,10 +21498,12 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 		ps->groundEntityNum != ENTITYNUM_NONE &&
 		ps->saberMove >= LS_A_TL2BR && ps->saberMove <= LS_A_T2B)
 	{
-		pokeYaw = NewBotAI_SaberPokeCounterYaw(phase,
+		pokeYaw = NewBotAI_SaberContactCounterYaw(phase,
 			NewBotAI_SaberAnimationProgress(ps->torsoTimer, bs->saberTechniqueAnimDuration),
-			actualDirection);
-		NewBotAI_GetSaberActiveWiggle(phase, time - bs->saberTechniqueAcceptedTime,
+			actualDirection, bs->frame_Enemy_Len, bs->settings.skill);
+		NewBotAI_GetSaberAnimationWiggle(phase,
+			NewBotAI_SaberAnimationProgress(ps->torsoTimer, bs->saberTechniqueAnimDuration),
+			ps->saberMove - LS_A_TL2BR, time - bs->saberTechniqueAcceptedTime,
 			Com_Clampi(0, 2000, bot_wobbledelay.integer), bot_wobbleyaw.value,
 			bot_wobblepitch.value, bot_wobblespeed.value, &wiggleYaw, &wigglePitch);
 	}
@@ -24492,6 +24743,8 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 			(bs->currentEnemy && bs->frame_Enemy_Vis) ? qtrue : qfalse))
 		{
 			bs->beStill = level.time + 100;
+			bs->sfjNavPauseUntil = bs->beStill;
+			bs->sfjNavPauseForJump = qfalse;
 			//Prefer the next waypoint along the route over a full re-path, which
 			//tends to pick a point behind the bot and send it walking back.
 			BotNav_AvoidHazardWaypoint(bs);
@@ -24502,6 +24755,8 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		{
 		//	trap->EA_Move(bs->client, bs->origin, 5000);
 			bs->beStill = level.time + 200;
+			bs->sfjNavPauseUntil = bs->beStill;
+			bs->sfjNavPauseForJump = qtrue;
 		}
 		else
 		{

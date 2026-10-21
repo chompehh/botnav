@@ -126,9 +126,9 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafefrequency` | `0` | Percentage chance (0-100) per think tick to enter a random strafe. 0 = disabled. |
 | `bot_strafeduration` | `50` | Duration scale (0-100) for random strafes. 50 = 80-2500ms range. |
 | `bot_strafeOffset` | `0` | Legacy strafe offset. |
-| `bot_strafejumps` | `1` | Enables forward-only strafe jumping (optimal-yaw air acceleration with a circle-jump start and bhop chaining) on validated, open corridors for navigation, chase and escape. Corridors look ahead up to ~1024 units along linked waypoints, or straight toward/away from the enemy when chasing/escaping directly. In CTF, carrying a flag counts as escape and chasing an enemy flag carrier counts as chase. |
+| `bot_strafejumps` | `1` | Enables optimal-yaw strafe jumping with circle-jump starts, landing chains, and alternating diagonal/opposite-strafe-only half-beat input. Validated waypoint lookahead allows gentle curves; direct enemy corridors remain straight. In CTF, carrying a flag counts as escape and chasing an enemy flag carrier counts as chase. |
 | `bot_strafejumpfrequency` | `100` | Initiation frequency scale, clamped to 1–1000 when enabled: `100` waits 1000 ms before starting a new eligible sequence, `200` waits 500 ms, `50` waits 2000 ms. `0` or negative disables strafe jumping. No per-frame random rolls; established safe chains are not delayed. |
-| `bot_strafejumpwaypoints` | `128` | Strafe corridor waypoint budget, clamped to 1–512, independent of ordinary `bot_waypointskip`. Dense trails need enough points to reach the minimum corridor length; look-ahead remains distance-bounded to about 1024 units and stops at required interactions, destinations, disconnected links, bends or height changes. |
+| `bot_strafejumpwaypoints` | `128` | Strafe corridor waypoint budget, clamped to 1–512, independent of ordinary `bot_waypointskip`. Dense trails need enough points to reach the minimum corridor length; look-ahead remains distance-bounded to about 1024 units and stops at required interactions, destinations, disconnected links, excessive bends or height changes. |
 | `bot_strafe_minledge` | `200` | Maximum permitted downward route/landing/navigation height change, units, clamped 0–200. Modest drops may continue a chain only with a validated static walkable landing; hazards and excessive descent speed remain forbidden. Ordinary navigation requires a safe floor; a fresh validated jump may cross a gap. |
 | `bot_strafe_wallmargin` | `32` | Endpoint setback from walls for direct enemy corridors, units, clamped 0–128. Lower values allow closer approaches without shrinking the collision hull or disabling wall-slide prediction. |
 | `bot_strafe_tolerance` | `80` | Horizontal waypoint/recorded-node acceptance and landing-corridor tolerance, units, clamped 16–256. Nodes mark progress rather than requiring exact touchdown; grounded height and lateral checks prevent unrelated nodes being skipped. |
@@ -141,9 +141,38 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_waypointskip` | `2` | Maximum extra same-direction waypoints to skip after reaching a waypoint without a visible-enemy combat lock. Supports explicit neighbor links and implicit consecutive links on linear trails. Requires near-straight, level links and a clear, grounded hull path with safe floor; flagged waypoints and destinations are retained. |
 | `bot_redirectcooldown` | `800` | Cooldown (ms) after a wall-triggered redirect reaction. During this window the bot keeps the chosen redirect heading instead of immediately rerolling another wall reaction, reducing tight-space spin loops and repeated reaction hopping. |
 
-`bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released and each landing gets a release command before a fresh press.
+`bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
 
-Arc validation performs bounded swept player-hull integration (coarse 50 ms steps after the jump command) until a real static, walkable contact; unresolved falls are rejected rather than vertically probing for a floor. Ceilings, dynamic blockers, lava, slime, no-drop/void areas, and instant-kill `trigger_hurt` volumes along the full arc reject the intent. Landing-corridor slack uses `bot_strafe_tolerance` instead of requiring exact waypoint landings. To keep the cost down, the full arc is simulated at most once per 100 ms per bot while deciding, and once per takeoff/rejump; while airborne a single hull trace along the predicted velocity watches for liquid or kill volumes and cleanly releases control if one comes up. Instant-kill triggers are cached per map instead of being queried with an area search for every sample. Selection and final command ownership both require the AI's own queued movement to be aligned with the corridor.
+Arc validation performs bounded swept player-hull integration at the command's pmove slice size until a real static, walkable contact; unresolved falls are rejected rather than vertically probing for a floor. Ceilings, dynamic blockers, lava, slime, no-drop/void areas, and instant-kill `trigger_hurt` volumes along the full arc reject the intent. Landing-corridor slack uses `bot_strafe_tolerance` instead of requiring exact waypoint landings. Cached checks are reused only for matching route/input choices; every takeoff/rejump is refreshed, and meaningful airborne heading changes require revalidation. Instant-kill triggers are cached per map instead of being queried with an area search for every sample. Selection and final command ownership both require the AI's own queued movement to be aligned with the corridor.
+
+The lookahead permits local turns up to 45 degrees and a total departure up to
+60 degrees from the first segment, not arbitrary hairpins. Both starting sides
+can be tested for clearance. Compensated view yaw makes diagonal and strafe-only
+commands produce the world wish direction used by prediction. Required route
+endpoints and lethal terrain remain barriers. Holding-position diagnostics
+separate `beStill`, waiting, and camping; these are not blanket-disabled.
+
+The checked-in human input sample has 20,664 frames, including 18,233 airborne
+frames and 14,294 airborne frames with released jump input. Reproduce with:
+
+```python
+import csv
+with open("/absolute/path/to/botnav/strafetrack_inputs.csv", newline="") as source:
+    frames = list(csv.DictReader(source))
+air = [r for r in frames if r["grounded"] == "0"]
+print(len(frames), len(air), sum(int(r["upmove"]) < 10 for r in air))
+```
+
+The same query on the release attachment `strafetrack_inputs.1.csv` returns
+52,986 frames, 43,198 airborne, and 34,086 airborne releases. These are overlapping
+snapshots, not additive sample counts.
+
+This supports releasing jump during flight rather than always spending a
+grounded command on release. It does not by itself show why a particular bot
+aborted. Compare `strafeJumpStats reset` / `strafeJumpStats` and fresh recordings
+on both open and curved routes; confirm multiple takeoffs per uninterrupted
+sequence, retained speed, and safe handoff at required endpoints. Repeat near
+walls, lethal volumes, low ceilings, moving blockers, and required interactions.
 
 Walls: the takeoff arc uses the real 15-unit player hull and removes speed into
 walls while continuing bounded wall-slide simulation (up to 64 contact slices).
@@ -155,6 +184,16 @@ and `trigger_hurt`/kill checks are unchanged.
 Initiation ignores queued navigation jump/delayed-jump/walk requests (the controller supplies its own jump timing once it owns input).
 
 `strafeJumpStats [reset]` (server console) prints how often bots started, took off, followed recorded routes, aborted and were released by a wall/slow-down, plus the most frequent rejection reasons since the last reset. Rejection reasons are only tallied after the command has been run once (or while `bot_strafejumps_debug` is on), so run `strafeJumpStats reset`, play, then `strafeJumpStats` to compare wall rejections before and after tuning.
+
+Movement references: [OpenJK](https://github.com/JACoders/OpenJK) maintains the
+Jedi Academy engine, derived from the Quake III/id Tech 3 family.
+[Injx's strafing theory](https://github.com/5xp/strafe-theory/blob/master/strafing-theory.md)
+explains why half-beat's diagonal input followed by the opposite strafe-only
+input can produce the same acceleration vectors as ordinary alternating strafes,
+with different view angles. It is not a special acceleration boost or a rule to
+hold one strafe key for two jumps. Use this repository's `PM_GetMovePhysics`,
+`PM_AirMove`, `PM_CheckJump`, and command slicing as the authority for JKA
+prediction; do not import CPMA/race constants into ordinary combat movement.
 
 Dense waypoint trails use `bot_strafejumpwaypoints`, not a large ordinary skip setting. During a committed strafe sequence, already-passed, unflagged waypoints may advance within the validated linked corridor so navigation does not aim backward at them. Advancement remains bounded, stops at required interactions/destinations and visible-enemy combat locks, and rechecks collision/hazards at the bot's actual flight height. It does not demand a walking floor immediately under an airborne bot or blindly advance to the hundredth point. Budget exhaustion and rejected advances appear in strafe diagnostics.
 
@@ -298,6 +337,104 @@ Tracked duel data access:
 
 - `python3 scripts/dueltrack_report.py [csv_dir] [--revision REV]` (needs `pip install duckdb`) prints the tuning figures (swing-start footing, chains per swing, roll-stab use, learned sequences per mode) together with the SQL that produced each one. It handles the latin-1 bytes, the differing column sets of the parts, and duplicate rows. Use `--revision` to measure one build's capture.
 
+### Comparing repository and release captures
+
+Keep the [Dueltracks1 release attachments](https://github.com/chompehh/botnav/releases/tag/Dueltracks)
+outside the checkout, in a separate batch directory. These attachments are not a ZIP
+of the repository. Do not concatenate their aggregate or learned snapshots with
+the checked-in snapshots and sum the results.
+
+The initial metadata comparison found 647 repository session rows versus 212
+release session rows, and 92 repository strafe routes versus 234 release routes.
+All 92 repository route rows occur unchanged in the release. Session IDs are not
+globally unique: 179 `(source_context, record_id)` keys overlap, but no
+`(source_context, start_time, end_time, mapname)` keys overlap. Therefore joins on
+`parent_id`/`record_id` must also include the source batch; matching an ID alone
+does not establish that two exports describe the same duel.
+
+Reproduce those metadata checks with Python's CSV parser (not physical line
+counts, since CSV fields can contain newlines):
+
+```python
+import csv
+import io
+from pathlib import Path
+
+def rows(path):
+    data = Path(path).read_bytes()
+    try:
+        text = data.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        text = data.decode("latin-1")
+    return list(csv.DictReader(io.StringIO(text, newline="")))
+
+# Set repository and release to their separate absolute directory paths.
+a = rows(repository / "dueltrack_sessions.csv")
+b = rows(release / "dueltrack_sessions.1.csv")
+print("sessions:", len(a), len(b))
+for fields in [("source_context", "record_id"),
+               ("source_context", "start_time", "end_time", "mapname")]:
+    keys = lambda records: {tuple(r[k] for k in fields) for r in records}
+    print(fields, len(keys(a) & keys(b)))
+a = rows(repository / "strafetrack_routes.csv")
+b = rows(release / "strafetrack_routes.1.csv")
+keys = lambda records: {tuple(sorted(r.items())) for r in records}
+print("routes:", len(a), len(b), "exact overlap:", len(keys(a) & keys(b)))
+```
+
+These counts describe file scope, not proof of improved combat or bot chain
+completion. Strafe routes record humans only. A human multi-hop route proves that
+the route was demonstrated, not that the bot reproduced it.
+
+The extended report uses only Python's standard library in evidence mode:
+
+```sh
+python3 /absolute/path/to/botnav/scripts/dueltrack_report.py \
+  /absolute/path/to/botnav --saber-evidence --release-dir /absolute/path/to/release
+```
+
+It prints the source-file manifests and the exact SQL alongside each result.
+For the repository and Dueltracks1 attachments examined here:
+
+| Printed query | Repository | Dueltracks1 |
+|---------------|------------|-------------|
+| Batch duplicate identities and payload variants: raw event rows | 420,962 | 182,343 |
+| Same query: event identities | 338,204 | 182,343 |
+| Human adjacent accepted starts: explicit R2L → L2R links | 1,170 | 519 |
+| Same query: explicit L2R → R2L links | 949 | 412 |
+
+The repository repetitions reflect schema-upgrade exports; the report retains raw
+variants and uses the newest export schema per identity. These are observed
+accepted adjacent links, not independent duel outcomes or proof of a complete
+three-attack technique. The learned-snapshot overlap query finds 13,250 shared
+sequence keys: 13,147 unchanged aggregates and 103 changed aggregates. Summing
+both snapshots would double-count shared learning evidence. Use the printed
+provenance and animation-coverage queries before trying to reconstruct swing
+phase or comparing capture revisions.
+
+The accepted-triple query also finds staff R2L → L2R → R2L windows with both
+continuations explicitly linked (446 repository / 247 release), and staff
+L2R → R2L → L2R windows (398 / 213). These overlapping windows support the
+alternating recipes' frequency priors; they do not establish player intention,
+independent trials, causality, or superior damage per second. The inventory
+checks internal part gaps, not trailing completeness: only an exporter manifest
+could establish that no final part was omitted.
+
+### Profile menu deployment
+
+The Profile item in `ui/jamp/ingame.menu` is hidden only for Siege (`7`), where
+Objectives occupies its slot. Arcade (`10`), Jedi-v-Merc (`11`), and JOM (`12`)
+should retain Profile. The UI now refreshes `ui_about_gametype` directly from
+`CS_SERVERINFO` whenever current server information is refreshed, including before
+opening the in-game menu, rather than relying solely on a previous cgame update.
+Unavailable server information leaves the existing value unchanged.
+
+Deploy the matching client UI module and CMake's `japro-assets.pk3`, not only the
+server game module. Check for older PK3s overriding `ui/jamp/ingame.menu`. A
+server-only update cannot replace menus on an independently installed Android
+client. The refresh guards against stale state; it does not prove that stale
+state, rather than an overriding client asset, caused a particular screenshot.
+
 Saber combat verification:
 - Enable `g_newBotAI 1` to exercise the shared technique controller; the legacy StandardBotAI fallback is unchanged.
 - Validate saber-only duels separately from full-force and arcade matches. Human techniques guide contextual attack and escape choices, not blind replay of recorded commands.
@@ -315,6 +452,53 @@ Saber combat verification:
 - Use matched stance, skill, map, opponent and duel mode for baseline comparisons. Record first-hit timing, damage per accepted swing, recovery damage, safe re-entry and throw hit rate; do not combine duplicate damage summaries or treat aggregate sequence samples as independent duels.
 
 Technique evidence and limitations:
+- The technique catalog adds twelve three-attack recipes without changing persisted
+  action-token IDs. Family diagnostics `6` through `17` identify recipe IDs `0`
+  through `11`; original family IDs `0` through `5` keep their meaning. The first
+  two recipes use the observed alternating-horizontal pattern, not a claim of
+  demonstrated complete three-hit combos:
+
+  | Recipe | Requested accepted-move sequence | Evidence status |
+  |--------|----------------------------------|-----------------|
+  | 0 | R2L → L2R → R2L | Alternating-horizontal prior |
+  | 1 | L2R → R2L → L2R | Alternating-horizontal prior |
+  | 2 | R2L → L2R → T2B | Experimental |
+  | 3 | L2R → R2L → T2B | Experimental |
+  | 4 | TL2BR → R2L → L2R | Experimental |
+  | 5 | TR2BL → L2R → R2L | Experimental |
+  | 6 | R2L → TL2BR → T2B | Experimental |
+  | 7 | L2R → TR2BL → T2B | Experimental |
+  | 8 | T2B → R2L → L2R | Experimental |
+  | 9 | T2B → L2R → R2L | Experimental |
+  | 10 | TL2BR → T2B → R2L | Experimental |
+  | 11 | TR2BL → T2B → L2R | Experimental |
+
+  These are ordinary attack selections, not forced engine transitions. Only
+  accepted matching moves advance a recipe's execution evidence. Mixed recipes
+  have low priors and require an exposed/recovering opponent without immediate
+  attack/recent-hurt pressure. Catalog selection is limited to yellow/staff fan
+  stances and preserves dedicated counter-entry, finishing, and burst families.
+  Recipes cannot override defense recovery or movement
+  safety. No telemetry result establishes that all ten experimental recipes
+  improve DPS; use matched live comparisons before increasing their weights.
+- Recipe execution evidence is a separate map-local cache keyed by exact recipe,
+  full safety context, and both stances. Completed matching sequences receive a
+  bounded observational outcome window; interrupted or engine-changed attempts
+  are discarded rather than scored as successful executions. The existing
+  persisted action-token aggregates remain unchanged. Recipe learning does not
+  reconstruct fine-grained human motor templates from the coarse `swing` token,
+  and its outcome association is not proof that the recipe caused the damage.
+  Ordinary between-duel token-cache refreshes retain recipe evidence; map
+  initialization and a successful `resetlearningtrack` clear it. Because this
+  cache observes controlled bots, `bot_learninghumansonly 1` excludes its
+  observations and bonuses. Outcomes use attributed damage within the observed
+  pair; environmental, self, or third-party damage invalidates the sample,
+  while healing supplies no reward.
+- Active wiggle now fades at animation boundaries and its configured delay;
+  amplitude remains bounded and depends on the accepted attack axis. Contact
+  counter-yaw is range- and skill-scaled independently of wiggle. Neither net
+  signed yaw sweep nor a large aim offset proves blade isolation or extra hit
+  detection. These remain conservative control curves requiring live validation.
 - Sugar Kane's saber-only duel 162 includes L2R at 25.377s, R2L at 25.707s, another L2R at 26.763s, and a recorded 40-damage finishing punish at 26.994s. This supports alternating horizontal pressure and finishing continuation, not a universal instruction to hold attack forever.
 - BK's full-force duel 563 includes R2L/L2R/R2L at 10.300s/10.600s/10.900s, two recorded 40-damage successes, then 40 damage taken at 10.950s. Use this as a burst-and-counter-risk example, not a saber-only training outcome. His backward/lateral rising movement in duel 565 at 8.300s supports the escape shape, not unconditional jumping or a guaranteed successful exit.
 - Duel 625 (capture version 7, revision `509427374`) confirms accepted bot attacks but records 10 vertical, 8 diagonal and only 1 horizontal swing in the retained prefix. The human used staff while the bot used red stance; their attack timing is not directly interchangeable.

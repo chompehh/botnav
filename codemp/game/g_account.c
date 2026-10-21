@@ -11180,6 +11180,7 @@ void Svcmd_ResetLearningTrack_f(void)
 	result = G_ResetTrackingTables(db, 1, &rows);
 	if (result == SQLITE_OK)
 	{
+		G_BotLearnSaberReset();
 		G_BotLearnLoadCache(db);
 		g_learningCacheDirty = qfalse;
 		g_learningCacheNextRefresh = 0;

@@ -645,6 +645,12 @@ void UI_UpdateCurrentServerInfo(void) { //parses server info to contextually hid
 	info[0] = '\0';
 	trap->GetConfigString(CS_SERVERINFO, info, sizeof(info));
 
+	// UI and cgame can be deployed independently; do not use a stale menu gametype.
+	value = Info_ValueForKey(info, "g_gametype");
+	if (value[0]) {
+		trap->Cvar_Set("ui_about_gametype", va("%i", atoi(value)));
+	}
+
 	value = Info_ValueForKey(info, "gamename");
 	if (!Q_stricmpn(value, "JA+ Mod", 7) || !Q_stricmpn(value, "^4U^3A^5Galaxy", 14) || !Q_stricmpn(value, "AbyssMod", 8))
 	{

@@ -554,6 +554,8 @@ typedef struct bot_state_s
 	vec3_t				sfjIntentDirection;
 	vec3_t				sfjIntentDestination;
 	vec3_t				sfjCorridorStart;
+	vec3_t				sfjCorridorPoints[BOT_SFJ_MAX_CORRIDOR_POINTS];
+	int					sfjCorridorPointCount;
 	int					sfjCorridorFirst;
 	int					sfjCorridorLast;
 	int					sfjCorridorStep;
@@ -566,6 +568,10 @@ typedef struct bot_state_s
 	int					sfjNextStartTime;
 	int					sfjStartFrequency;
 	int					sfjStrafeSide;
+	qboolean			sfjStrafeOnly;
+	int					sfjJumpReleaseTime;
+	int					sfjNavPauseUntil;
+	qboolean			sfjNavPauseForJump;
 	qboolean			sfjOwnsInput;
 	qboolean			sfjLastRandomUse;
 	qboolean			sfjPursuitLatched;
@@ -574,6 +580,10 @@ typedef struct bot_state_s
 	int					sfjLastEnemyTargetNum;
 	int					sfjArcCheckedTime;
 	qboolean			sfjArcSafe;
+	vec3_t				sfjArcDirection;
+	vec3_t				sfjArcDestination;
+	int					sfjArcSide;
+	qboolean			sfjArcStrafeOnly;
 	int					sfjDebugNextTime;
 	float				sfjPeakSpeed;		// fastest horizontal speed this strafe (BotSFJ_SlowedOut)
 	int					sfjSlowedSince;		// level.time speed first fell below ground speed (wall-scrape grace)

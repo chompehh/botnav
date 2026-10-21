@@ -25,6 +25,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "b_local.h"
 #include "g_duel_capture.h"
+#include "g_bot_learning.h"
 #include "bg_saga.h"
 
 extern int G_ShipSurfaceForSurfName( const char *surfaceName );
@@ -6177,8 +6178,12 @@ void G_Damage( gentity_t *targ, gentity_t *inflictor, gentity_t *attacker, vec3_
 
 	// do the damage
 	if (!take && asave > 0)
+	{
+		G_BotLearnSaberDamage(targ, attacker,
+			G_DuelCaptureDamageAmount(targ->health, targ->health, asave));
 		G_TrackedDuelRecordDamage(targ, attacker,
 			G_DuelCaptureDamageAmount(targ->health, targ->health, asave), mod);
+	}
 	if (take)
 	{
 		if (targ->client && targ->s.number < MAX_CLIENTS &&
@@ -6235,6 +6240,8 @@ void G_Damage( gentity_t *targ, gentity_t *inflictor, gentity_t *attacker, vec3_
 			}
 		}
 
+		G_BotLearnSaberDamage(targ, attacker,
+			G_DuelCaptureDamageAmount(trackedHealth, targ->health, asave));
 		G_TrackedDuelRecordDamage(targ, attacker,
 			G_DuelCaptureDamageAmount(trackedHealth, targ->health, asave), mod);
 
