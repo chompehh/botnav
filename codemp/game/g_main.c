@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 
 #include "g_local.h"
+#include "g_bot_learning.h"
 #include "g_ICARUScb.h"
 #include "g_nav.h"
 #include "bg_saga.h"
@@ -1852,6 +1853,7 @@ void G_InitGame( int levelTime, int randomSeed, int restart ) {
 	memset( &level, 0, sizeof( level ) );
 	level.time = levelTime;
 	level.startTime = levelTime;
+	G_BotLearnSaberReset();
 
 #if _retardedsabertest
 	level.saberUpdateDebounceTime = levelTime; //JAPRO, stop this from started at 0 i guess though just incase

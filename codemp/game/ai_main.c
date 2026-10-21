@@ -21049,7 +21049,9 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 {
 	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
 	int sequence, total = 0, roll;
-	if (family == NEWBOTAI_SABER_BASIC || family == NEWBOTAI_SABER_BURST ||
+	if (!context.fanStance || family == NEWBOTAI_SABER_BASIC ||
+		family == NEWBOTAI_SABER_BURST || family == NEWBOTAI_SABER_COUNTER_ENTRY ||
+		family == NEWBOTAI_SABER_FINISH ||
 		NewBotAI_SaberNeedsSafetyExit(context))
 		return family;
 	for (sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)

@@ -85,17 +85,25 @@ static botlearn_observer_t g_botLearnObservers[MAX_CLIENTS];
 typedef struct
 {
 	int used, contextKey, sequence, stance, enemyStance;
-	float samples, netDamage;
+	botlearn_saber_stats_t stats;
 } botlearn_saber_entry_t;
 
 typedef struct
 {
 	int active, complete, sequence, stage, enemyNum, contextKey;
-	int startedAt, outcomeAt, selfHealth, enemyHealth, selfSpawn, enemySpawn, stance, enemyStance;
+	int startedAt, outcomeAt, netDamage, selfSpawn, enemySpawn, stance, enemyStance;
 } botlearn_saber_attempt_t;
 
 static botlearn_saber_entry_t g_botLearnSaberCache[BOTLEARN_SABER_CACHE_SIZE];
 static botlearn_saber_attempt_t g_botLearnSaberAttempts[MAX_CLIENTS];
+
+void G_BotLearnSaberReset(void)
+{
+	/* Map lifecycle reset only. Reloading persistent action preferences between
+	 * duels must not erase the map-local technique evidence or pending outcomes. */
+	memset(g_botLearnSaberCache, 0, sizeof(g_botLearnSaberCache));
+	memset(g_botLearnSaberAttempts, 0, sizeof(g_botLearnSaberAttempts));
+}
 
 static botlearn_saber_entry_t *G_BotLearnSaberFind(int contextKey, int sequence,
 	int stance, int enemyStance, int create)
@@ -128,14 +136,17 @@ static botlearn_saber_entry_t *G_BotLearnSaberFind(int contextKey, int sequence,
 
 static void G_BotLearnSaberOutcome(gentity_t *self)
 {
-	botlearn_saber_attempt_t *attempt = &g_botLearnSaberAttempts[self->s.number];
+	botlearn_saber_attempt_t *attempt;
 	gentity_t *enemy;
 	botlearn_saber_entry_t *entry;
-	int selfHealth, enemyHealth, netDamage;
+	if (!self || !self->client || self->s.number < 0 || self->s.number >= MAX_CLIENTS)
+		return;
+	attempt = &g_botLearnSaberAttempts[self->s.number];
 	if (!attempt->active)
 		return;
 	enemy = &g_entities[attempt->enemyNum];
-	if (!bot_learning.integer || bot_learningstrength.value <= 0.0f ||
+	if (!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+		bot_learninghumansonly.integer) ||
 		!enemy->inuse || !enemy->client ||
 		self->client->sess.sessionTeam == TEAM_SPECTATOR ||
 		enemy->client->sess.sessionTeam == TEAM_SPECTATOR ||
@@ -153,18 +164,12 @@ static void G_BotLearnSaberOutcome(gentity_t *self)
 	}
 	if (!attempt->complete || (level.time < attempt->outcomeAt && self->health > 0 && enemy->health > 0))
 		return;
-	/* Health-pool change is an observational outcome, not proof of causality.
-	 * Never call this a demonstrated combo or count requested/unaccepted inputs. */
-	selfHealth = self->health > 0 ? self->health + self->client->ps.stats[STAT_ARMOR] : 0;
-	enemyHealth = enemy->health > 0 ? enemy->health + enemy->client->ps.stats[STAT_ARMOR] : 0;
-	netDamage = (attempt->enemyHealth - enemyHealth) - (attempt->selfHealth - selfHealth);
+	/* Attributed damage over the recipe/outcome window is observational, not
+	 * proof that the recipe itself caused every hit. Healing adds no reward. */
 	entry = G_BotLearnSaberFind(attempt->contextKey, attempt->sequence,
 		attempt->stance, attempt->enemyStance, 1);
 	if (entry)
-	{
-		entry->samples += BOTLEARN_BOT_SAMPLE_WEIGHT;
-		entry->netDamage += Com_Clampi(-100, 100, netDamage) * BOTLEARN_BOT_SAMPLE_WEIGHT;
-	}
+		BotLearn_SaberAccumulate(&entry->stats, attempt->netDamage);
 	attempt->active = 0;
 }
 
@@ -173,12 +178,13 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 {
 	botlearn_saber_attempt_t *attempt;
 	int contextKey, nextStage;
-	if (!self || !self->client || !enemy || !enemy->client ||
+	if (!self || !self->client || !(self->r.svFlags & SVF_BOT) || !enemy || !enemy->client ||
 		self->s.number < 0 || self->s.number >= MAX_CLIENTS ||
 		enemy->s.number < 0 || enemy->s.number >= MAX_CLIENTS)
 		return;
 	attempt = &g_botLearnSaberAttempts[self->s.number];
-	if (!bot_learning.integer || bot_learningstrength.value <= 0.0f)
+	if (!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+		bot_learninghumansonly.integer))
 	{
 		attempt->active = 0;
 		return;
@@ -204,8 +210,6 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 		attempt->enemyNum = enemy->s.number;
 		attempt->contextKey = contextKey;
 		attempt->startedAt = level.time;
-		attempt->selfHealth = self->health + self->client->ps.stats[STAT_ARMOR];
-		attempt->enemyHealth = enemy->health + enemy->client->ps.stats[STAT_ARMOR];
 		attempt->selfSpawn = self->client->ps.persistant[PERS_SPAWN_COUNT];
 		attempt->enemySpawn = enemy->client->ps.persistant[PERS_SPAWN_COUNT];
 		attempt->stance = self->client->ps.fd.saberAnimLevel;
@@ -225,6 +229,33 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 	{
 		attempt->complete = 1;
 		attempt->outcomeAt = level.time + BOTLEARN_OUTCOME_WINDOW_MS;
+	}
+}
+
+void G_BotLearnSaberDamage(gentity_t *target, gentity_t *attacker, int damage)
+{
+	int i, result;
+	if (!target || !target->client || target->s.number < 0 || target->s.number >= MAX_CLIENTS ||
+		!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+			bot_learninghumansonly.integer))
+		return;
+	for (i = 0; i < MAX_CLIENTS; i++)
+	{
+		botlearn_saber_attempt_t *attempt = &g_botLearnSaberAttempts[i];
+		if (!attempt->active)
+			continue;
+		if (attempt->complete && level.time > attempt->outcomeAt)
+		{
+			G_BotLearnSaberOutcome(&g_entities[i]);
+			continue;
+		}
+		result = BotLearn_SaberAttributedDamage(i, attempt->enemyNum, target->s.number,
+			attacker && attacker->client ? attacker->s.number : ENTITYNUM_WORLD,
+			damage, &attempt->netDamage);
+		if (result < 0)
+			attempt->active = 0;
+		else if (result > 0 && target->health <= 0 && attempt->complete)
+			G_BotLearnSaberOutcome(&g_entities[i]);
 	}
 }
 
@@ -417,8 +448,6 @@ void G_BotLearnCacheClear(void)
 {
 	memset(g_botLearnCache, 0, sizeof(g_botLearnCache));
 	g_botLearnCacheCount = 0;
-	memset(g_botLearnSaberCache, 0, sizeof(g_botLearnSaberCache));
-	memset(g_botLearnSaberAttempts, 0, sizeof(g_botLearnSaberAttempts));
 }
 
 int G_BotLearnCacheCount(void)
@@ -468,7 +497,9 @@ int G_BotLearnSaberBonus(gentity_t *self, gentity_t *enemy, int sequence, float 
 {
 	const botlearn_saber_entry_t *entry;
 	int contextKey;
-	if (!bot_learning.integer || bot_learningstrength.value <= 0.0f ||
+	if (!self || !self->client || !enemy || !enemy->client ||
+		!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+			bot_learninghumansonly.integer) ||
 		sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT)
 		return 0;
 	contextKey = G_BotLearnLiveContextKey(self, enemy);
@@ -480,8 +511,8 @@ int G_BotLearnSaberBonus(gentity_t *self, gentity_t *enemy, int sequence, float 
 		return 0;
 	/* Exact technique+context only: generic swing outcomes never fabricate
 	 * technique evidence, and defense/mode/footing are not pooled away. */
-	return BotLearn_WeightBonus(BotLearn_ScoreRelative(entry->samples, 0.0f, entry->netDamage),
-		entry->samples, G_BotLearnMinSamples(), bot_learningstrength.value, skill);
+	return BotLearn_WeightBonus(BotLearn_ScoreRelative(entry->stats.samples, 0.0f, entry->stats.netDamage),
+		entry->stats.samples, G_BotLearnMinSamples(), bot_learningstrength.value, skill);
 }
 
 int G_BotLearnFooting(gentity_t *self, gentity_t *enemy)

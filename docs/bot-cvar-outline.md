@@ -476,7 +476,9 @@ Technique evidence and limitations:
   These are ordinary attack selections, not forced engine transitions. Only
   accepted matching moves advance a recipe's execution evidence. Mixed recipes
   have low priors and require an exposed/recovering opponent without immediate
-  attack/recent-hurt pressure. They cannot override defense recovery or movement
+  attack/recent-hurt pressure. Catalog selection is limited to yellow/staff fan
+  stances and preserves dedicated counter-entry, finishing, and burst families.
+  Recipes cannot override defense recovery or movement
   safety. No telemetry result establishes that all ten experimental recipes
   improve DPS; use matched live comparisons before increasing their weights.
 - Recipe execution evidence is a separate map-local cache keyed by exact recipe,
@@ -486,6 +488,12 @@ Technique evidence and limitations:
   persisted action-token aggregates remain unchanged. Recipe learning does not
   reconstruct fine-grained human motor templates from the coarse `swing` token,
   and its outcome association is not proof that the recipe caused the damage.
+  Ordinary between-duel token-cache refreshes retain recipe evidence; map
+  initialization and a successful `resetlearningtrack` clear it. Because this
+  cache observes controlled bots, `bot_learninghumansonly 1` excludes its
+  observations and bonuses. Outcomes use attributed damage within the observed
+  pair; environmental, self, or third-party damage invalidates the sample,
+  while healing supplies no reward.
 - Active wiggle now fades at animation boundaries and its configured delay;
   amplitude remains bounded and depends on the accepted attack axis. Contact
   counter-yaw is range- and skill-scaled independently of wiggle. Neither net

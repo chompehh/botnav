@@ -523,6 +523,12 @@ typedef enum
 	NEWBOTAI_SABER_SEQUENCE_LAST = NEWBOTAI_SABER_SEQUENCE_FIRST + BOTLEARN_SABER_SEQUENCE_COUNT - 1
 } newbotai_saber_family_t;
 
+static inline int NewBotAI_SaberFamilyMaySelectRecipe(newbotai_saber_family_t family)
+{
+	/* Finish/counter/burst retain their dedicated context and exit behavior. */
+	return family == NEWBOTAI_SABER_HORIZONTAL || family == NEWBOTAI_SABER_DIAGONAL_VERTICAL;
+}
+
 static inline int NewBotAI_SaberSequenceId(newbotai_saber_family_t family)
 {
 	return family >= NEWBOTAI_SABER_SEQUENCE_FIRST && family <= NEWBOTAI_SABER_SEQUENCE_LAST ?

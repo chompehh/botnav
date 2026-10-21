@@ -121,6 +121,50 @@ static inline int BotLearn_SaberSequenceAdvance(int sequence, int expectedStage,
 	return expectedStage + 1;
 }
 
+static inline int BotLearn_SaberTechniqueEnabled(int learning, float strength, int humansOnly)
+{
+	/* This map-local cache observes controlled bot recipes, not human recipes. */
+	return learning && strength > 0.0f && !humansOnly;
+}
+
+typedef struct
+{
+	float samples, netDamage;
+} botlearn_saber_stats_t;
+
+static inline void BotLearn_SaberAccumulate(botlearn_saber_stats_t *stats, int netDamage)
+{
+	if (netDamage > 100) netDamage = 100;
+	if (netDamage < -100) netDamage = -100;
+	stats->samples += BOTLEARN_BOT_SAMPLE_WEIGHT;
+	stats->netDamage += netDamage * BOTLEARN_BOT_SAMPLE_WEIGHT;
+}
+
+/* Return -1 for damage from outside the observed pair, 1 for attributed pair
+ * damage, 0 for an unrelated target. Environmental/self/third-party damage
+ * invalidates the sample instead of being credited to a saber recipe. */
+static inline int BotLearn_SaberAttributedDamage(int selfNum, int enemyNum,
+	int targetNum, int attackerNum, int damage, int *netDamage)
+{
+	if (damage <= 0)
+		return 0;
+	if (targetNum == selfNum)
+	{
+		if (attackerNum != enemyNum)
+			return -1;
+		*netDamage -= damage;
+		return 1;
+	}
+	if (targetNum == enemyNum)
+	{
+		if (attackerNum != selfNum)
+			return -1;
+		*netDamage += damage;
+		return 1;
+	}
+	return 0;
+}
+
 typedef enum {
 	BOTLEARN_FOOTING_STILL = 0,
 	BOTLEARN_FOOTING_ADVANCE,
@@ -721,8 +765,10 @@ static inline int BotLearn_BaselineBonus(int contextKey, int stimulus, int respo
 
 /* Map-local technique outcomes augment, but do not change, persisted coarse tokens. */
 struct gentity_s;
+void G_BotLearnSaberReset(void);
 void G_BotLearnSaberAccepted(struct gentity_s *self, struct gentity_s *enemy,
 	int sequence, int stage, int attackIndex);
+void G_BotLearnSaberDamage(struct gentity_s *target, struct gentity_s *attacker, int damage);
 int G_BotLearnSaberBonus(struct gentity_s *self, struct gentity_s *enemy,
 	int sequence, float skill);
 
