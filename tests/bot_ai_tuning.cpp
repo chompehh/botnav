@@ -2652,4 +2652,18 @@ BOOST_AUTO_TEST_CASE( required_curve_endpoint_uses_terminal_plane_without_slack 
 	BOOST_CHECK( !BotSFJ_EndpointPlaneAllows( 100, 0, 100, 0, 100, 0, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( curved_endpoint_counterexample_cannot_escape_terminal_segment )
+{
+	const float points[3][3] = {{0, 0, 0}, {200, 0, 0}, {300, 100, 0}};
+	BOOST_CHECK( BotSFJ_EndpointAllows( 0, 0, 300, 100, 225, 375, 96 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 3, 225, 375, 96 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 3, 225, 375, 0 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 3, 301, 100, 0 ) );
+	BOOST_CHECK( BotSFJ_PolylineEndpointAllows( points, 3, 250, 50, 0 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 1, 250, 50, 0 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, BOT_SFJ_MAX_CORRIDOR_POINTS + 1, 250, 50, 0 ) );
+	BOOST_CHECK( BotSFJ_EndpointAllows( 0, 0, 300, 100, 225, 250, 0 ) );
+	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 3, 225, 250, 0 ) );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

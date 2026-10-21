@@ -11,8 +11,8 @@ Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 - Some export parts contain latin-1 bytes; files are re-encoded to UTF-8 first.
 - Event and geometry parts have different column sets; they are unioned by name
   and read as text, so numbers are cast explicitly.
-- The general report removes exact duplicate rows. Saber evidence preserves raw
-  files/batches and selects the newest export schema per event identity.
+- The general report removes exact duplicate rows. Saber evidence scopes dedup
+  to source batches, preserves variants and excludes unresolved identity conflicts.
 - participant_kind: 0 bot, 1 account human, 2 guest human.
 - range_bucket 1 = under 128 units. self_footing: 0 still, 1 advance, 2 retreat, 3 lateral.
 - dueltrack_learned rows are only current-format when (ctx_key & 0x60000000) = 0x60000000;
@@ -20,6 +20,7 @@ Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 """
 
 import argparse
+import codecs
 import csv
 import glob
 import hashlib
@@ -31,15 +32,39 @@ import sys
 import tempfile
 
 
+def csv_provenance(path):
+	"""Hash original bytes while validating UTF-8 across chunk boundaries."""
+	digest = hashlib.sha256()
+	decoder = codecs.getincrementaldecoder("utf-8")()
+	valid_utf8 = True
+	with open(path, "rb") as src:
+		for chunk in iter(lambda: src.read(1024 * 1024), b""):
+			digest.update(chunk)
+			if valid_utf8:
+				try:
+					decoder.decode(chunk)
+				except UnicodeDecodeError:
+					valid_utf8 = False
+	if valid_utf8:
+		try:
+			decoder.decode(b"", final=True)
+		except UnicodeDecodeError:
+			valid_utf8 = False
+	return digest.hexdigest(), "utf-8-sig" if valid_utf8 else "latin-1"
+
+
 def print_batch_inventory(batch, directory):
 	"""Detect internal split gaps; absent trailing parts need an exporter manifest."""
 	print(json.dumps({"batch": batch, "provenance":
 		"https://github.com/chompehh/botnav/releases/tag/Dueltracks"
 		if batch == "Dueltracks1" else "repository-local export; not superseded by release"}))
-	for family in ("events", "geometry"):
-		pattern = re.compile(r"dueltrack_" + family + r"(?:_part([0-9]+))?\.csv$")
+	families = ["dueltrack_" + name for name in
+		("events", "geometry", "aggregate", "learned", "learned_evidence", "participants", "sessions")]
+	families += ["strafetrack_" + name for name in ("inputs", "nodes", "routes")]
+	for family in families:
+		pattern = re.compile(re.escape(family) + r"(?:_part([0-9]+))?\.csv$")
 		parts = set()
-		for path in glob.glob(os.path.join(directory, "dueltrack_" + family + "*.csv")):
+		for path in glob.glob(os.path.join(directory, family + "*.csv")):
 			match = pattern.fullmatch(os.path.basename(path))
 			if match:
 				parts.add(int(match.group(1)) if match.group(1) else 1)
@@ -73,11 +98,10 @@ def saber_evidence(batches):
 	for batch, directory in batches:
 		print_batch_inventory(batch, directory)
 		for path in sorted(glob.glob(os.path.join(directory, "dueltrack_events*.csv"))):
-			with open(path, "rb") as src:
-				digest = hashlib.file_digest(src, "sha256").hexdigest()
-			# The exports contain legacy Latin-1 names as well as UTF-8. Identifiers
-			# and measured columns are ASCII; do not use labels as identity keys.
-			with open(path, encoding="latin-1", newline="") as src:
+			digest, encoding = csv_provenance(path)
+			# Preserve valid UTF-8; use Latin-1 only for legacy invalid-UTF-8 files.
+			# Do not use labels as identity keys or print participant/chat content.
+			with open(path, encoding=encoding, newline="") as src:
 				reader = csv.DictReader(src)
 				rows = []
 				n = 0
@@ -88,7 +112,8 @@ def saber_evidence(batches):
 					core = ["participant_key", "opponent_key", "rel_time", "event_index",
 						"event_type", "saber_move", "enemy_saber_move", "amount", "quality", "note",
 						"self_hp", "self_armor", "self_force", "enemy_hp", "enemy_armor",
-						"enemy_force", "buttons", "state", "range_bucket", "yaw_delta"]
+						"enemy_force", "buttons", "state", "range_bucket", "yaw_delta",
+						"saber_stance", "grounded", "forwardmove", "rightmove", "upmove"]
 					observation = hashlib.sha256(json.dumps(
 						[row.get(f, "") for f in core]).encode()).hexdigest()
 					rows.append([batch, os.path.basename(path), identity, payload, observation] +
@@ -102,40 +127,48 @@ def saber_evidence(batches):
 					con.executemany("INSERT INTO raw VALUES (" +
 						",".join("?" for _ in rows[0]) + ")", rows)
 				print(json.dumps({"batch": batch, "file": os.path.basename(path),
-					"rows": n, "sha256": digest, "columns": reader.fieldnames}))
-		for path in sorted(glob.glob(os.path.join(directory, "dueltrack*.csv")) +
-			glob.glob(os.path.join(directory, "strafetrack_routes.csv"))):
+					"path": path, "rows": n, "sha256": digest,
+					"encoding": encoding, "columns": reader.fieldnames}))
+		for path in sorted(glob.glob(os.path.join(directory, "*.csv"))):
 			if os.path.basename(path).startswith("dueltrack_events"):
 				continue
-			with open(path, "rb") as src:
-				digest = hashlib.file_digest(src, "sha256").hexdigest()
-			with open(path, encoding="latin-1", newline="") as src:
+			family = re.sub(r"_part[0-9]+(?=\.csv$)", "", os.path.basename(path))
+			digest, encoding = csv_provenance(path)
+			with open(path, encoding=encoding, newline="") as src:
 				reader = csv.DictReader(src)
 				n = 0
 				for row in reader:
 					n += 1
-					if os.path.basename(path) in ("dueltrack_sessions.csv", "strafetrack_routes.csv"):
+					if family in ("dueltrack_sessions.csv", "strafetrack_routes.csv"):
 						# Match complete row tuples only when the column sets agree;
 						# record IDs alone do not identify historical snapshots.
 						payload = hashlib.sha256(json.dumps(
 							[row[k] for k in sorted(row)]).encode()).hexdigest()
 						con.execute("INSERT INTO snapshots VALUES (?,?,?,?)",
-							[batch, os.path.basename(path), json.dumps(sorted(row)), payload])
-					if os.path.basename(path) == "dueltrack_learned.csv":
+							[batch, family, json.dumps(sorted(row)), payload])
+					if family == "dueltrack_learned.csv":
 						con.execute("INSERT INTO learned VALUES (?,?,?,?,?,?,?,?,?,?,?)",
 							[batch, row["source"], int(row["ctx_key"]), row["stimulus"],
 							 row["response"], row["follow1"], row["follow2"], int(row["samples"]),
 							 int(row["skill_band"]), int(row["wins"]), float(row["net_damage"])])
-					elif os.path.basename(path) == "dueltrack_sessions.csv":
+					elif family == "dueltrack_sessions.csv":
 						con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)",
 							[batch, row["source_context"], row["record_id"], row["start_time"],
 							 row["end_time"], row["mapname"]])
 				print(json.dumps({"batch": batch, "file": os.path.basename(path),
-					"rows": n, "sha256": digest, "columns": reader.fieldnames}))
-	con.execute("""CREATE TABLE events AS SELECT * FROM (
-		SELECT *, row_number() OVER (PARTITION BY batch, identity
+					"path": path, "rows": n, "sha256": digest,
+					"encoding": encoding, "columns": reader.fieldnames}))
+	con.execute("""CREATE TABLE event_variants AS SELECT * FROM (
+		SELECT *, row_number() OVER (PARTITION BY batch, identity, observation
 			ORDER BY CAST(export_format_version AS INTEGER) DESC, rowid) AS n
 		FROM raw) WHERE n = 1""")
+	con.execute("""CREATE TABLE conflicts AS
+		SELECT batch, identity FROM event_variants GROUP BY batch, identity HAVING count(*) > 1
+		UNION SELECT batch, identity FROM raw GROUP BY batch, identity, export_format_version
+		HAVING count(DISTINCT payload) > 1""")
+	con.execute("""CREATE TABLE events AS SELECT v.* FROM event_variants v
+		LEFT JOIN conflicts c ON c.batch = v.batch AND c.identity = v.identity
+		WHERE c.identity IS NULL""")
 	con.execute("""CREATE INDEX accepted_links ON events
 		(batch,source_context,parent_id,participant_key,rel_time,saber_move)
 		WHERE event_type = 'attack_chain' AND note = 'accepted_link'""")
@@ -162,6 +195,10 @@ SELECT batch, count(*) AS raw_rows, count(DISTINCT identity) AS identities,
  count(DISTINCT identity || payload) - count(DISTINCT identity) AS payload_variants,
  count(DISTINCT identity || observation) - count(DISTINCT identity) AS core_payload_conflicts
 FROM raw GROUP BY batch"""),
+		("Conflicting event identities preserved in raw/variants, excluded from swing counts", """
+SELECT r.batch, count(c.identity) AS conflicted_identities
+FROM (SELECT DISTINCT batch FROM raw) r LEFT JOIN conflicts c ON c.batch = r.batch
+GROUP BY r.batch ORDER BY r.batch"""),
 		("Cross-batch identity and exact-payload overlap", """
 SELECT a.batch, b.batch, count(*) AS overlapping_identities,
  sum(a.payload = b.payload) AS identical_payloads
@@ -193,6 +230,14 @@ SELECT batch, saber_stance, saber_move, count(*) AS starts
 FROM events WHERE participant_kind IN ('1','2') AND event_type = 'swing_start'
  AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
 GROUP BY 1,2,3 ORDER BY 1,4 DESC"""),
+		("Accepted basic attack mix by participant kind (frequency, not effectiveness)", """
+SELECT batch, participant_kind, count(*) AS basic_starts,
+ sum(saber_move IN ('5','8')) AS horizontal_starts,
+ sum(saber_move = '10') AS vertical_starts,
+ sum(saber_move IN ('4','6','7','9')) AS diagonal_starts
+FROM events WHERE event_type = 'swing_start' AND note = 'accepted'
+ AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
+GROUP BY 1,2 ORDER BY 1,2"""),
 		("Human adjacent accepted starts within 1000ms (and explicit accepted_link annotations)", """
 WITH attacks AS (
  SELECT *, lag(saber_move) OVER w AS previous_move,
@@ -266,8 +311,10 @@ GROUP BY 1,2"""),
 		print(json.dumps([d[0] for d in cursor.description]))
 		for row in cursor:
 			print(json.dumps(row))
-	print("\nDeduplication: newest export_format_version per identity wins; all raw payload variants "
-		"remain available in raw. Schema-upgrade defaults are not extra observations.\n"
+	print("\nDeduplication: newest export schema is selected only for agreeing core observations. "
+		"Core conflicts and differing payloads within one schema are explicitly flagged and "
+		"excluded from swing counts, not silently resolved. All raw payloads and distinct core "
+		"variants remain in raw/event_variants. Schema-upgrade defaults are not extra observations.\n"
 		"Gaps: accepted pairs/triples are overlapping observational windows, not proof of an "
 		"effective or intentional combo. No player/chat identities are printed. "
 		"Zero exact session-row overlap does not rule out the same duel with changed metadata. "
@@ -390,7 +437,7 @@ def main():
 	except ImportError:
 		sys.exit("duckdb is required for the general report: pip install duckdb")
 	con = duckdb.connect()
-	with tempfile.TemporaryDirectory(dir=args.csv_dir) as tmp:
+	with tempfile.TemporaryDirectory() as tmp:
 		events = to_utf8(sorted(glob.glob(os.path.join(args.csv_dir, "dueltrack_events*.csv"))), tmp)
 		learned = to_utf8(sorted(glob.glob(os.path.join(args.csv_dir, "dueltrack_learned.csv"))), tmp)
 		if not load(con, "events", events):

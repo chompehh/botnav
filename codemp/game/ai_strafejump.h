@@ -12,6 +12,7 @@
 #define BOT_SFJ_JUMP_VELOCITY 225.0f
 /* Two seconds remain representable even at the supported 1 ms pmove slice. */
 #define BOT_SFJ_MAX_ARC_STEPS 2048
+#define BOT_SFJ_MAX_CORRIDOR_POINTS 513
 
 static inline float BotSFJ_ClampSetting(float value, float minimum, float maximum)
 {
@@ -401,6 +402,15 @@ static inline int BotSFJ_EndpointPlaneAllows(float fromX, float fromY,
 	const float beyond = (landingX - endX) * dx + (landingY - endY) * dy;
 
 	return length > 1.0f && beyond <= endTolerance * length;
+}
+
+static inline int BotSFJ_PolylineEndpointAllows(const float points[][3],
+	int pointCount, float landingX, float landingY, float endTolerance)
+{
+	if (pointCount < 2 || pointCount > BOT_SFJ_MAX_CORRIDOR_POINTS)
+		return 0;
+	return BotSFJ_EndpointPlaneAllows(points[pointCount - 2][0], points[pointCount - 2][1],
+		points[pointCount - 1][0], points[pointCount - 1][1], landingX, landingY, endTolerance);
 }
 
 /*

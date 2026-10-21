@@ -2832,6 +2832,7 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjArcCheckedTime = 0;
 	bs->sfjArcSafe = qfalse;
 	bs->sfjCorridorValid = qfalse;
+	bs->sfjCorridorPointCount = 0;
 	bs->sfjCorridorForwardGoal = qfalse;
 	VectorClear(bs->sfjIntentDirection);
 	VectorClear(bs->sfjIntentDestination);
@@ -3105,6 +3106,7 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	const int waypointBudget = BotSFJ_WaypointBudget(bot_strafejumpwaypoints.integer);
 	const qboolean grounded = bs && bs->cur_ps.groundEntityNum != ENTITYNUM_NONE;
 	vec3_t lastPoint, firstDirection, previousDirection, steerPoint;
+	vec3_t points[BOT_SFJ_MAX_CORRIDOR_POINTS];
 	wpobject_t *wp;
 	wpobject_t *previous = NULL;
 	float total = 0.0f;
@@ -3116,6 +3118,7 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	int step;
 	int index;
 	int count;
+	int pointCount = 1;
 
 	if (!bs || !bs->wpCurrent || bs->doingFallback ||
 		bs->wpCurrent->index < 0 || bs->wpCurrent->index >= gWPNum ||
@@ -3131,6 +3134,7 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	/* Flight height is not a change in the underlying trail's elevation. */
 	baseZ = grounded ? bs->origin[2] : bs->wpCurrent->origin[2];
 	lastPoint[2] = baseZ;
+	VectorCopy(lastPoint, points[0]);
 	steerDistance = BotSFJ_ClampSetting(sqrtf(bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] +
 		bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1]) * 0.4f, 96.0f,
 		BOT_SFJ_CORRIDOR_STEER_DISTANCE);
@@ -3203,6 +3207,8 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 				VectorMA(lastPoint, steerDistance - total, segment, steerPoint);
 				haveSteer = qtrue;
 			}
+			VectorCopy(segmentEnd, points[pointCount]);
+			pointCount++;
 			if (total + segmentLength >= BOT_SFJ_CORRIDOR_LOOKAHEAD)
 			{
 				VectorCopy(segmentEnd, lastPoint);
@@ -3240,6 +3246,10 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	bs->sfjCorridorFirst = bs->wpCurrent->index;
 	bs->sfjCorridorLast = previous->index;
 	bs->sfjCorridorStep = step;
+	VectorCopy(lastPoint, points[pointCount - 1]);
+	for (index = 0; index < pointCount; index++)
+		VectorCopy(points[index], bs->sfjCorridorPoints[index]);
+	bs->sfjCorridorPointCount = pointCount;
 	bs->sfjCorridorValid = qtrue;
 	return qtrue;
 }
@@ -3248,30 +3258,21 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 static qboolean BotSFJ_WithinWaypointCorridor(const bot_state_t *bs,
 	const vec3_t destination, const vec3_t position, float endTolerance)
 {
-	vec3_t start, end;
-	const int step = bs->sfjCorridorStep;
-	const int budget = BotSFJ_WaypointBudget(bot_strafejumpwaypoints.integer);
-	int index, count;
+	int index;
+	const int pointCount = bs->sfjCorridorPointCount;
 
-	if (step != 1 && step != -1)
+	if (pointCount < 2 || pointCount > BOT_SFJ_MAX_CORRIDOR_POINTS ||
+		!VectorCompare(destination, bs->sfjCorridorPoints[pointCount - 1]))
 		return qfalse;
-	VectorCopy(bs->sfjCorridorStart, start);
-	for (count = 0, index = bs->sfjCorridorFirst; count < budget; count++, index += step)
+	for (index = 1; index < pointCount; index++)
 	{
-		wpobject_t *wp;
+		const float *start = bs->sfjCorridorPoints[index - 1];
+		const float *end = bs->sfjCorridorPoints[index];
 
-		if (index < 0 || index >= gWPNum ||
-			(index - bs->sfjCorridorLast) * step > 0)
-			break;
-		wp = gWPArray[index];
-		if (!wp || !wp->inuse || wp->flags || wp->forceJumpTo)
-			return qfalse;
-		VectorCopy(index == bs->sfjCorridorLast ? destination : wp->origin, end);
 		if (BotSFJ_LandingWithinCorridor(start[0], start[1], end[0], end[1],
 			position[0], position[1], BotSFJ_Tolerance(),
-			index == bs->sfjCorridorLast ? endTolerance : 0.0f))
+			index == pointCount - 1 ? endTolerance : 0.0f))
 			return qtrue;
-		VectorCopy(end, start);
 	}
 	return qfalse;
 }
@@ -4228,23 +4229,10 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	}
 	if (bs->sfjCorridorValid)
 	{
-		const int nextIndex = bs->sfjCorridorLast + bs->sfjCorridorStep;
-		const int previousIndex = bs->sfjCorridorLast - bs->sfjCorridorStep;
-		const float *from = bs->sfjCorridorStart;
-
-		if ((bs->wpDestination && bs->wpDestination->index == bs->sfjCorridorLast) ||
-			(nextIndex >= 0 && nextIndex < gWPNum && gWPArray[nextIndex] &&
-			 (gWPArray[nextIndex]->flags || gWPArray[nextIndex]->forceJumpTo)))
-			endTolerance = 0.0f;
-		if (previousIndex >= 0 && previousIndex < gWPNum &&
-			(previousIndex - bs->sfjCorridorFirst) * bs->sfjCorridorStep >= 0 &&
-			gWPArray[previousIndex])
-			from = gWPArray[previousIndex]->origin;
-		if ((from[0] - routeDestination[0]) * (from[0] - routeDestination[0]) +
-			(from[1] - routeDestination[1]) * (from[1] - routeDestination[1]) <= 1.0f)
-			from = bs->sfjCorridorStart;
-		if (!BotSFJ_EndpointPlaneAllows(from[0], from[1], routeDestination[0],
-			routeDestination[1], trace.endpos[0], trace.endpos[1], endTolerance))
+		/* A waypoint boundary is strict, even for a wall slide or chained hop. */
+		endTolerance = 0.0f;
+		if (!BotSFJ_PolylineEndpointAllows(bs->sfjCorridorPoints,
+			bs->sfjCorridorPointCount, trace.endpos[0], trace.endpos[1], endTolerance))
 			return qfalse;
 	}
 	/* Even a safe wall slide or chain continuation must not pass the route end. */

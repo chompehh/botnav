@@ -554,6 +554,8 @@ typedef struct bot_state_s
 	vec3_t				sfjIntentDirection;
 	vec3_t				sfjIntentDestination;
 	vec3_t				sfjCorridorStart;
+	vec3_t				sfjCorridorPoints[BOT_SFJ_MAX_CORRIDOR_POINTS];
+	int					sfjCorridorPointCount;
 	int					sfjCorridorFirst;
 	int					sfjCorridorLast;
 	int					sfjCorridorStep;
