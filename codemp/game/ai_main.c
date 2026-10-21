@@ -49,6 +49,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 //
 #include "ai_main.h"
 #include "ai_combat_tuning.h"
+#include "ai_traversal.h"
 #include "w_saber.h"
 //
 #include "chars.h"
@@ -2269,6 +2270,105 @@ int BotTrace_Strafe(bot_state_t *bs, vec3_t traceto)
 }
 #endif
 
+static qboolean BotNav_TraceStep(bot_state_t *bs, const vec3_t origin,
+	const vec3_t forward, float distance, trace_t *landing)
+{
+	vec3_t up, ahead, down;
+	trace_t tr;
+	gentity_t *ent = &g_entities[bs->client];
+	const int hazards = CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP;
+	const float stepSize = STEPSIZE;
+
+	if (bs->cur_ps.groundEntityNum == ENTITYNUM_NONE)
+		return qfalse;
+	VectorCopy(origin, up);
+	up[2] += stepSize;
+	JP_Trace(&tr, (float *)origin, ent->r.mins, ent->r.maxs, up, bs->client,
+		MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f ||
+		(tr.contents & hazards) || BotSFJ_TriggerAlongSegment(bs, origin, up))
+		return qfalse;
+	VectorCopy(up, ahead);
+	ahead[0] += forward[0] * distance;
+	ahead[1] += forward[1] * distance;
+	JP_Trace(&tr, up, ent->r.mins, ent->r.maxs, ahead, bs->client,
+		MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f ||
+		(tr.contents & hazards) || BotSFJ_TriggerAlongSegment(bs, up, ahead))
+		return qfalse;
+	VectorCopy(ahead, down);
+	down[2] -= 2.0f * stepSize;
+	JP_Trace(&tr, ahead, ent->r.mins, ent->r.maxs, down, bs->client,
+		MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	if (!BotNav_StepAllows(1, 1, 1, tr.fraction < 1.0f,
+		tr.startsolid || tr.allsolid, tr.plane.normal[2],
+		tr.endpos[2] - origin[2], stepSize,
+		(tr.contents & hazards) || BotSFJ_TriggerAlongSegment(bs, ahead, tr.endpos)))
+		return qfalse;
+	*landing = tr;
+	return qtrue;
+}
+
+static qboolean BotNav_TraceStepSegment(bot_state_t *bs, const vec3_t start,
+	const vec3_t end, float maxDistance, qboolean requireEndpoint, trace_t *landing)
+{
+	vec3_t direction, position, floor;
+	trace_t trace;
+	float distance, stepDistance;
+	int sample, samples;
+	gentity_t *ent = &g_entities[bs->client];
+	const int hazards = CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP;
+
+	if (bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
+		(bs->cur_ps.pm_flags & PMF_DUCKED))
+		return qfalse;
+	VectorSubtract(end, start, direction);
+	direction[2] = 0.0f;
+	distance = VectorNormalize(direction);
+	samples = BotNav_StepSegmentSamples(distance, maxDistance);
+	if (!samples)
+		return qfalse;
+	VectorCopy(start, floor);
+	floor[2] -= 4.0f;
+	JP_Trace(&trace, (float *)start, ent->r.mins, ent->r.maxs, floor,
+		bs->client, MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	if (!BotNav_StepAllows(1, 1, 1,
+		trace.fraction < 1.0f && trace.entityNum == ENTITYNUM_WORLD,
+		trace.startsolid || trace.allsolid, trace.plane.normal[2],
+		trace.endpos[2] - start[2], STEPSIZE,
+		(trace.contents & hazards) || BotSFJ_TriggerAlongSegment(bs, start, trace.endpos)))
+		return qfalse;
+	VectorCopy(trace.endpos, position);
+	stepDistance = distance / samples;
+	for (sample = 0; sample < samples; sample++)
+	{
+		if (!BotNav_TraceStep(bs, position, direction, stepDistance, &trace) ||
+			trace.entityNum != ENTITYNUM_WORLD)
+			return qfalse;
+		VectorCopy(trace.endpos, position);
+	}
+	/* The walked staircase must actually connect to this route endpoint. */
+	if (requireEndpoint)
+	{
+		if (!BotNav_StepEndpointAllows(position[2], end[2], STEPSIZE))
+			return qfalse;
+		JP_Trace(&trace, position, ent->r.mins, ent->r.maxs, (float *)end,
+			bs->client, MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+		if (trace.startsolid || trace.allsolid || trace.fraction < 1.0f ||
+			(trace.contents & hazards) || BotSFJ_TriggerAlongSegment(bs, position, end))
+			return qfalse;
+	}
+	/* Retain the actual supported position, not a possibly raised route marker. */
+	VectorCopy(position, floor);
+	floor[2] -= 4.0f;
+	JP_Trace(landing, position, ent->r.mins, ent->r.maxs, floor,
+		bs->client, MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
+	return !landing->startsolid && !landing->allsolid && landing->fraction < 1.0f &&
+		landing->entityNum == ENTITYNUM_WORLD && landing->plane.normal[2] >= 0.7f &&
+		!(landing->contents & hazards) &&
+		!BotSFJ_TriggerAlongSegment(bs, position, landing->endpos);
+}
+
 //Similar to the trace check, but we want to trace to see
 //if there's anything we can jump over.
 int BotTrace_Jump(bot_state_t *bs, vec3_t traceto)
@@ -2301,6 +2401,10 @@ int BotTrace_Jump(bot_state_t *bs, vec3_t traceto)
 	}
 
 	orTr = tr.entityNum;
+
+	/* PM_StepSlideMove handles stair treads without a legacy held jump. */
+	if (BotNav_TraceStep(bs, bs->origin, fwd, 4.0f, &tr))
+		return 0;
 
 	VectorCopy(bs->origin, tracefrom_mod);
 
@@ -2555,14 +2659,50 @@ static qboolean BotNav_CheckInstantDeathHazardSample(bot_state_t *bs, vec3_t mov
 	return qfalse;
 }
 
+qboolean BG_InKnockDownOnly(int anim);
+
+static int BotNav_LandingDamage(bot_state_t *bs, const playerState_t *ps,
+	const trace_t *landing, float impactSpeed, float jumpStart)
+{
+	botnav_fall_context_t context;
+	vec3_t point;
+	int sample, forceLevel;
+	const int waterHeights[3] = {1, (ps->viewheight - DEFAULT_MINS_2) / 2,
+		ps->viewheight - DEFAULT_MINS_2};
+
+	memset(&context, 0, sizeof(context));
+	context.ducked = (ps->pm_flags & PMF_DUCKED) != 0 || bs->duckTime > level.time;
+	context.noDamageSurface = (landing->surfaceFlags & SURF_NODAMAGE) != 0;
+	context.noFallingDamage = (dmflags.integer & DF_NO_FALLING) ||
+		g_entities[bs->client].client->sess.raceMode;
+	context.knockdown = BG_InKnockDownOnly(ps->legsAnim);
+	context.siege = level.gametype == GT_SIEGE;
+	context.maxDamage = g_maxFallDmg.integer;
+	context.forceJumpStart = jumpStart;
+	forceLevel = ps->fd.forcePowerLevel[FP_LEVITATION];
+	if (forceLevel >= FORCE_LEVEL_0 && forceLevel <= FORCE_LEVEL_3)
+		context.forceJumpHeight = forceJumpHeight[forceLevel];
+	context.landingHeight = landing->endpos[2];
+	VectorCopy(landing->endpos, point);
+	for (sample = 0; sample < 3; sample++)
+	{
+		point[2] = landing->endpos[2] + DEFAULT_MINS_2 + waterHeights[sample];
+		if (!(trap->PointContents(point, bs->client) & CONTENTS_WATER))
+			break;
+		context.waterLevel++;
+	}
+	return BotNav_PredictFallDamage(impactSpeed, &context);
+}
+
 static qboolean BotNav_CheckFallingHazard(bot_state_t *bs, vec3_t moveDir, qboolean inCombat)
 {
 	static const float pitLookAhead[] = {96.0f, 144.0f};
-	vec3_t start, end, floorMins, floorMaxs;
+	vec3_t start, end;
 	trace_t tr;
 	const float extendedPitTrace = 512.0f;
 	const int hazardContents = CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP;
-	float maxDrop, feetZ;
+	float drop, impactSpeed;
+	int damage;
 	qboolean foundFloor, ordinaryFloorSafe, gapAllowed, hazard;
 	int i;
 
@@ -2577,7 +2717,7 @@ static qboolean BotNav_CheckFallingHazard(bot_state_t *bs, vec3_t moveDir, qbool
 		MASK_PLAYERSOLID | hazardContents, qfalse, 0, 0);
 	if (tr.startsolid || tr.allsolid || (tr.contents & hazardContents) ||
 		(trap->PointContents(start, bs->client) & hazardContents) ||
-		BotNav_SweepTouchesInstantKillTrigger(bs->origin, start))
+		BotSFJ_TriggerAlongSegment(bs, bs->origin, start))
 		return qtrue;
 	if (bs->cur_ps.groundEntityNum == ENTITYNUM_NONE)
 		return qfalse;
@@ -2587,31 +2727,44 @@ static qboolean BotNav_CheckFallingHazard(bot_state_t *bs, vec3_t moveDir, qbool
 		return qtrue;
 	}
 
-	maxDrop = BotSFJ_ClampSetting(bot_strafe_minledge.value, 0.0f, 200.0f);
-	feetZ = bs->origin[2] + g_entities[bs->client].r.mins[2];
-	VectorCopy(g_entities[bs->client].r.mins, floorMins);
-	VectorCopy(g_entities[bs->client].r.maxs, floorMaxs);
-	floorMins[2] = 0.0f;
-	floorMaxs[2] = 1.0f;
-	start[2] += 16.0f;
+	/* Use a real landing hull, not the old thin floor probe and fixed ledge cap.
+	 * A missing floor is still unsafe, even when falling damage is disabled. */
 	VectorCopy(start, end);
-	end[2] = feetZ - maxDrop - 1.0f;
-	JP_Trace(&tr, start, floorMins, floorMaxs, end, bs->client,
+	end[2] = bs->origin[2] - 2048.0f;
+	JP_Trace(&tr, start, g_entities[bs->client].r.mins,
+		g_entities[bs->client].r.maxs, end, bs->client,
 		MASK_PLAYERSOLID | hazardContents, qfalse, 0, 0);
+	if (tr.startsolid || tr.allsolid)
+	{
+		trace_t stepTrace;
+
+		/* Several individually walkable stairs can rise above the distant probe.
+		 * Follow the engine's step height rather than mistaking the riser for a pit. */
+		VectorCopy(start, end);
+		/* Navigation needs the actual stair landing, not an exact-height marker. */
+		if (BotNav_TraceStepSegment(bs, bs->origin, end, 48.0f, qfalse, &stepTrace))
+		{
+			tr = stepTrace;
+			VectorCopy(stepTrace.endpos, start);
+		}
+	}
 	foundFloor = tr.fraction < 1.0f && (tr.entityNum == ENTITYNUM_WORLD ||
 		(tr.entityNum >= 0 && tr.entityNum < level.num_entities &&
 			g_entities[tr.entityNum].s.eType == ET_MOVER));
 	hazard = (tr.contents & hazardContents) ||
-		BotNav_SweepTouchesInstantKillTrigger(start, tr.endpos);
-	ordinaryFloorSafe = BotNav_FloorAllows(foundFloor, tr.startsolid || tr.allsolid,
-		tr.plane.normal[2], feetZ - tr.endpos[2], maxDrop, 0, hazard);
+		BotSFJ_TriggerAlongSegment(bs, start, tr.endpos);
+	drop = bs->origin[2] - tr.endpos[2];
+	impactSpeed = drop > 0.0f ? BotNav_ImpactSpeed(bs->cur_ps.velocity[2],
+		(float)bs->cur_ps.gravity, drop) : 0.0f;
+	damage = BotNav_LandingDamage(bs, &bs->cur_ps, &tr, impactSpeed, 0.0f);
+	ordinaryFloorSafe = BotNav_LandingAllows(foundFloor, tr.startsolid || tr.allsolid,
+		tr.plane.normal[2], hazard, damage, g_entities[bs->client].health);
 	gapAllowed = !ordinaryFloorSafe && !hazard && BotNav_SFJTravelOwnsInput(bs) &&
 		bs->lastucmd.upmove > 0 &&
 		(bs->sfjPhase == BOT_SFJ_PHASE_TAKEOFF || bs->sfjPhase == BOT_SFJ_PHASE_REJUMP) &&
 		BotSFJ_CurrentTakeoffIsSafe(bs);
 	/* Only a current accepted jump may cross a gap; explicit hazards never yield. */
-	if (!BotNav_FloorAllows(foundFloor, tr.startsolid || tr.allsolid, tr.plane.normal[2],
-		feetZ - tr.endpos[2], maxDrop, gapAllowed, hazard))
+	if (hazard || (!ordinaryFloorSafe && !gapAllowed))
 		return qtrue;
 	if (gapAllowed)
 		bs->sfjNavGapPending = qtrue;
@@ -3096,9 +3249,15 @@ static qboolean BotSFJ_CorridorSegmentIsClear(bot_state_t *bs,
 
 	JP_Trace(&trace, (float *)start, mins, maxs, (float *)end, bs->client,
 		MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
-	return !trace.startsolid && !trace.allsolid && trace.fraction >= 1.0f &&
-		!(trace.contents & hazards) && !(trap->PointContents((float *)end, bs->client) & hazards) &&
-		!BotSFJ_TriggerAlongSegment(bs, start, end);
+	if ((trace.contents & hazards) || (trap->PointContents((float *)end, bs->client) & hazards) ||
+		BotSFJ_TriggerAlongSegment(bs, start, end))
+		return qfalse;
+	if (!trace.startsolid && !trace.allsolid && trace.fraction >= 1.0f)
+		return qtrue;
+	/* Walkable stairs/ramps can obstruct a straight hull chord. Validate every
+	 * up/forward/down step instead; this never replaces the final jump arc check. */
+	return BotNav_TraceStepSegment(bs, start, end, BOT_SFJ_CORRIDOR_LOOKAHEAD,
+		qtrue, &trace);
 }
 
 static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t destination)
@@ -4165,8 +4324,14 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 				!(trace.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)) &&
 				trace.entityNum == ENTITYNUM_WORLD)
 			{
-				if (!BotSFJ_HeightAllows(trace.endpos[2] - launchStartZ,
-						256.0f, BotSFJ_MaxDrop()) || velocity[2] < -650.0f)
+				const float impactSpeed = BotNav_ImpactSpeed(previousVertical,
+					gravity, position[2] - trace.endpos[2]);
+				const int damage = BotNav_LandingDamage(bs, ps, &trace, impactSpeed,
+					launched ? launchStartZ : ps->fd.forceJumpZStart);
+
+				if (trace.endpos[2] - launchStartZ > 256.0f ||
+					!BotNav_LandingAllows(1, 0, trace.plane.normal[2], 0, damage,
+						g_entities[bs->client].health))
 					return qfalse;
 				VectorCopy(trace.endpos, position);
 				predictedLanding = qtrue;
@@ -21050,6 +21215,10 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 {
 	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
 	int sequence, total = 0, roll;
+	playerState_t *ps = &g_entities[bs->client].client->ps;
+	const int directionalEligible = context.closingKnown && context.currentDistance < 128.0f &&
+		ps->groundEntityNum != ENTITYNUM_NONE && !context.selfBlocked &&
+		!PM_SaberInReturn(ps->saberMove) && !bs->saberDefenseActive && !context.recentlyHurt;
 	if (!context.fanStance || !NewBotAI_SaberFamilyMaySelectRecipe(family) ||
 		NewBotAI_SaberNeedsSafetyExit(context))
 		return family;
@@ -21060,6 +21229,9 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 			continue;
 		weights[sequence] = BotLearn_SaberSequenceWeight(sequence,
 			G_BotLearnSaberBonus(&g_entities[bs->client], bs->currentEnemy, sequence, bs->settings.skill));
+		weights[sequence] += BotLearn_SaberSequenceDirectionalPrior(sequence,
+			G_BotLearnDuelMode(&g_entities[bs->client]), ps->fd.saberAnimLevel,
+			bs->currentEnemy->client->ps.fd.saberAnimLevel, directionalEligible);
 		total += weights[sequence];
 	}
 	roll = Q_irand(1, total);
@@ -21103,6 +21275,7 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 		bs->saberTechniqueReentryUntil = 0;
 		bs->saberTechniqueAirExitUntil = 0;
 		bs->saberTechniqueActualDir = 0;
+		bs->saberTacticStrafeDir = 0;
 		bs->saberTechniqueAnimDuration = 0;
 		bs->saberTechniqueYawTime = 0;
 		bs->saberFootingValid = qfalse;
@@ -21280,11 +21453,11 @@ static void NewBotAI_SelectSaberFooting(bot_state_t *bs, playerState_t *ps,
 	if (NewBotAI_SaberFootingNeedsUpdate(bs->saberFootingValid,
 		bs->saberFootingPhase, phase, bs->saberFootingMove, ps->saberMove,
 		bs->saberFootingTactic, bs->saberTacticAction) ||
-		BotCombat_RefreshIdleFooting(ps->weaponTime <= 0 &&
+		NewBotAI_SaberIdleFootingChanged(ps->weaponTime <= 0 &&
 			!PM_SaberInStart(ps->saberMove) && !PM_SaberInTransition(ps->saberMove),
 			bs->saberDefenseActive || bs->combatAction == BOT_COMBAT_ACTION_RETREAT_DEFENSE,
-			NewBotAI_IsRecoveryMovementActive(bs), bs->frame_Enemy_Len,
-			command->forward, bs->saberFootingForward))
+			NewBotAI_IsRecoveryMovementActive(bs), command->forward, command->right,
+			bs->saberFootingForward, bs->saberFootingRight))
 	{
 		bs->saberFootingPhase = phase;
 		bs->saberFootingMove = ps->saberMove;
@@ -21323,7 +21496,7 @@ static void NewBotAI_SelectSaberFooting(bot_state_t *bs, playerState_t *ps,
 	}
 	/* Idle approach lanes must follow the opponent, not a stale world-space heading.
 	   Committed swings and defensive recovery retain their chosen footing. */
-	if (ps->weaponTime <= 0 && command->forward > 0 &&
+	if (ps->weaponTime <= 0 && (command->forward || command->right) &&
 		!command->attack && !bs->saberDefenseActive &&
 		bs->combatAction != BOT_COMBAT_ACTION_RETREAT_DEFENSE &&
 		!NewBotAI_IsRecoveryMovementActive(bs))
@@ -21374,6 +21547,7 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 	int actualDirection;
 	int selectedForward, selectedRight;
 	int selecting;
+	int blockedPreparation = 0;
 	float offset;
 	float pokeYaw = 0.0f;
 	float wiggleYaw = 0.0f, wigglePitch = 0.0f;
@@ -21526,13 +21700,23 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 		NewBotAI_SaberApplyMovementSafety(&command,
 			NewBotAI_SaberSafeFootwork(bs, ps->origin, bi->viewangles[YAW],
 				command.forward, command.right, command.jump));
+		if (!command.attack)
+		{
+			blockedPreparation = PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove);
+			if (!blockedPreparation)
+			{
+				NewBotAI_SaberBlockedSelectionFooting(&command, bs->saberTacticStrafeDir);
+				bs->saberFootingValid = qfalse;
+			}
+		}
 		if (command.forward > 0) plannedFlags |= ACTION_MOVEFORWARD;
 		if (command.forward < 0) plannedFlags |= ACTION_MOVEBACK;
 		if (command.right > 0) plannedFlags |= ACTION_MOVERIGHT;
 		if (command.right < 0) plannedFlags |= ACTION_MOVELEFT;
 	}
-	else
+	if ((!command.attack || !selecting) && !blockedPreparation)
 	{
+		plannedFlags = 0;
 		NewBotAI_SelectSaberFooting(bs, ps, phase, &command);
 		VectorCopy(bs->saberFootingWorldDir, bi->dir);
 		if (bs->currentEnemy && NewBotAI_SaberCommittedSwingDropsBackpedal((int)bs->settings.skill,

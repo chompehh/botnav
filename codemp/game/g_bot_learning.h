@@ -106,6 +106,55 @@ static inline int BotLearn_SaberSequenceWeight(int sequence, int bonus)
 	return weight > 0 ? weight : 1;
 }
 
+static inline int BotLearn_SaberDirectionalPrior(int mode, int stance, int enemyStance, int attackIndex)
+{
+	/* Dueltracks release, not pooled with overlapping repository snapshots.
+	 * scripts/dueltrack_report.py --saber-evidence --release-dir PATH prints
+	 * "Released human directional priors": mode, stances, actual move, starts,
+	 * confirmed-hit starts. Grounded, <128u, no self defense/recovery only.
+	 * This is single-attack hit evidence, NOT successful three-attack recipes. */
+	static const int evidence[][6] = {
+		{ 0, 2, 3, 5, 20, 4 }, { 0, 2, 3, 8, 14, 4 },
+		{ 0, 2, 7, 5, 36, 6 }, { 0, 2, 7, 8, 31, 6 },
+		{ 0, 3, 6, 5, 13, 5 }, { 0, 3, 7, 10, 9, 2 },
+		{ 0, 7, 7, 4, 10, 2 }, { 0, 7, 7, 5, 59, 24 }, { 0, 7, 7, 8, 70, 24 },
+		{ 1, 2, 2, 5, 61, 13 }, { 1, 2, 2, 8, 59, 13 }, { 1, 2, 2, 9, 9, 1 },
+		{ 1, 2, 6, 5, 12, 2 }, { 1, 2, 6, 8, 12, 2 }, { 1, 2, 7, 8, 16, 3 },
+		{ 1, 7, 2, 10, 16, 6 }, { 1, 7, 2, 4, 16, 3 },
+		{ 1, 7, 2, 5, 156, 30 }, { 1, 7, 2, 8, 184, 42 },
+		{ 1, 7, 3, 5, 12, 4 }, { 1, 7, 3, 8, 16, 6 },
+		{ 1, 7, 6, 5, 38, 6 }, { 1, 7, 6, 8, 50, 9 },
+		{ 1, 7, 7, 5, 32, 6 }, { 1, 7, 7, 8, 28, 8 }
+	};
+	int i;
+	if (attackIndex < 0 || attackIndex >= 7)
+		return 0;
+	for (i = 0; i < (int)(sizeof(evidence) / sizeof(evidence[0])); i++)
+	{
+		const int *row = evidence[i];
+		if (row[0] == mode && row[1] == stance && row[2] == enemyStance &&
+			row[3] == attackIndex + 4)
+		{
+			const int prior = 48 * row[5] / row[4];
+			return prior > 12 ? 12 : prior;
+		}
+	}
+	return 0;
+}
+
+static inline int BotLearn_SaberSequenceDirectionalPrior(int sequence, int mode,
+	int stance, int enemyStance, int eligible)
+{
+	int stage, total = 0;
+	if (!eligible || sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT)
+		return 0;
+	for (stage = 0; stage < BOTLEARN_SABER_SEQUENCE_LENGTH; stage++)
+		total += BotLearn_SaberDirectionalPrior(mode, stance, enemyStance,
+			BotLearn_SaberSequenceAttack(sequence, stage));
+	/* Small compositional prior; exact complete-recipe learning remains separate. */
+	return total / BOTLEARN_SABER_SEQUENCE_LENGTH;
+}
+
 static inline int BotLearn_SaberSequenceMatches(int sequence, int stage, int attackIndex)
 {
 	return attackIndex >= 0 && attackIndex < 7 &&

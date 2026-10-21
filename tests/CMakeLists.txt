@@ -25,6 +25,7 @@ set(TestFiles
 	"main.cpp"
 	"bot_ai_tuning.cpp"
 	"jvm_rules.cpp"
+	"ui_profile.cpp"
 	"bot_learning.cpp"
 	"duel_identity.cpp"
 	"duel_elo.cpp"
@@ -63,6 +64,7 @@ set(TestIncludeDirectories
 	"${CMAKE_SOURCE_DIR}/codemp"
 	)
 set(TestDefines "${SharedDefines}")
+list(APPEND TestDefines "BOTNAV_SOURCE_DIR=\"${CMAKE_SOURCE_DIR}\"")
 
 add_executable(${TestTarget} ${TestFiles})
 set_target_properties(${TestTarget} PROPERTIES COMPILE_DEFINITIONS "${TestDefines}")

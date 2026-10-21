@@ -129,7 +129,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafejumps` | `1` | Enables optimal-yaw strafe jumping with circle-jump starts, landing chains, and alternating diagonal/opposite-strafe-only half-beat input. Validated waypoint lookahead allows gentle curves; direct enemy corridors remain straight. In CTF, carrying a flag counts as escape and chasing an enemy flag carrier counts as chase. |
 | `bot_strafejumpfrequency` | `100` | Initiation frequency scale, clamped to 1–1000 when enabled: `100` waits 1000 ms before starting a new eligible sequence, `200` waits 500 ms, `50` waits 2000 ms. `0` or negative disables strafe jumping. No per-frame random rolls; established safe chains are not delayed. |
 | `bot_strafejumpwaypoints` | `128` | Strafe corridor waypoint budget, clamped to 1–512, independent of ordinary `bot_waypointskip`. Dense trails need enough points to reach the minimum corridor length; look-ahead remains distance-bounded to about 1024 units and stops at required interactions, destinations, disconnected links, excessive bends or height changes. |
-| `bot_strafe_minledge` | `200` | Maximum permitted downward route/landing/navigation height change, units, clamped 0–200. Modest drops may continue a chain only with a validated static walkable landing; hazards and excessive descent speed remain forbidden. Ordinary navigation requires a safe floor; a fresh validated jump may cross a gap. |
+| `bot_strafe_minledge` | `200` | Downward route-search/continuity bound, units, clamped 0–200; not a landing-damage limit. Confirmed walkable landings use predicted engine fall damage versus current health. Lethal or unresolved falls and explicit hazards remain forbidden. A fresh validated jump may cross a gap. |
 | `bot_strafe_wallmargin` | `32` | Endpoint setback from walls for direct enemy corridors, units, clamped 0–128. Lower values allow closer approaches without shrinking the collision hull or disabling wall-slide prediction. |
 | `bot_strafe_tolerance` | `80` | Horizontal waypoint/recorded-node acceptance and landing-corridor tolerance, units, clamped 16–256. Nodes mark progress rather than requiring exact touchdown; grounded height and lateral checks prevent unrelated nodes being skipped. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
@@ -249,13 +249,15 @@ A grounded bot picks up a recorded route when it is within 96 units horizontally
 
 - Bots remember their last 8 reached waypoints and avoid re-picking them when they re-path, unless no other waypoint is visible. This stops walking back to points already passed.
 - When a drop or ledge is detected ahead, the bot switches to the next waypoint in its travel direction if that one is visible and safe, instead of dropping its waypoint and re-pathing to the nearest (often earlier) point.
+- Walkable stairs and ramps use swept engine-step probes rather than unnecessary legacy jumps or repaths. Grounded strafe corridors may follow those validated steps when a straight hull sweep clips a riser; headroom, static walkable support, endpoint connection, hazards and the final jump arc are still checked.
+- Confirmed navigation and strafe landings compare predicted engine fall damage against current health. Prediction includes momentum, gravity, crouch, landing water, Force-jump reduction and server damage rules, but assumes neither a successful roll nor temporary protection. Missing floors and lethal falls remain forbidden.
 - A navigation jump over an obstacle clears any crouch, and no obstacle crouch starts while a navigation jump is active, so bots no longer crouch-jump at obstacles.
 - Out of combat, a bot whose distance to its waypoint destination has not improved by 32 units for 3 s re-paths to an unvisited waypoint without reversing its path direction.
 
 Live-map validation checklist:
 - Test long, level waypoint corridors at low and high accumulated speed and with variable server frame times.
 - Confirm jump is released during flight and for one command after landing; verify no force jump or flipkick occurs.
-- Place doors, movers, players, low ceilings, walls, ledges, lava/slime, death triggers, and voids along or below the predicted arc and confirm immediate abort.
+- Place doors, movers, players, low ceilings, walls, lethal ledges, lava/slime, death triggers, and voids along or below the predicted arc and confirm immediate abort. Confirmed nonlethal landings may continue; repeat at low health to check rejection.
 - Exercise navigation, retreat, and increasing-separation pursuit; confirm direct close combat and an enemy off the routed corridor never start a jump.
 - Toggle `bot_strafejumps` off during each phase and confirm ordinary movement/jumps resume without yaw or input ownership.
 - Compare `bot_strafejumpfrequency` at 0, 50, 100 and 200, checking initiation waits and uninterrupted safe chains; repeat with `bot_onlystrafes 1`.
@@ -420,6 +422,25 @@ independent trials, causality, or superior damage per second. The inventory
 checks internal part gaps, not trailing completeness: only an exporter manifest
 could establish that no final part was omitted.
 
+The same command now prints **Saber close-range input ownership and lateral bias**
+and **Released human directional priors**. In the examined release, bot-owned
+grounded close-range attack samples had no movement input in 263/2,087 samples,
+versus 262/9,096 human samples. Bot right/left input counts were 902/888: this
+capture does not demonstrate a global rightward bias. Samples are not independent
+frames or duel outcomes. New chain entries discard the previous chain's strafe
+side, while idle footing refreshes changed approach commands even inside 100 units.
+
+Directional priors use confirmed `swing_damage` joined to an accepted start by
+batch, duel, participant, opponent, actual move and captured start timestamp.
+The printed SQL separates mode and both stances and requires grounded range under
+128 units with no self defense/recovery. For example, released human full-force
+staff-versus-yellow vertical starts had 6/16 confirmed hits, versus 3/16 for
+TL2BR. These are limited observational samples, not causal comparisons. The
+bounded single-direction priors only nudge compatible recipe weights; they do not
+claim complete-recipe effectiveness or derive saber direction from generic
+`swing` tokens. Missing hit records are not proof of misses, and repository and
+release snapshots remain separate.
+
 ### Profile menu deployment
 
 The Profile item in `ui/jamp/ingame.menu` is hidden only for Siege (`7`), where
@@ -434,6 +455,19 @@ server game module. Check for older PK3s overriding `ui/jamp/ingame.menu`. A
 server-only update cannot replace menus on an independently installed Android
 client. The refresh guards against stale state; it does not prove that stale
 state, rather than an overriding client asset, caused a particular screenshot.
+
+The `ui_profile` unit tests check both Profile entry points, the in-game menu
+manifest, Apply/Join actions, and the JvM red/blue versus Arcade/JoM free-join
+visibility rules. Build `uix86_64` (or the platform's UI target) and `Assets`
+together; the PK3 must contain the same `ui/jampingame.txt`,
+`ui/jamp/ingame.menu`, `ui/jamp/ingame_player.menu`, and
+`ui/jamp/ingame_playerforce.menu` as the source checkout.
+These are static checks, not a reproduction of missing buttons on a live client.
+If Profile is still missing with those artifacts installed, capture the client's
+`path`, `fs_game`, and `ui_about_gametype` output with the menu open and check for
+overriding menu files. In each mode, manually verify both Profile entry points,
+changing a model/name, Apply, and joining from spectator. JvM is a team mode;
+its red/blue choices must not be hidden merely because JoM is a class mode too.
 
 Saber combat verification:
 - Enable `g_newBotAI 1` to exercise the shared technique controller; the legacy StandardBotAI fallback is unchanged.
