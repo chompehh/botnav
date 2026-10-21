@@ -869,4 +869,60 @@ BOOST_AUTO_TEST_CASE( saber_technique_damage_requires_pair_attribution_not_healt
 	BOOST_CHECK_EQUAL( netDamage, 18 );
 }
 
+BOOST_AUTO_TEST_CASE( saber_directional_priors_are_human_outcomes_not_generic_swing_tokens )
+{
+	// Released full-force staff versus yellow: vertical 6/16, TL2BR 3/16.
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 7, 2, 6), 12 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 7, 2, 0), 9 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(0, 7, 2, 6), 0 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 2, 7, 6), 0 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 7, 3, 6), 0 ); // only four starts
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 7, 2, -1), 0 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberDirectionalPrior(1, 7, 2, BOTLEARN_TOK_SWING), 0 );
+	for (int sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)
+	{
+		BOOST_CHECK_EQUAL( BotLearn_SaberSequenceDirectionalPrior(sequence, 1, 7, 2, 0), 0 );
+		BOOST_CHECK_EQUAL( BotLearn_SaberSequenceDirectionalPrior(sequence, 3, 7, 2, 1), 0 );
+		BOOST_CHECK_LE( BotLearn_SaberSequenceDirectionalPrior(sequence, 1, 7, 2, 1), 12 );
+		BOOST_CHECK_GE( BotLearn_SaberSequenceDirectionalPrior(sequence, 1, 7, 2, 1), 0 );
+	}
+	BOOST_CHECK_GT( BotLearn_SaberSequenceDirectionalPrior(2, 1, 7, 2, 1), 0 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberSequenceDirectionalPrior(-1, 1, 7, 2, 1), 0 );
+	// Directions supported individually do not relax complete-recipe acceptance.
+	BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAdvance(2, 2, 2, 4, BOTLEARN_DEFENSE_NONE), -1 );
+}
+
+BOOST_AUTO_TEST_CASE( saber_idle_footing_refreshes_close_range_without_rewriting_committed_selection )
+{
+	// Unlike the shared long-range approach helper, this also refreshes inside 100u.
+	BOOST_CHECK( NewBotAI_SaberIdleFootingChanged(1, 0, 0, 1, 1, 0, 1) );
+	BOOST_CHECK( NewBotAI_SaberIdleFootingChanged(1, 0, 0, 0, -1, 0, 1) );
+	BOOST_CHECK( !NewBotAI_SaberIdleFootingChanged(1, 0, 0, 1, 1, 1, 1) );
+	BOOST_CHECK( !NewBotAI_SaberIdleFootingChanged(0, 0, 0, 1, 1, 0, 1) );
+	BOOST_CHECK( !NewBotAI_SaberIdleFootingChanged(1, 1, 0, 1, 1, 0, 1) );
+	BOOST_CHECK( !NewBotAI_SaberIdleFootingChanged(1, 0, 1, 1, 1, 0, 1) );
+	for (int attack = 0; attack < 7; attack++)
+	{
+		int forward = 0, right = 0;
+		BOOST_REQUIRE( NewBotAI_SaberPreparationInputs(attack, &forward, &right) );
+		newbotai_saber_final_context_t context = { 1, forward, right, 1, -1, 0, 1 };
+		newbotai_saber_command_t command = { 1, 1, 0, 1 };
+		command = NewBotAI_FinalizeSaberCommand(command, context);
+		BOOST_CHECK_EQUAL( command.forward, forward );
+		BOOST_CHECK_EQUAL( command.right, right );
+		BOOST_CHECK_EQUAL( command.attack, 1 );
+		// An obstructed start can move on a subsequently traced lane, never attack.
+		NewBotAI_SaberApplyMovementSafety(&command, 0);
+		NewBotAI_SaberBlockedSelectionFooting(&command, -1);
+		BOOST_CHECK_EQUAL( command.attack, 0 );
+		BOOST_CHECK_EQUAL( command.jump, 0 );
+		BOOST_CHECK_EQUAL( command.forward, 1 );
+		BOOST_CHECK_EQUAL( command.right, -1 );
+		NewBotAI_SaberApplyMovementSafety(&command, 0);
+		BOOST_CHECK_EQUAL( command.forward, 0 );
+		BOOST_CHECK_EQUAL( command.right, 0 );
+		BOOST_CHECK_EQUAL( command.attack, 0 );
+	}
+}
+
 BOOST_AUTO_TEST_SUITE_END()

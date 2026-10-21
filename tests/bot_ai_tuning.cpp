@@ -3,6 +3,7 @@
 
 #include "ai_combat_tuning.h"
 #include "ai_strafejump.h"
+#include "ai_traversal.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -203,6 +204,111 @@ BOOST_AUTO_TEST_CASE( navigation_floor_safety_only_waives_ordinary_gaps_for_vali
 	BOOST_CHECK( !BotNav_FloorAllows( 1, 0, 1, 0, 200, 1, 1 ) );
 	BOOST_CHECK( BotNav_FloorAllows( 0, 1, 0, 500, 200, 1, 0 ) );
 	BOOST_CHECK( !BotNav_FloorAllows( 0, 1, 0, 500, 200, 1, 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( traversal_fall_prediction_matches_event_thresholds_and_damage_cap )
+{
+	botnav_fall_context_t context = {};
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 650, &context ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 700, &context ), 7 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 16 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 10000, &context ), 96 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( sqrtf( 449000.0f ), &context ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( sqrtf( 451000.0f ), &context ), 7 );
+	context.maxDamage = 10;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 10 );
+	context.siege = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 100 );
+	context.knockdown = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 10 );
+	context.maxDamage = 0;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 400, &context ), 16 );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 370, &context ), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( traversal_fall_prediction_accounts_for_crouch_water_and_force_jump )
+{
+	botnav_fall_context_t context = {};
+	context.ducked = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 700, &context ), 15 );
+	context.waterLevel = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 700, &context ), 7 );
+	context.waterLevel = 2;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 700, &context ), 0 );
+	context.waterLevel = 3;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 10000, &context ), 0 );
+	context = {};
+	context.forceJumpStart = 256;
+	context.forceJumpHeight = 384;
+	context.landingHeight = 256;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 0 );
+	context.landingHeight = 128;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 0 );
+	context.landingHeight = -128;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 1000, &context ), 16 );
+	context.noFallingDamage = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 10000, &context ), 0 );
+	context.noFallingDamage = 0;
+	context.noDamageSurface = 1;
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( 10000, &context ), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( traversal_accepts_only_confirmed_nonlethal_landings_at_current_health )
+{
+	botnav_fall_context_t context = {};
+	const float impact = BotNav_ImpactSpeed( 0, 800, 400 );
+	const int damage = BotNav_PredictFallDamage( impact, &context );
+	BOOST_CHECK_CLOSE( impact, 800.0f, 0.001f );
+	BOOST_CHECK_EQUAL( damage, 10 );
+	BOOST_CHECK( BotNav_LandingAllows( 1, 0, 0.7f, 0, damage, 11 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, 1, 0, damage, 10 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, 1, 0, damage, 1 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 0, 0, 1, 0, 0, 100 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 1, 1, 0, 0, 100 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, 0.69f, 0, 0, 100 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, 1, 1, 0, 100 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, 1, 0, 0, 0 ) );
+	BOOST_CHECK( !BotNav_LandingAllows( 1, 0, std::numeric_limits<float>::quiet_NaN(), 0, 0, 100 ) );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( -1, &context ), INT_MAX );
+	BOOST_CHECK_EQUAL( BotNav_PredictFallDamage( std::numeric_limits<float>::infinity(), &context ), INT_MAX );
+	BOOST_CHECK_EQUAL( BotNav_ImpactSpeed( 0, 0, 400 ), -1 );
+	BOOST_CHECK_EQUAL( BotNav_ImpactSpeed( 0, 800, -1 ), -1 );
+}
+
+BOOST_AUTO_TEST_CASE( traversal_stairs_use_ground_steps_not_legacy_jump_restarts )
+{
+	BOOST_CHECK( BotNav_StepAllows( 1, 1, 1, 1, 0, 0.7f, 18, 18, 0 ) );
+	BOOST_CHECK( BotNav_StepAllows( 1, 1, 1, 1, 0, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 0, 1, 1, 1, 0, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 0, 1, 1, 0, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 0, 1, 0, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 0, 0, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 1, 1, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 0, 0.69f, 8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 0, 1, 19, 18, 0 ) );
+	BOOST_CHECK( BotNav_StepAllows( 1, 1, 1, 1, 0, 1, -8, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 0, 1, -19, 18, 0 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 0, 1, 8, 18, 1 ) );
+	BOOST_CHECK( !BotNav_StepAllows( 1, 1, 1, 1, 0, 1,
+		std::numeric_limits<float>::quiet_NaN(), 18, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( traversal_step_corridors_are_bounded_and_sample_every_eight_units )
+{
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 4, 1024 ), 1 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 48, 1024 ), 6 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 49, 1024 ), 7 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 1024, 1024 ), 128 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 1025, 2048 ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 49, 48 ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( 0, 1024 ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( -1, 1024 ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_StepSegmentSamples( std::numeric_limits<float>::infinity(), 1024 ), 0 );
+	BOOST_CHECK( BotNav_StepEndpointAllows( 64, 64, 18 ) );
+	BOOST_CHECK( BotNav_StepEndpointAllows( 64, 82, 18 ) );
+	BOOST_CHECK( !BotNav_StepEndpointAllows( 64, 83, 18 ) );
+	BOOST_CHECK( !BotNav_StepEndpointAllows( 64, 45, 18 ) );
+	BOOST_CHECK( !BotNav_StepEndpointAllows( 64, std::numeric_limits<float>::quiet_NaN(), 18 ) );
 }
 
 BOOST_AUTO_TEST_CASE( navigation_gap_dispatch_never_falls_back_to_unsafe_grounded_walking )

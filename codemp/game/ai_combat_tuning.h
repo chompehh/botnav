@@ -656,6 +656,13 @@ static inline int NewBotAI_SaberFootingNeedsUpdate(int valid, int previousPhase,
 	return !valid || previousPhase != phase || previousMove != move || previousTactic != tactic;
 }
 
+static inline int NewBotAI_SaberIdleFootingChanged(int idle, int defensive, int recovering,
+	int forward, int right, int cachedForward, int cachedRight)
+{
+	return idle && !defensive && !recovering &&
+		(forward != cachedForward || right != cachedRight);
+}
+
 static inline float NewBotAI_SaberPokeCounterYaw(newbotai_saber_yaw_phase_t phase,
 	float progress, int swingDirection)
 {
@@ -1096,6 +1103,15 @@ static inline void NewBotAI_SaberApplyMovementSafety(newbotai_saber_command_t *c
 		// A blocked directional selection must not fall through to a different swing.
 		command->attack = 0;
 	}
+}
+
+static inline void NewBotAI_SaberBlockedSelectionFooting(newbotai_saber_command_t *command, int side)
+{
+	/* Try a traced approach/side lane without attacking; never substitute a new
+	 * attack for the directional selection that failed its live safety trace. */
+	command->attack = command->jump = 0;
+	command->forward = 1;
+	command->right = side < 0 ? -1 : 1;
 }
 
 static inline int NewBotAI_SaberOwnedActionFlags(int flags, int ownedMask, int plannedFlags)

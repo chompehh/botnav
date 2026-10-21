@@ -85,14 +85,17 @@ def saber_evidence(batches):
 	fields = ["source_context", "record_id", "parent_id", "participant_key", "event_index",
 		"rel_time", "participant_kind", "event_type", "saber_move", "saber_stance",
 		"note", "capture_version", "capture_revision", "torso_timer", "torso_anim",
-		"yaw_sweep", "self_pitch", "sequence_id", "opponent_key", "export_format_version"]
+		"yaw_sweep", "self_pitch", "sequence_id", "opponent_key", "export_format_version",
+		"amount", "attack_elapsed_ms", "grounded", "range_bucket", "forwardmove", "rightmove",
+		"upmove", "self_footing", "enemy_stance", "saber_defense_state",
+		"enemy_saber_defense_state", "recovery", "enemy_recovery", "controller_owns_inputs"]
 	con.execute("CREATE TABLE raw(batch TEXT, filename TEXT, identity TEXT, payload TEXT, observation TEXT, " +
 		", ".join(f"{f} TEXT" for f in fields) + ")")
 	con.execute("""CREATE TABLE learned(batch TEXT, source TEXT, ctx_key INTEGER,
 		stimulus TEXT, response TEXT, follow1 TEXT, follow2 TEXT, samples INTEGER,
 		skill_band INTEGER, wins INTEGER, net_damage REAL)""")
 	con.execute("""CREATE TABLE sessions(batch TEXT, source_context TEXT, record_id TEXT,
-		start_time TEXT, end_time TEXT, mapname TEXT)""")
+		start_time TEXT, end_time TEXT, mapname TEXT, duel_type TEXT)""")
 	con.execute("""CREATE TABLE snapshots(batch TEXT, family TEXT, schema_json TEXT,
 		payload TEXT)""")
 	for batch, directory in batches:
@@ -152,9 +155,9 @@ def saber_evidence(batches):
 							 row["response"], row["follow1"], row["follow2"], int(row["samples"]),
 							 int(row["skill_band"]), int(row["wins"]), float(row["net_damage"])])
 					elif family == "dueltrack_sessions.csv":
-						con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)",
+						con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
 							[batch, row["source_context"], row["record_id"], row["start_time"],
-							 row["end_time"], row["mapname"]])
+							 row["end_time"], row["mapname"], row["type"]])
 				print(json.dumps({"batch": batch, "file": os.path.basename(path),
 					"path": path, "rows": n, "sha256": digest,
 					"encoding": encoding, "columns": reader.fieldnames}))
@@ -172,7 +175,73 @@ def saber_evidence(batches):
 	con.execute("""CREATE INDEX accepted_links ON events
 		(batch,source_context,parent_id,participant_key,rel_time,saber_move)
 		WHERE event_type = 'attack_chain' AND note = 'accepted_link'""")
+	# Capture stores the actual start timestamp as rel_time - attack_elapsed_ms.
+	# Match that timestamp, actual move and opponent; do not infer hits from generic
+	# damage/quality labels, or from an adjacent token/sequence window.
+	con.execute("""CREATE TABLE swing_hits AS
+		SELECT batch, source_context, parent_id, participant_key, opponent_key, saber_move,
+		 CAST(rel_time AS INTEGER) - CAST(attack_elapsed_ms AS INTEGER) AS started_at,
+		 sum(CAST(amount AS INTEGER)) AS damage
+		FROM events WHERE event_type = 'swing_damage' AND note = 'confirmed'
+		 AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
+		 AND attack_elapsed_ms != '' AND CAST(attack_elapsed_ms AS INTEGER) >= 0
+		GROUP BY 1,2,3,4,5,6,7""")
+	con.execute("""CREATE INDEX swing_hit_lookup ON swing_hits
+		(batch,source_context,parent_id,participant_key,opponent_key,saber_move,started_at)""")
+	con.execute("""CREATE TABLE swing_outcomes AS
+		SELECT a.*, s.duel_type, coalesce(h.damage, 0) AS confirmed_damage
+		FROM events a LEFT JOIN swing_hits h
+		 ON h.batch = a.batch AND h.source_context = a.source_context
+		 AND h.parent_id = a.parent_id AND h.participant_key = a.participant_key
+		 AND h.opponent_key = a.opponent_key AND h.saber_move = a.saber_move
+		 AND h.started_at = CAST(a.rel_time AS INTEGER)
+		LEFT JOIN sessions s ON s.batch = a.batch AND s.source_context = a.source_context
+		 AND s.record_id = a.parent_id
+		WHERE a.event_type = 'swing_start' AND a.note = 'accepted'
+		 AND CAST(a.saber_move AS INTEGER) BETWEEN 4 AND 10""")
 	queries = [
+		("Released human directional priors (single attacks, minimum eight starts)", """
+SELECT CAST(duel_type AS INTEGER) AS mode, CAST(saber_stance AS INTEGER) AS self_stance,
+ CAST(enemy_stance AS INTEGER) AS enemy_stance, CAST(saber_move AS INTEGER) AS move,
+ count(*) AS starts, sum(confirmed_damage > 0) AS confirmed_hit_starts
+FROM swing_outcomes WHERE batch = 'Dueltracks1' AND participant_kind IN ('1','2')
+ AND duel_type IN ('0','1') AND grounded = '1' AND range_bucket = '1'
+ AND saber_defense_state = '0' AND recovery = '0'
+GROUP BY 1,2,3,4 HAVING count(*) >= 8 AND sum(confirmed_damage > 0) > 0
+ORDER BY 1,2,3,4"""),
+		("Directional grounded close-range outcomes by stance/context (not combo causality)", """
+SELECT batch, participant_kind, duel_type, saber_stance, enemy_stance,
+ saber_move, count(*) AS accepted_starts,
+ sum(confirmed_damage > 0) AS confirmed_hit_starts, sum(confirmed_damage) AS confirmed_damage
+FROM swing_outcomes WHERE grounded = '1' AND range_bucket = '1'
+ AND saber_defense_state = '0' AND recovery = '0'
+GROUP BY 1,2,3,4,5,6 ORDER BY 1,2,3,4,5,6"""),
+		("Saber close-range input ownership and lateral bias (samples, not independent frames)", """
+SELECT batch, participant_kind, capture_revision, event_type, controller_owns_inputs,
+ count(*) AS samples,
+ sum(CAST(rightmove AS INTEGER) > 0) AS right_input,
+ sum(CAST(rightmove AS INTEGER) < 0) AS left_input,
+ sum(forwardmove = '0' AND rightmove = '0' AND upmove = '0') AS no_move_input
+FROM events WHERE range_bucket = '1' AND grounded = '1'
+ AND event_type IN ('swing_start','attack_sample')
+GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5"""),
+		("Grounded close-range attack-sample ownership summary (not duration or causal stalls)", """
+SELECT batch,
+ CASE WHEN participant_kind IN ('1','2') THEN 'human'
+ WHEN controller_owns_inputs = '1' THEN 'bot-owned' ELSE 'bot-other' END AS input_owner,
+ count(*) AS samples,
+ sum(CAST(rightmove AS INTEGER) > 0) AS right_input,
+ sum(CAST(rightmove AS INTEGER) < 0) AS left_input,
+ sum(forwardmove = '0' AND rightmove = '0' AND upmove = '0') AS no_move_input
+FROM events WHERE range_bucket = '1' AND grounded = '1' AND event_type = 'attack_sample'
+GROUP BY 1,2 ORDER BY 1,2"""),
+		("Unmatched confirmed directional damage (coverage limitation, not counted as misses)", """
+SELECT h.batch, count(*) AS unmatched_hit_windows FROM swing_hits h
+LEFT JOIN swing_outcomes a ON a.batch = h.batch AND a.source_context = h.source_context
+ AND a.parent_id = h.parent_id AND a.participant_key = h.participant_key
+ AND a.opponent_key = h.opponent_key AND a.saber_move = h.saber_move
+ AND CAST(a.rel_time AS INTEGER) = h.started_at
+WHERE a.identity IS NULL GROUP BY 1 ORDER BY 1"""),
 		("Historical snapshot row inventory (batches are never concatenated)", """
 SELECT batch, family, count(*) AS rows, count(DISTINCT payload) AS distinct_complete_rows
 FROM snapshots GROUP BY 1,2 ORDER BY 1,2"""),
@@ -323,7 +392,10 @@ GROUP BY 1,2"""),
 		"Route and learned aggregates are historical snapshots, never independent batches to sum. "
 		"legacy missing animation fields cannot establish active-window timing. Net yaw_sweep "
 		"is not oscillation evidence. No identity overlap does not exclude replay under new IDs. "
-		"Learned action tokens do not identify saber moves or techniques.")
+		"Learned action tokens do not identify saber moves or techniques. "
+		"Confirmed directional hits are joined by captured start timestamp, actual move and opponent. "
+		"No confirmed hit is not proof of a miss: interrupted/partial capture is possible. "
+		"These individual attack outcomes do not demonstrate complete recipe effectiveness.")
 
 
 QUERIES = [
