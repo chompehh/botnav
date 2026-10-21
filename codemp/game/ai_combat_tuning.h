@@ -518,8 +518,30 @@ typedef enum
 	NEWBOTAI_SABER_DIAGONAL_VERTICAL,
 	NEWBOTAI_SABER_COUNTER_ENTRY,
 	NEWBOTAI_SABER_FINISH,
-	NEWBOTAI_SABER_BURST
+	NEWBOTAI_SABER_BURST,
+	NEWBOTAI_SABER_SEQUENCE_FIRST,
+	NEWBOTAI_SABER_SEQUENCE_LAST = NEWBOTAI_SABER_SEQUENCE_FIRST + BOTLEARN_SABER_SEQUENCE_COUNT - 1
 } newbotai_saber_family_t;
+
+static inline int NewBotAI_SaberSequenceId(newbotai_saber_family_t family)
+{
+	return family >= NEWBOTAI_SABER_SEQUENCE_FIRST && family <= NEWBOTAI_SABER_SEQUENCE_LAST ?
+		family - NEWBOTAI_SABER_SEQUENCE_FIRST : -1;
+}
+
+static inline int NewBotAI_SaberSequenceBoundary(int acceptedAttacks)
+{
+	return acceptedAttacks >= 0 && acceptedAttacks % BOTLEARN_SABER_SEQUENCE_LENGTH == 0;
+}
+
+static inline int NewBotAI_SaberSequenceAllowed(newbotai_saber_tactic_context_t context, int sequence)
+{
+	if (sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT)
+		return 0;
+	/* Experimental mixed recipes need an exposed opponent, not a defense override. */
+	return sequence < 2 || (!context.enemyAttacking && !context.recentlyHurt &&
+		(context.enemyRecovering || context.enemyVulnerable));
+}
 
 static inline int NewBotAI_SaberBurstComplete(newbotai_saber_family_t family, int acceptedAttacks, int exposed)
 {
@@ -640,6 +662,22 @@ static inline float NewBotAI_SaberPokeCounterYaw(newbotai_saber_yaw_phase_t phas
 	return (swingDirection < 0 ? -1.0f : 1.0f) * 6.0f * envelope;
 }
 
+static inline float NewBotAI_SaberContactCounterYaw(newbotai_saber_yaw_phase_t phase,
+	float progress, int actualDirection, float range, float skill)
+{
+	float scale;
+	if (range < 0.0f || range > NEWBOTAI_SABER_LONG_SWING_RANGE)
+		return 0.0f;
+	if (skill < 1.0f) skill = 1.0f;
+	if (skill > 10.0f) skill = 10.0f;
+	scale = 0.25f + 0.75f * (skill - 1.0f) / 9.0f;
+	/* A bounded local correction near contact, not a second full sweep. */
+	if (range > NEWBOTAI_SABER_SWING_START_MAX_RANGE)
+		scale *= (NEWBOTAI_SABER_LONG_SWING_RANGE - range) /
+			(NEWBOTAI_SABER_LONG_SWING_RANGE - NEWBOTAI_SABER_SWING_START_MAX_RANGE);
+	return NewBotAI_SaberPokeCounterYaw(phase, progress, actualDirection) * scale;
+}
+
 // Conservative control envelopes, not measured human animation templates.
 #define NEWBOTAI_SABER_SWEEP_DEGREES 18.0f
 #define NEWBOTAI_SABER_SWEEP_RATE 240.0f
@@ -755,6 +793,15 @@ static inline newbotai_saber_family_t NewBotAI_SelectSaberFamily(
 static inline void NewBotAI_SaberSelectionInputs(newbotai_saber_family_t family,
 	int stage, int direction, int *forward, int *right)
 {
+	const int attack = BotLearn_SaberSequenceAttack(NewBotAI_SaberSequenceId(family), stage);
+	if (attack >= 0)
+	{
+		/* All catalog recipes use upper diagonals/horizontals/verticals. No
+		 * backward selection, jump, roll, special or stance change is requested. */
+		*forward = attack == 0 || attack == 5 || attack == 6 ? 1 : 0;
+		*right = attack == 0 || attack == 1 ? 1 : attack == 4 || attack == 5 ? -1 : 0;
+		return;
+	}
 	*forward = 0;
 	*right = direction < 0 ? -1 : 1;
 	if (family == NEWBOTAI_SABER_DIAGONAL_VERTICAL)
@@ -792,6 +839,8 @@ static inline void NewBotAI_SaberFanStanceInputs(int fanStance, newbotai_saber_f
 	int stage, int direction, int *forward, int *right)
 {
 	if (!fanStance)
+		return;
+	if (NewBotAI_SaberSequenceId(family) >= 0)
 		return;
 	if (family == NEWBOTAI_SABER_FINISH)
 	{
@@ -1621,6 +1670,39 @@ static inline void NewBotAI_GetSaberActiveWiggle(newbotai_saber_yaw_phase_t phas
 	if (speed > 20.0f) speed = 20.0f;
 	NewBotAI_GetFanWobbleOffsets((float)(elapsedMs - delayMs),
 		yawAmplitude, pitchAmplitude, speed, yaw, pitch);
+}
+
+static inline void NewBotAI_GetSaberAnimationWiggle(newbotai_saber_yaw_phase_t phase,
+	float progress, int attackIndex, int elapsedMs, int delayMs,
+	float yawAmplitude, float pitchAmplitude, float speed, float *yaw, float *pitch)
+{
+	float envelope, angle;
+	*yaw = *pitch = 0.0f;
+	if (phase != NEWBOTAI_SABER_YAW_ACTIVE || attackIndex < 0 || attackIndex >= 7 ||
+		progress <= 0.15f || progress >= 0.8f || elapsedMs <= delayMs || speed <= 0.0f)
+		return;
+	envelope = sinf((progress - 0.15f) / 0.65f * 3.14159265359f);
+	/* Fade from zero at the delay boundary as well as at both animation edges.
+	 * This is an experimental oscillation, not inferred from net yaw_sweep. */
+	if (elapsedMs - delayMs < 100)
+		envelope *= (elapsedMs - delayMs) / 100.0f;
+	NewBotAI_GetSaberActiveWiggle(phase, elapsedMs, delayMs,
+		yawAmplitude, pitchAmplitude, speed, yaw, pitch);
+	if (speed > 20.0f) speed = 20.0f;
+	angle = (elapsedMs - delayMs) * 0.001f * speed * 6.28318530718f;
+	if (yawAmplitude < 0.0f) yawAmplitude = 0.0f;
+	if (yawAmplitude > 8.0f) yawAmplitude = 8.0f;
+	*yaw = yawAmplitude * sinf(angle) * envelope;
+	*pitch *= envelope;
+	if (attackIndex == 6)
+		*yaw *= 0.35f;
+	else if (attackIndex == 1 || attackIndex == 4)
+		*pitch *= 0.5f;
+	else
+	{
+		*yaw *= 0.7f;
+		*pitch *= 0.7f;
+	}
 }
 
 static inline int NewBotAI_ShouldForceImmediateSaberThrowHop(

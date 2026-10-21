@@ -1,16 +1,18 @@
 #!/usr/bin/env python3
 """Reproducible duel-track report for botnav bot tuning.
 
-Every figure printed comes from a query in QUERIES below, so humans, Copilot and
-AI Studio can quote the same numbers. Requires: pip install duckdb
+Every figure printed comes from a printed query, so reports can quote the same
+numbers. The general report requires duckdb; --saber-evidence uses stdlib CSV/SQLite.
 
 Usage: python3 scripts/dueltrack_report.py [csv_dir] [--revision REV]
+       python3 scripts/dueltrack_report.py . --saber-evidence --release-dir PATH
 
 Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 - Some export parts contain latin-1 bytes; files are re-encoded to UTF-8 first.
 - Event and geometry parts have different column sets; they are unioned by name
   and read as text, so numbers are cast explicitly.
-- Exact duplicate rows are removed before counting.
+- The general report removes exact duplicate rows. Saber evidence preserves raw
+  files/batches and selects the newest export schema per event identity.
 - participant_kind: 0 bot, 1 account human, 2 guest human.
 - range_bucket 1 = under 128 units. self_footing: 0 still, 1 advance, 2 retreat, 3 lateral.
 - dueltrack_learned rows are only current-format when (ctx_key & 0x60000000) = 0x60000000;
@@ -18,15 +20,263 @@ Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 """
 
 import argparse
+import csv
 import glob
+import hashlib
+import json
 import os
+import re
+import sqlite3
 import sys
 import tempfile
 
-try:
-	import duckdb
-except ImportError:
-	sys.exit("duckdb is required: pip install duckdb")
+
+def print_batch_inventory(batch, directory):
+	"""Detect internal split gaps; absent trailing parts need an exporter manifest."""
+	print(json.dumps({"batch": batch, "provenance":
+		"https://github.com/chompehh/botnav/releases/tag/Dueltracks"
+		if batch == "Dueltracks1" else "repository-local export; not superseded by release"}))
+	for family in ("events", "geometry"):
+		pattern = re.compile(r"dueltrack_" + family + r"(?:_part([0-9]+))?\.csv$")
+		parts = set()
+		for path in glob.glob(os.path.join(directory, "dueltrack_" + family + "*.csv")):
+			match = pattern.fullmatch(os.path.basename(path))
+			if match:
+				parts.add(int(match.group(1)) if match.group(1) else 1)
+		missing = sorted(set(range(1, max(parts) + 1)) - parts) if parts else [1]
+		print(json.dumps({"batch": batch, "split_family": family, "present_parts": sorted(parts),
+			"missing_internal_parts": missing,
+			"trailing_completeness": "unknown without exporter manifest"}))
+	required = ["dueltrack_" + name + ".csv" for name in
+		("aggregate", "learned", "learned_evidence", "participants", "sessions")]
+	print(json.dumps({"batch": batch, "missing_support_files":
+		[name for name in required if not os.path.isfile(os.path.join(directory, name))]}))
+
+
+def saber_evidence(batches):
+	"""Keep exports separate; identity overlap is not proof of identical payloads."""
+	con = sqlite3.connect(":memory:")
+	con.execute("PRAGMA temp_store = MEMORY")
+	fields = ["source_context", "record_id", "parent_id", "participant_key", "event_index",
+		"rel_time", "participant_kind", "event_type", "saber_move", "saber_stance",
+		"note", "capture_version", "capture_revision", "torso_timer", "torso_anim",
+		"yaw_sweep", "self_pitch", "sequence_id", "opponent_key", "export_format_version"]
+	con.execute("CREATE TABLE raw(batch TEXT, filename TEXT, identity TEXT, payload TEXT, observation TEXT, " +
+		", ".join(f"{f} TEXT" for f in fields) + ")")
+	con.execute("""CREATE TABLE learned(batch TEXT, source TEXT, ctx_key INTEGER,
+		stimulus TEXT, response TEXT, follow1 TEXT, follow2 TEXT, samples INTEGER,
+		skill_band INTEGER, wins INTEGER, net_damage REAL)""")
+	con.execute("""CREATE TABLE sessions(batch TEXT, source_context TEXT, record_id TEXT,
+		start_time TEXT, end_time TEXT, mapname TEXT)""")
+	con.execute("""CREATE TABLE snapshots(batch TEXT, family TEXT, schema_json TEXT,
+		payload TEXT)""")
+	for batch, directory in batches:
+		print_batch_inventory(batch, directory)
+		for path in sorted(glob.glob(os.path.join(directory, "dueltrack_events*.csv"))):
+			with open(path, "rb") as src:
+				digest = hashlib.file_digest(src, "sha256").hexdigest()
+			# The exports contain legacy Latin-1 names as well as UTF-8. Identifiers
+			# and measured columns are ASCII; do not use labels as identity keys.
+			with open(path, encoding="latin-1", newline="") as src:
+				reader = csv.DictReader(src)
+				rows = []
+				n = 0
+				for row in reader:
+					identity = json.dumps([row.get(f, "") for f in fields[:6]])
+					payload = hashlib.sha256(json.dumps(
+						{k: v for k, v in row.items() if v}, sort_keys=True).encode()).hexdigest()
+					core = ["participant_key", "opponent_key", "rel_time", "event_index",
+						"event_type", "saber_move", "enemy_saber_move", "amount", "quality", "note",
+						"self_hp", "self_armor", "self_force", "enemy_hp", "enemy_armor",
+						"enemy_force", "buttons", "state", "range_bucket", "yaw_delta"]
+					observation = hashlib.sha256(json.dumps(
+						[row.get(f, "") for f in core]).encode()).hexdigest()
+					rows.append([batch, os.path.basename(path), identity, payload, observation] +
+						[row.get(f, "") for f in fields])
+					n += 1
+					if len(rows) == 2048:
+						con.executemany("INSERT INTO raw VALUES (" +
+							",".join("?" for _ in rows[0]) + ")", rows)
+						rows.clear()
+				if rows:
+					con.executemany("INSERT INTO raw VALUES (" +
+						",".join("?" for _ in rows[0]) + ")", rows)
+				print(json.dumps({"batch": batch, "file": os.path.basename(path),
+					"rows": n, "sha256": digest, "columns": reader.fieldnames}))
+		for path in sorted(glob.glob(os.path.join(directory, "dueltrack*.csv")) +
+			glob.glob(os.path.join(directory, "strafetrack_routes.csv"))):
+			if os.path.basename(path).startswith("dueltrack_events"):
+				continue
+			with open(path, "rb") as src:
+				digest = hashlib.file_digest(src, "sha256").hexdigest()
+			with open(path, encoding="latin-1", newline="") as src:
+				reader = csv.DictReader(src)
+				n = 0
+				for row in reader:
+					n += 1
+					if os.path.basename(path) in ("dueltrack_sessions.csv", "strafetrack_routes.csv"):
+						# Match complete row tuples only when the column sets agree;
+						# record IDs alone do not identify historical snapshots.
+						payload = hashlib.sha256(json.dumps(
+							[row[k] for k in sorted(row)]).encode()).hexdigest()
+						con.execute("INSERT INTO snapshots VALUES (?,?,?,?)",
+							[batch, os.path.basename(path), json.dumps(sorted(row)), payload])
+					if os.path.basename(path) == "dueltrack_learned.csv":
+						con.execute("INSERT INTO learned VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+							[batch, row["source"], int(row["ctx_key"]), row["stimulus"],
+							 row["response"], row["follow1"], row["follow2"], int(row["samples"]),
+							 int(row["skill_band"]), int(row["wins"]), float(row["net_damage"])])
+					elif os.path.basename(path) == "dueltrack_sessions.csv":
+						con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?)",
+							[batch, row["source_context"], row["record_id"], row["start_time"],
+							 row["end_time"], row["mapname"]])
+				print(json.dumps({"batch": batch, "file": os.path.basename(path),
+					"rows": n, "sha256": digest, "columns": reader.fieldnames}))
+	con.execute("""CREATE TABLE events AS SELECT * FROM (
+		SELECT *, row_number() OVER (PARTITION BY batch, identity
+			ORDER BY CAST(export_format_version AS INTEGER) DESC, rowid) AS n
+		FROM raw) WHERE n = 1""")
+	con.execute("""CREATE INDEX accepted_links ON events
+		(batch,source_context,parent_id,participant_key,rel_time,saber_move)
+		WHERE event_type = 'attack_chain' AND note = 'accepted_link'""")
+	queries = [
+		("Historical snapshot row inventory (batches are never concatenated)", """
+SELECT batch, family, count(*) AS rows, count(DISTINCT payload) AS distinct_complete_rows
+FROM snapshots GROUP BY 1,2 ORDER BY 1,2"""),
+		("Historical complete-row snapshot overlap (requires identical schemas)", """
+SELECT a.family, a.batch, b.batch,
+ count(DISTINCT CASE WHEN a.payload = b.payload THEN a.payload END) AS identical_complete_rows
+FROM snapshots a JOIN snapshots b ON a.batch < b.batch AND a.family = b.family
+ AND a.schema_json = b.schema_json
+GROUP BY 1,2,3 ORDER BY 1,2,3"""),
+		("Reused session IDs versus session intervals (diagnostic, not a cross-batch join key)", """
+SELECT a.batch, b.batch,
+ sum(a.source_context = b.source_context AND a.record_id = b.record_id) AS reused_session_ids,
+ sum(a.source_context = b.source_context AND a.start_time = b.start_time
+  AND a.end_time = b.end_time AND a.mapname = b.mapname) AS matching_session_intervals
+FROM sessions a JOIN sessions b ON a.batch < b.batch
+GROUP BY 1,2 ORDER BY 1,2"""),
+		("Batch duplicate identities and payload variants (including schema upgrades)", """
+SELECT batch, count(*) AS raw_rows, count(DISTINCT identity) AS identities,
+ count(*) - count(DISTINCT identity) AS repeated_identities,
+ count(DISTINCT identity || payload) - count(DISTINCT identity) AS payload_variants,
+ count(DISTINCT identity || observation) - count(DISTINCT identity) AS core_payload_conflicts
+FROM raw GROUP BY batch"""),
+		("Cross-batch identity and exact-payload overlap", """
+SELECT a.batch, b.batch, count(*) AS overlapping_identities,
+ sum(a.payload = b.payload) AS identical_payloads
+FROM events a JOIN events b ON a.identity = b.identity AND a.batch < b.batch
+GROUP BY a.batch, b.batch"""),
+		("Core fingerprint match candidates (not automatically deduplicated across batches)", """
+SELECT a.batch, a.parent_id, b.batch, b.parent_id,
+ a.event_type, a.rel_time, a.event_index, a.capture_revision, b.capture_revision,
+ sa.start_time, sb.start_time, sa.mapname, sb.mapname
+FROM events a JOIN events b ON a.batch < b.batch AND a.observation = b.observation
+LEFT JOIN sessions sa ON sa.batch = a.batch AND sa.source_context = a.source_context
+ AND sa.record_id = a.parent_id
+LEFT JOIN sessions sb ON sb.batch = b.batch AND sb.source_context = b.source_context
+ AND sb.record_id = b.parent_id
+ORDER BY a.batch, a.parent_id, a.event_index"""),
+		("Cross-batch core observations ignoring export record/parent IDs", """
+SELECT a.batch, b.batch, count(*) AS matching_observation_fingerprints
+FROM (SELECT DISTINCT batch, observation FROM events) a
+JOIN (SELECT DISTINCT batch, observation FROM events) b
+ ON a.batch < b.batch AND a.observation = b.observation
+GROUP BY a.batch, b.batch"""),
+		("Capture provenance and animation coverage", """
+SELECT batch, capture_version, capture_revision, count(*) AS events,
+ sum(torso_timer != '' AND torso_anim != '' AND CAST(torso_timer AS INTEGER) >= 0
+ AND CAST(torso_anim AS INTEGER) >= 0) AS animation_rows
+FROM events GROUP BY 1,2,3 ORDER BY 1,4 DESC"""),
+		("Human basic swing starts (observed, not demonstrated combos)", """
+SELECT batch, saber_stance, saber_move, count(*) AS starts
+FROM events WHERE participant_kind IN ('1','2') AND event_type = 'swing_start'
+ AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
+GROUP BY 1,2,3 ORDER BY 1,4 DESC"""),
+		("Human adjacent accepted starts within 1000ms (and explicit accepted_link annotations)", """
+WITH attacks AS (
+ SELECT *, lag(saber_move) OVER w AS previous_move,
+ lag(rel_time) OVER w AS previous_time, lag(saber_stance) OVER w AS previous_stance,
+ lag(opponent_key) OVER w AS previous_opponent
+ FROM events WHERE event_type = 'swing_start' AND participant_kind IN ('1','2')
+ WINDOW w AS (PARTITION BY batch,source_context,parent_id,participant_key
+ ORDER BY CAST(rel_time AS INTEGER),CAST(event_index AS INTEGER))
+)
+SELECT a.batch, previous_move || '>' || a.saber_move AS pair, count(*) AS adjacent_starts,
+ sum(EXISTS(SELECT 1 FROM events link WHERE link.batch = a.batch
+  AND link.source_context = a.source_context AND link.parent_id = a.parent_id
+  AND link.participant_key = a.participant_key AND link.rel_time = a.rel_time
+  AND link.saber_move = a.saber_move AND link.event_type = 'attack_chain'
+  AND link.note = 'accepted_link')) AS explicit_accepted_links
+FROM attacks a WHERE note = 'accepted'
+ AND CAST(rel_time AS INTEGER) - CAST(previous_time AS INTEGER) BETWEEN 1 AND 1000
+ AND saber_stance = previous_stance AND opponent_key = previous_opponent
+ AND CAST(previous_move AS INTEGER) BETWEEN 4 AND 10
+ AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
+GROUP BY 1,2 ORDER BY 1,3 DESC"""),
+		("Human accepted three-swing windows (sliding observations, not causal combo outcomes)", """
+WITH linked AS (
+ SELECT a.*, EXISTS(SELECT 1 FROM events link WHERE link.batch = a.batch
+  AND link.source_context = a.source_context AND link.parent_id = a.parent_id
+  AND link.participant_key = a.participant_key AND link.rel_time = a.rel_time
+  AND link.saber_move = a.saber_move AND link.event_type = 'attack_chain'
+  AND link.note = 'accepted_link') AS accepted_link
+ FROM events a WHERE event_type = 'swing_start' AND participant_kind IN ('1','2')
+), triples AS (
+ SELECT *, lag(saber_move, 2) OVER w AS first_move, lag(saber_move) OVER w AS second_move,
+ lag(rel_time, 2) OVER w AS first_time, lag(rel_time) OVER w AS second_time,
+ lag(saber_stance, 2) OVER w AS first_stance, lag(saber_stance) OVER w AS second_stance,
+ lag(opponent_key, 2) OVER w AS first_opponent, lag(opponent_key) OVER w AS second_opponent,
+ lag(note, 2) OVER w AS first_note, lag(note) OVER w AS second_note,
+ lag(accepted_link) OVER w AS second_link
+ FROM linked WINDOW w AS (PARTITION BY batch,source_context,parent_id,participant_key
+ ORDER BY CAST(rel_time AS INTEGER),CAST(event_index AS INTEGER))
+)
+SELECT batch, saber_stance, first_move || '>' || second_move || '>' || saber_move AS sequence,
+ count(*) AS observed_triples, sum(second_link AND accepted_link) AS explicit_linked_triples
+FROM triples WHERE note = 'accepted' AND first_note = 'accepted' AND second_note = 'accepted'
+ AND CAST(second_time AS INTEGER) - CAST(first_time AS INTEGER) BETWEEN 1 AND 1000
+ AND CAST(rel_time AS INTEGER) - CAST(second_time AS INTEGER) BETWEEN 1 AND 1000
+ AND saber_stance = first_stance AND saber_stance = second_stance
+ AND opponent_key = first_opponent AND opponent_key = second_opponent
+ AND CAST(first_move AS INTEGER) BETWEEN 4 AND 10
+ AND CAST(second_move AS INTEGER) BETWEEN 4 AND 10 AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
+GROUP BY 1,2,3 ORDER BY 1,4 DESC,2,3"""),
+		("Human accepted-start annotation coverage", """
+SELECT batch, note, count(*) AS starts FROM events
+WHERE participant_kind IN ('1','2') AND event_type = 'swing_start'
+GROUP BY 1,2 ORDER BY 1,3 DESC"""),
+		("Learned action-token compatibility, kept separate by batch/source/mode", """
+SELECT batch, source, (ctx_key >> 16) & 3 AS mode,
+ (ctx_key & 1610612736) = 1610612736 AS current_format,
+ count(*) AS rows, sum(samples) AS samples
+FROM learned GROUP BY 1,2,3,4 ORDER BY 1,2,3,4"""),
+		("Learned aggregate snapshot overlap (never sum overlapping exports)", """
+SELECT a.batch, b.batch, count(*) AS overlapping_sequence_keys,
+ sum(a.samples = b.samples AND a.wins = b.wins AND a.net_damage = b.net_damage) AS identical_aggregates,
+ sum(a.samples != b.samples OR a.wins != b.wins OR a.net_damage != b.net_damage) AS changed_aggregates
+FROM learned a JOIN learned b ON a.batch < b.batch AND a.source = b.source
+ AND a.skill_band = b.skill_band AND a.ctx_key = b.ctx_key AND a.stimulus = b.stimulus
+ AND a.response = b.response AND a.follow1 = b.follow1 AND a.follow2 = b.follow2
+GROUP BY 1,2"""),
+	]
+	for title, query in queries:
+		print("\n## " + title + "\n```sql\n" + query.strip() + "\n```")
+		cursor = con.execute(query)
+		print(json.dumps([d[0] for d in cursor.description]))
+		for row in cursor:
+			print(json.dumps(row))
+	print("\nDeduplication: newest export_format_version per identity wins; all raw payload variants "
+		"remain available in raw. Schema-upgrade defaults are not extra observations.\n"
+		"Gaps: accepted pairs/triples are overlapping observational windows, not proof of an "
+		"effective or intentional combo. No player/chat identities are printed. "
+		"Zero exact session-row overlap does not rule out the same duel with changed metadata. "
+		"Session IDs are reused across captures: all event/session joins and deduplication "
+		"are scoped to source batch, never global record_id or parent_id. "
+		"Route and learned aggregates are historical snapshots, never independent batches to sum. "
+		"legacy missing animation fields cannot establish active-window timing. Net yaw_sweep "
+		"is not oscillation evidence. No identity overlap does not exclude replay under new IDs. "
+		"Learned action tokens do not identify saber moves or techniques.")
 
 
 QUERIES = [
@@ -36,11 +286,11 @@ SELECT participant_kind,
 	count(*) FILTER (WHERE saber_move = '14') AS roll_stabs
 FROM events WHERE event_type = 'swing_start' {rev}
 GROUP BY 1 ORDER BY 1"""),
-	("Every roll-stab row (own or enemy)", """
-SELECT participant_key, opponent_key, event_type, quality, note, self_force, amount
+	("Roll-stab rows (own or enemy), without player identities", """
+SELECT participant_kind, opponent_kind, event_type, quality, note, self_force, amount
 FROM events WHERE (saber_move = '14' OR enemy_saber_move = '14')
-	AND event_type NOT IN ('regen', 'range', 'air') {rev}
-ORDER BY participant_key, TRY_CAST(rel_time AS INTEGER)"""),
+	AND event_type NOT IN ('regen', 'range', 'air', 'chat') {rev}
+ORDER BY participant_kind, TRY_CAST(rel_time AS INTEGER)"""),
 	("Close-range (<128u) swing-start footing input", """
 SELECT participant_kind,
 	count(*) AS n,
@@ -122,10 +372,25 @@ def main():
 	parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
 	parser.add_argument("csv_dir", nargs="?", default=".")
 	parser.add_argument("--revision", help="only events with this capture_revision")
+	parser.add_argument("--saber-evidence", action="store_true",
+		help="stdlib CSV/SQLite batch provenance and saber evidence (prints exact SQL)")
+	parser.add_argument("--release-dir", help="separately downloaded Dueltracks1 CSV directory")
 	args = parser.parse_args()
 
+	if args.saber_evidence:
+		if args.revision:
+			parser.error("--revision is for the general report; saber evidence preserves every capture revision")
+		batches = [("repository", args.csv_dir)]
+		if args.release_dir:
+			batches.append(("Dueltracks1", args.release_dir))
+		saber_evidence(batches)
+		return
+	try:
+		import duckdb
+	except ImportError:
+		sys.exit("duckdb is required for the general report: pip install duckdb")
 	con = duckdb.connect()
-	with tempfile.TemporaryDirectory() as tmp:
+	with tempfile.TemporaryDirectory(dir=args.csv_dir) as tmp:
 		events = to_utf8(sorted(glob.glob(os.path.join(args.csv_dir, "dueltrack_events*.csv"))), tmp)
 		learned = to_utf8(sorted(glob.glob(os.path.join(args.csv_dir, "dueltrack_learned.csv"))), tmp)
 		if not load(con, "events", events):

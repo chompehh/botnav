@@ -10,7 +10,8 @@
 #define BOT_SFJ_PURSUIT_START_RATE 80.0f
 #define BOT_SFJ_PURSUIT_STOP_RATE 20.0f
 #define BOT_SFJ_JUMP_VELOCITY 225.0f
-#define BOT_SFJ_MAX_ARC_STEPS 256
+/* Two seconds remain representable even at the supported 1 ms pmove slice. */
+#define BOT_SFJ_MAX_ARC_STEPS 2048
 
 static inline float BotSFJ_ClampSetting(float value, float minimum, float maximum)
 {
@@ -267,8 +268,8 @@ static inline float BotSFJ_SteerYaw(float previousYaw, float targetYaw, float ma
 
 /*
  * PM_AirMove uses PM_Accelerate(wishdir, ps->speed, pm_airaccelerate). For
- * forward-only input, aim at that acceleration boundary and clamp toward the
- * route so low speed never produces acos-domain or zero-vector failures.
+ * the world wish direction, aim at that acceleration boundary and clamp toward
+ * the route. Command axes get their own view-yaw compensation below.
  */
 static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float velocityY,
 	float wishSpeed, float airAccelerate, float commandSeconds, int side)
@@ -328,6 +329,78 @@ static inline int BotSFJ_JumpPressed(bot_sfj_phase_t phase, int grounded)
 {
 	return grounded &&
 		(phase == BOT_SFJ_PHASE_TAKEOFF || phase == BOT_SFJ_PHASE_REJUMP);
+}
+
+/* A queued release is not evidence until pmove has consumed its usercmd. */
+static inline int BotSFJ_JumpReleaseConfirmed(int releaseTime, int commandTime,
+	int jumpHeld)
+{
+	return releaseTime > 0 && commandTime >= releaseTime && !jumpHeld;
+}
+
+static inline bot_sfj_phase_t BotSFJ_ReleasedNextPhase(bot_sfj_phase_t phase,
+	int grounded, int phaseAgeMs, int releaseConfirmed)
+{
+	if (grounded && (phase == BOT_SFJ_PHASE_AIR || phase == BOT_SFJ_PHASE_LANDING))
+		return releaseConfirmed ? BOT_SFJ_PHASE_REJUMP : BOT_SFJ_PHASE_LANDING;
+	return BotSFJ_NextPhase(phase, 1, 1, 1, grounded, phaseAgeMs);
+}
+
+/*
+ * Half-beat alternates W+side with opposite-side-only on successive hops.
+ * Positive rightmove points clockwise in JKA; compensate view yaw so the
+ * resulting world wish direction is identical to the predictor's.
+ */
+static inline void BotSFJ_HalfBeatAxes(int side, int strafeOnly,
+	int *forward, int *right)
+{
+	*forward = strafeOnly ? 0 : 127;
+	*right = (side < 0 ? -127 : 127) * (strafeOnly ? -1 : 1);
+}
+
+static inline float BotSFJ_ViewYawForAxes(float wishYaw, int forward, int right)
+{
+	return wishYaw + atan2f((float)right, (float)forward) * 57.29577951308232f;
+}
+
+/* Reject hairpins, but allow a gently curving, linked trail to be considered. */
+static inline int BotSFJ_CurveSegmentAllows(float localAlignment, float totalAlignment)
+{
+	return isfinite(localAlignment) && isfinite(totalAlignment) &&
+		localAlignment >= 0.70710678f && totalAlignment >= 0.5f;
+}
+
+static inline int BotSFJ_AdvanceCurveLinkAllows(int requiredFlags, int linked,
+	int passable, float heightDelta, float baseHeightDelta, float alignment,
+	float endpointProgress, float maxDrop)
+{
+	return !requiredFlags && linked && passable &&
+		BotSFJ_HeightAllows(heightDelta, 32.0f, maxDrop) &&
+		BotSFJ_HeightAllows(baseHeightDelta, 64.0f, maxDrop) &&
+		alignment >= 0.5f && endpointProgress >= 0.0f;
+}
+
+static inline int BotSFJ_EndpointAllows(float startX, float startY,
+	float endX, float endY, float landingX, float landingY, float endTolerance)
+{
+	const float dx = endX - startX;
+	const float dy = endY - startY;
+	const float length = sqrtf(dx * dx + dy * dy);
+	const float progress = (landingX - startX) * dx + (landingY - startY) * dy;
+
+	return length > 1.0f && progress >= 0.0f &&
+		progress <= length * (length + endTolerance);
+}
+
+static inline int BotSFJ_EndpointPlaneAllows(float fromX, float fromY,
+	float endX, float endY, float landingX, float landingY, float endTolerance)
+{
+	const float dx = endX - fromX;
+	const float dy = endY - fromY;
+	const float length = sqrtf(dx * dx + dy * dy);
+	const float beyond = (landingX - endX) * dx + (landingY - endY) * dy;
+
+	return length > 1.0f && beyond <= endTolerance * length;
 }
 
 /*

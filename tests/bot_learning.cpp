@@ -763,4 +763,54 @@ BOOST_AUTO_TEST_CASE(baked_baseline_respects_safety_dimensions)
 		BOTLEARN_BASELINE_FOLLOW_ANY, 1.0f, 7.0f), 0);
 }
 
+BOOST_AUTO_TEST_CASE( saber_recipe_learning_preserves_tokens_and_requires_exact_acceptance )
+{
+	BOOST_CHECK_EQUAL( BOTLEARN_TOK_SWING, 7 );
+	BOOST_CHECK_EQUAL( BOTLEARN_TOK_HOP, 13 );
+	BOOST_CHECK_EQUAL( BOTLEARN_TOK_COUNT, 14 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAttack( -1, 0 ), -1 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAttack( BOTLEARN_SABER_SEQUENCE_COUNT, 0 ), -1 );
+	BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAttack( 0, -1 ), -1 );
+	for (int sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; ++sequence)
+	{
+		int accepted = 0;
+		for (int stage = 0; stage < BOTLEARN_SABER_SEQUENCE_LENGTH; ++stage)
+		{
+			const int attack = BotLearn_SaberSequenceAttack( sequence, stage );
+			BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAdvance( sequence, accepted,
+				stage, (attack + 1) % 7, BOTLEARN_DEFENSE_NONE ), -1 );
+			BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAdvance( sequence, accepted,
+				stage + 1, attack, BOTLEARN_DEFENSE_NONE ), -1 );
+			for (int defense = BOTLEARN_DEFENSE_PARRY; defense <= BOTLEARN_DEFENSE_LOST; ++defense)
+				BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAdvance( sequence, accepted,
+					stage, attack, defense ), -1 );
+			accepted = BotLearn_SaberSequenceAdvance( sequence, accepted, stage, attack, BOTLEARN_DEFENSE_NONE );
+			BOOST_CHECK_EQUAL( accepted, stage + 1 );
+		}
+		BOOST_CHECK_EQUAL( accepted, BOTLEARN_SABER_SEQUENCE_LENGTH );
+		BOOST_CHECK_EQUAL( BotLearn_SaberSequenceAdvance( sequence, accepted, 3, 0, 0 ), -1 );
+		BOOST_CHECK_EQUAL( BotLearn_SaberSequenceWeight( sequence, 1000 ),
+			BotLearn_SaberSequencePrior( sequence ) + BOTLEARN_BONUS_CAP );
+		BOOST_CHECK_GE( BotLearn_SaberSequenceWeight( sequence, -1000 ), 1 );
+	}
+	BOOST_CHECK_GT( BotLearn_SaberSequencePrior( 0 ), BotLearn_SaberSequencePrior( 1 ) );
+	BOOST_CHECK_GT( BotLearn_SaberSequencePrior( 1 ), BotLearn_SaberSequencePrior( 2 ) );
+}
+
+BOOST_AUTO_TEST_CASE( saber_technique_context_does_not_relax_defense_recovery_or_air_gates )
+{
+	const int base = BotLearn_ContextKey(100, 100, 100, 100, 0, 2, 2);
+	const int context = BotLearn_ContextFooting(
+		BotLearn_ContextSafety(base, 0, 0, 0, 0, 0, 0, 0), BOTLEARN_FOOTING_ADVANCE);
+	BOOST_CHECK( BotLearn_SaberTechniqueContextAllowed( context ) );
+	BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( base ) );
+	BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( -1 ) );
+	for (int defense = BOTLEARN_DEFENSE_PARRY; defense <= BOTLEARN_DEFENSE_UNKNOWN; ++defense)
+		BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( context | (defense << 18) ) );
+	BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( context | (1 << 24) ) );
+	BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( context | (1 << 26) ) );
+	BOOST_CHECK( !BotLearn_SaberTechniqueContextAllowed( context | (2 << 16) ) );
+	BOOST_CHECK( BotLearn_SaberTechniqueContextAllowed( context | (1 << 16) ) );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

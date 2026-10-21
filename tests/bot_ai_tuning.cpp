@@ -1942,6 +1942,112 @@ BOOST_AUTO_TEST_CASE( saber_active_wiggle_obeys_delay_axes_and_caps )
 	BOOST_CHECK_SMALL( pitch, 0.001f );
 }
 
+BOOST_AUTO_TEST_CASE( saber_catalog_has_twelve_distinct_ordinary_grounded_recipes )
+{
+	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	int signatures[BOTLEARN_SABER_SEQUENCE_COUNT] = {};
+	for (int sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; ++sequence)
+	{
+		const auto family = (newbotai_saber_family_t)(NEWBOTAI_SABER_SEQUENCE_FIRST + sequence);
+		BOOST_CHECK_EQUAL( NewBotAI_SaberSequenceId( family ), sequence );
+		for (int stage = 0; stage < BOTLEARN_SABER_SEQUENCE_LENGTH; ++stage)
+		{
+			int forward = 0, right = 0, expectedForward = 0, expectedRight = 0;
+			const int attack = BotLearn_SaberSequenceAttack( sequence, stage );
+			signatures[sequence] = signatures[sequence] * 7 + attack;
+			BOOST_REQUIRE( NewBotAI_SaberPreparationInputs( attack, &expectedForward, &expectedRight ) );
+			NewBotAI_SaberSelectionInputs( family, stage, -1, &forward, &right );
+			NewBotAI_SaberFanStanceInputs( 1, family, stage, -1, &forward, &right );
+			BOOST_CHECK_EQUAL( forward, expectedForward );
+			BOOST_CHECK_EQUAL( right, expectedRight );
+			BOOST_CHECK_GE( forward, 0 ); // Never selects a backward stab or aerial special.
+			auto command = NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_ATTACK,
+				family, stage, -1, 1, 1, 1, 0 );
+			BOOST_CHECK_EQUAL( command.attack, 1 );
+			BOOST_CHECK_EQUAL( command.jump, 0 );
+			BOOST_CHECK_EQUAL( command.forward, forward );
+			BOOST_CHECK_EQUAL( command.right, right );
+			NewBotAI_SaberApplyMovementSafety( &command, 0 );
+			BOOST_CHECK_EQUAL( command.attack, 0 );
+			command = NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_RESET,
+				family, stage, -1, 1, 1, 1, -1 );
+			BOOST_CHECK_EQUAL( command.attack, 0 );
+			command = NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_ATTACK,
+				family, stage, -1, 0, 1, 1, 0 );
+			BOOST_CHECK_EQUAL( command.attack, 0 );
+		}
+		for (int previous = 0; previous < sequence; ++previous)
+			BOOST_CHECK_NE( signatures[sequence], signatures[previous] );
+		BOOST_CHECK_EQUAL( NewBotAI_SaberSequenceAllowed( context, sequence ), sequence < 2 );
+	}
+	context.enemyRecovering = 1;
+	for (int sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; ++sequence)
+		BOOST_CHECK( NewBotAI_SaberSequenceAllowed( context, sequence ) );
+	context.enemyAttacking = 1;
+	for (int sequence = 2; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; ++sequence)
+		BOOST_CHECK( !NewBotAI_SaberSequenceAllowed( context, sequence ) );
+	BOOST_CHECK( NewBotAI_SaberSequenceBoundary( 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberSequenceBoundary( 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberSequenceBoundary( 2 ) );
+	BOOST_CHECK( NewBotAI_SaberSequenceBoundary( 3 ) );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberSequenceId( NEWBOTAI_SABER_BURST ), -1 );
+}
+
+BOOST_AUTO_TEST_CASE( saber_contact_counteryaw_scales_skill_and_actual_contact_range )
+{
+	BOOST_CHECK_CLOSE( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_ACTIVE,
+		0.475f, 1, 40.0f, 10.0f ), 6.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_ACTIVE,
+		0.475f, -1, 40.0f, 1.0f ), -1.5f, 0.001f );
+	BOOST_CHECK_SMALL( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_RECOVER,
+		0.475f, 1, 40.0f, 10.0f ), 0.001f );
+	BOOST_CHECK_SMALL( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_ACTIVE,
+		0.475f, 0, 40.0f, 10.0f ), 0.001f );
+	BOOST_CHECK_SMALL( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_ACTIVE,
+		0.475f, 1, NEWBOTAI_SABER_LONG_SWING_RANGE, 10.0f ), 0.001f );
+	BOOST_CHECK_SMALL( NewBotAI_SaberContactCounterYaw( NEWBOTAI_SABER_YAW_ACTIVE,
+		0.475f, 1, -1.0f, 10.0f ), 0.001f );
+}
+
+BOOST_AUTO_TEST_CASE( saber_animation_wiggle_fades_at_active_and_delay_boundaries )
+{
+	float yaw = 0, pitch = 0;
+	for (float progress : { 0.0f, 0.15f, 0.8f, 1.0f })
+	{
+		NewBotAI_GetSaberAnimationWiggle( NEWBOTAI_SABER_YAW_ACTIVE, progress,
+			1, 250, 120, 80.0f, 40.0f, 2.0f, &yaw, &pitch );
+		BOOST_CHECK_SMALL( yaw, 0.001f );
+		BOOST_CHECK_SMALL( pitch, 0.001f );
+	}
+	for (int phase : { NEWBOTAI_SABER_YAW_PREPARE, NEWBOTAI_SABER_YAW_RECOVER, NEWBOTAI_SABER_YAW_NEXT })
+	{
+		NewBotAI_GetSaberAnimationWiggle( (newbotai_saber_yaw_phase_t)phase, 0.475f,
+			1, 250, 120, 80.0f, 40.0f, 2.0f, &yaw, &pitch );
+		BOOST_CHECK_SMALL( yaw, 0.001f );
+		BOOST_CHECK_SMALL( pitch, 0.001f );
+	}
+	for (int elapsed = 0; elapsed < 1000; ++elapsed)
+	{
+		NewBotAI_GetSaberAnimationWiggle( NEWBOTAI_SABER_YAW_ACTIVE, 0.475f,
+			1, elapsed, 120, 80.0f, 40.0f, 2.0f, &yaw, &pitch );
+		BOOST_CHECK_LE( fabsf( yaw ), 8.0f );
+		BOOST_CHECK_LE( fabsf( pitch ), 2.0f );
+		if (elapsed <= 120)
+		{
+			BOOST_CHECK_SMALL( yaw, 0.001f );
+			BOOST_CHECK_SMALL( pitch, 0.001f );
+		}
+	}
+	NewBotAI_GetSaberAnimationWiggle( NEWBOTAI_SABER_YAW_ACTIVE, 0.475f,
+		6, 245, 120, 8.0f, 4.0f, 2.0f, &yaw, &pitch );
+	BOOST_CHECK_CLOSE( yaw, 2.8f, 0.001f );
+	BOOST_CHECK_CLOSE( pitch, -4.0f, 0.001f );
+	NewBotAI_GetSaberAnimationWiggle( NEWBOTAI_SABER_YAW_ACTIVE, 0.475f,
+		7, 245, 120, 8.0f, 4.0f, 2.0f, &yaw, &pitch );
+	BOOST_CHECK_SMALL( yaw, 0.001f );
+	BOOST_CHECK_SMALL( pitch, 0.001f );
+}
+
 BOOST_AUTO_TEST_CASE( saber_throw_phase_uses_target_facing_and_engine_cadence )
 {
 	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSteerCadence( 1 ), 0 );
@@ -2408,5 +2514,142 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_SUITE( bot_strafejump )
+
+BOOST_AUTO_TEST_CASE( minimum_pmove_slice_still_has_full_prediction_horizon )
+{
+	BOOST_CHECK_GE( BOT_SFJ_MAX_ARC_STEPS, 2000 );
+	BOOST_CHECK_EQUAL( BotSFJ_PmoveSliceMsec( 1, 1, 1, 0 ), 1 );
+	float height = 0.0f, velocity = 225.0f;
+	int steps = 0;
+	do
+	{
+		const float nextVelocity = velocity - 800.0f * 0.001f;
+		height += (velocity + nextVelocity) * 0.5f * 0.001f;
+		velocity = nextVelocity;
+		++steps;
+	} while (height > 0.0f && steps < BOT_SFJ_MAX_ARC_STEPS);
+	BOOST_CHECK_LT( steps, BOT_SFJ_MAX_ARC_STEPS );
+	BOOST_CHECK_GT( steps, 256 );
+}
+
+BOOST_AUTO_TEST_CASE( release_requires_consumed_usercmd_and_cleared_engine_flag )
+{
+	BOOST_CHECK( !BotSFJ_JumpReleaseConfirmed( 0, 1000, 0 ) );
+	BOOST_CHECK( !BotSFJ_JumpReleaseConfirmed( 1000, 999, 0 ) );
+	BOOST_CHECK( !BotSFJ_JumpReleaseConfirmed( 1000, 1000, 1 ) );
+	BOOST_CHECK( BotSFJ_JumpReleaseConfirmed( 1000, 1000, 0 ) );
+	BOOST_CHECK( BotSFJ_JumpReleaseConfirmed( 1000, 1500, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( confirmed_air_release_rejumps_on_first_grounded_command )
+{
+	bot_sfj_phase_t phase = BOT_SFJ_PHASE_TAKEOFF;
+	for (int hop = 0; hop < 8; ++hop)
+	{
+		BOOST_CHECK( BotSFJ_JumpPressed( phase, 1 ) );
+		phase = BotSFJ_ReleasedNextPhase( phase, 0, 25, 0 );
+		BOOST_CHECK_EQUAL( phase, BOT_SFJ_PHASE_AIR );
+		BOOST_CHECK( !BotSFJ_JumpPressed( phase, 0 ) );
+		phase = BotSFJ_ReleasedNextPhase( phase, 0, 300, 1 );
+		BOOST_CHECK_EQUAL( phase, BOT_SFJ_PHASE_AIR );
+		phase = BotSFJ_ReleasedNextPhase( phase, 1, 525, 1 );
+		BOOST_CHECK_EQUAL( phase, BOT_SFJ_PHASE_REJUMP );
+	}
+}
+
+BOOST_AUTO_TEST_CASE( missing_release_keeps_releasing_until_engine_confirms )
+{
+	bot_sfj_phase_t phase = BotSFJ_ReleasedNextPhase( BOT_SFJ_PHASE_AIR, 1, 500, 0 );
+	BOOST_CHECK_EQUAL( phase, BOT_SFJ_PHASE_LANDING );
+	BOOST_CHECK( !BotSFJ_JumpPressed( phase, 1 ) );
+	BOOST_CHECK_EQUAL( BotSFJ_ReleasedNextPhase( phase, 1, 100, 0 ), phase );
+	BOOST_CHECK_EQUAL( BotSFJ_ReleasedNextPhase( phase, 1, 0, 1 ), BOT_SFJ_PHASE_REJUMP );
+}
+
+BOOST_AUTO_TEST_CASE( halfbeat_switches_diagonal_to_opposite_strafe_only_every_hop )
+{
+	for (int side = -1; side <= 1; side += 2)
+	{
+		int previousRight = 0;
+		for (int hop = 0; hop < 8; ++hop)
+		{
+			int forward, right;
+			BotSFJ_HalfBeatAxes( side, hop & 1, &forward, &right );
+			BOOST_CHECK_EQUAL( forward, hop & 1 ? 0 : 127 );
+			BOOST_CHECK_EQUAL( right, side * (hop & 1 ? -127 : 127) );
+			if (previousRight)
+				BOOST_CHECK_EQUAL( right, -previousRight );
+			previousRight = right;
+		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE( emitted_halfbeat_axes_match_predictor_world_wish_direction )
+{
+	for (int side = -1; side <= 1; side += 2)
+	{
+		for (int only = 0; only < 2; ++only)
+		{
+			for (int yaw = -180; yaw <= 180; yaw += 30)
+			{
+				int forward, right;
+				float x, y;
+				const float wishYaw = BotSFJ_CommandYaw( (float)yaw, 550.0f, 125.0f,
+					250.0f, 1.0f, 0.008f, only ? -side : side );
+				BotSFJ_HalfBeatAxes( side, only, &forward, &right );
+				const float viewYaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right );
+				BotSFJ_EffectiveMovement( 0, 0, 400, viewYaw, 1, forward, 1, right, &x, &y );
+				BOOST_CHECK_SMALL( x - cosf( wishYaw * 0.017453292519943295f ), 0.00001f );
+				BOOST_CHECK_SMALL( y - sinf( wishYaw * 0.017453292519943295f ), 0.00001f );
+			}
+		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE( curved_lookahead_accepts_gentle_bends_not_hairpins )
+{
+	BOOST_CHECK( BotSFJ_CurveSegmentAllows( 0.95f, 0.85f ) );
+	BOOST_CHECK( BotSFJ_CurveSegmentAllows( 0.8f, 0.6f ) );
+	BOOST_CHECK( !BotSFJ_CurveSegmentAllows( 0.7f, 0.9f ) );
+	BOOST_CHECK( !BotSFJ_CurveSegmentAllows( 1.0f, 0.49f ) );
+	BOOST_CHECK( !BotSFJ_CurveSegmentAllows( std::numeric_limits<float>::quiet_NaN(), 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( curved_advancement_still_requires_links_heights_and_endpoint )
+{
+	BOOST_CHECK( BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, -60, -80, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 1, 1, 1, 0, 0, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 0, 1, 0, 0, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 0, 0, 0, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, -101, 0, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, 0, -101, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, 33, 0, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, 0, 65, 0.75f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, 0, 0, 0.49f, 10, 100 ) );
+	BOOST_CHECK( !BotSFJ_AdvanceCurveLinkAllows( 0, 1, 1, 0, 0, 0.75f, -1, 100 ) );
+}
+
+BOOST_AUTO_TEST_CASE( chain_or_wall_slide_cannot_bypass_endpoint_bound )
+{
+	BOOST_CHECK( BotSFJ_EndpointAllows( 0, 0, 200, 0, 250, 80, 96 ) );
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 200, 0, 297, 0, 96 ) );
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 200, 0, -1, 0, 96 ) );
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 0, 0, 0, 0, 96 ) );
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 200, 0,
+		std::numeric_limits<float>::quiet_NaN(), 0, 96 ) );
+}
+
+BOOST_AUTO_TEST_CASE( required_curve_endpoint_uses_terminal_plane_without_slack )
+{
+	BOOST_CHECK( BotSFJ_EndpointPlaneAllows( 100, 0, 200, 100, 50, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_EndpointPlaneAllows( 100, 0, 200, 100, 200, 100, 0 ) );
+	BOOST_CHECK( !BotSFJ_EndpointPlaneAllows( 100, 0, 200, 100, 200, 101, 0 ) );
+	BOOST_CHECK( BotSFJ_EndpointPlaneAllows( 100, 0, 200, 100, 200, 101, 96 ) );
+	BOOST_CHECK( !BotSFJ_EndpointPlaneAllows( 100, 0, 100, 0, 100, 0, 0 ) );
+}
 
 BOOST_AUTO_TEST_SUITE_END()

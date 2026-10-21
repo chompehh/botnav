@@ -62,6 +62,65 @@ typedef enum
 #define BOTLEARN_FOOTING_MASK ((1 << 14) | (1 << 28))
 #define BOTLEARN_CONTEXT_SAFETY_MASK 0x7FFF4000
 
+/* Separate technique namespace: never reinterpret the persisted action-token IDs.
+ * Attack indices use the engine's seven ordinary attacks (TL2BR through T2B).
+ * Only the alternating-horizontal prior is observationally supported; the other
+ * complete three-attack recipes are experimental, not demonstrated human combos. */
+#define BOTLEARN_SABER_SEQUENCE_COUNT 12
+#define BOTLEARN_SABER_SEQUENCE_LENGTH 3
+
+static inline int BotLearn_SaberSequenceAttack(int sequence, int stage)
+{
+	static const int attacks[BOTLEARN_SABER_SEQUENCE_COUNT][BOTLEARN_SABER_SEQUENCE_LENGTH] = {
+		{ 4, 1, 4 }, { 1, 4, 1 },
+		{ 4, 1, 6 }, { 1, 4, 6 },
+		{ 0, 4, 1 }, { 5, 1, 4 },
+		{ 4, 0, 6 }, { 1, 5, 6 },
+		{ 6, 4, 1 }, { 6, 1, 4 },
+		{ 0, 6, 4 }, { 5, 6, 1 }
+	};
+	if (sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT || stage < 0)
+		return -1;
+	return attacks[sequence][stage % BOTLEARN_SABER_SEQUENCE_LENGTH];
+}
+
+static inline int BotLearn_SaberSequencePrior(int sequence)
+{
+	/* Frequency priors, not outcome scores. Keep unvalidated recipes rare. */
+	if (sequence == 0)
+		return 44;
+	if (sequence == 1)
+		return 36;
+	return sequence >= 2 && sequence < BOTLEARN_SABER_SEQUENCE_COUNT ? 2 : 0;
+}
+
+static inline int BotLearn_SaberSequenceWeight(int sequence, int bonus)
+{
+	int weight = BotLearn_SaberSequencePrior(sequence);
+	if (!weight)
+		return 0;
+	if (bonus > BOTLEARN_BONUS_CAP) bonus = BOTLEARN_BONUS_CAP;
+	if (bonus < -BOTLEARN_BONUS_CAP) bonus = -BOTLEARN_BONUS_CAP;
+	weight += bonus;
+	return weight > 0 ? weight : 1;
+}
+
+static inline int BotLearn_SaberSequenceMatches(int sequence, int stage, int attackIndex)
+{
+	return attackIndex >= 0 && attackIndex < 7 &&
+		BotLearn_SaberSequenceAttack(sequence, stage) == attackIndex;
+}
+
+static inline int BotLearn_SaberSequenceAdvance(int sequence, int expectedStage,
+	int acceptedStage, int attackIndex, int defenseState)
+{
+	if (expectedStage < 0 || expectedStage >= BOTLEARN_SABER_SEQUENCE_LENGTH ||
+		acceptedStage != expectedStage || defenseState != 0 ||
+		!BotLearn_SaberSequenceMatches(sequence, acceptedStage, attackIndex))
+		return -1;
+	return expectedStage + 1;
+}
+
 typedef enum {
 	BOTLEARN_FOOTING_STILL = 0,
 	BOTLEARN_FOOTING_ADVANCE,
@@ -638,6 +697,13 @@ static inline int BotLearn_BaselineContextAllowed(int contextKey)
 	return ((contextKey >> 24) & 1) || ((contextKey >> 26) & 1) ? 0 : 1;
 }
 
+static inline int BotLearn_SaberTechniqueContextAllowed(int contextKey)
+{
+	return BotLearn_BaselineContextAllowed(contextKey) &&
+		(contextKey & BOTLEARN_FOOTING_CONTEXT_FLAG) &&
+		((contextKey >> 18) & 7) == BOTLEARN_DEFENSE_NONE;
+}
+
 /* Bonus from the baked baseline for the live context, or 0 when it has no entry. */
 static inline int BotLearn_BaselineBonus(int contextKey, int stimulus, int response, int followKey,
 	float strength, float skill)
@@ -652,5 +718,12 @@ static inline int BotLearn_BaselineBonus(int contextKey, int stimulus, int respo
 	return BotLearn_WeightBonus(BotLearn_ScoreRelative(b->samples, b->excessWins, b->netDamage),
 		b->samples, BOTLEARN_DEFAULT_MIN_SAMPLES, strength, skill);
 }
+
+/* Map-local technique outcomes augment, but do not change, persisted coarse tokens. */
+struct gentity_s;
+void G_BotLearnSaberAccepted(struct gentity_s *self, struct gentity_s *enemy,
+	int sequence, int stage, int attackIndex);
+int G_BotLearnSaberBonus(struct gentity_s *self, struct gentity_s *enemy,
+	int sequence, float skill);
 
 #endif
