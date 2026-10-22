@@ -1871,6 +1871,7 @@ qboolean G_JVMCanReceive( gentity_t *ent, qboolean health, qboolean armor, qbool
 void G_StrafeTrackFrame( gentity_t *ent );
 void G_StrafeTrackReset( int clientNum );
 void BotSFJ_ReloadRouteHints( void );
+void G_StrafeTrackExportCurrentMap( qboolean reload );
 void G_WriteClientSessionData( gclient_t *client );
 void player_die (gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int damage, int mod);
 void AddScore( gentity_t *ent, vec3_t origin, int score );

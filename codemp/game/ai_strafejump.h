@@ -721,6 +721,50 @@ static inline int BotSFJ_TrackShouldEnd(int slowSince, int now)
 	return slowSince && now - slowSince >= BOT_SFJ_TRACK_END_MS;
 }
 
+/* Export selection: candidates arrive fastest first. Keep the fastest route near each
+ * start area first (starts at least `spacing` apart), then fill the remaining slots in
+ * speed order, so the per-map limit covers the whole map instead of one fast corridor. */
+static inline int BotSFJ_TrackSelectCoverage(const float *startsXYZ, int count, int maxPick, float spacing,
+	unsigned char *picked)
+{
+	int i, j, n = 0;
+	const float spacingSq = spacing * spacing;
+
+	for (i = 0; i < count; i++)
+		picked[i] = 0;
+	for (i = 0; i < count && n < maxPick; i++)
+	{
+		int clear = 1;
+
+		for (j = 0; j < i && clear; j++)
+		{
+			float dx, dy, dz;
+
+			if (!picked[j])
+				continue;
+			dx = startsXYZ[i * 3] - startsXYZ[j * 3];
+			dy = startsXYZ[i * 3 + 1] - startsXYZ[j * 3 + 1];
+			dz = startsXYZ[i * 3 + 2] - startsXYZ[j * 3 + 2];
+			if (dx * dx + dy * dy + dz * dz < spacingSq)
+				clear = 0;
+		}
+		if (clear)
+		{
+			picked[i] = 1;
+			n++;
+		}
+	}
+	for (i = 0; i < count && n < maxPick; i++)
+	{
+		if (!picked[i])
+		{
+			picked[i] = 1;
+			n++;
+		}
+	}
+	return n;
+}
+
 static inline int BotSFJ_TrackKeep(int nodes, float pathDistance, int touchedHazard)
 {
 	return !touchedHazard && nodes >= BOT_SFJ_TRACK_MIN_NODES &&

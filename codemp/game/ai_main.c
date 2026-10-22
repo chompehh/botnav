@@ -4068,6 +4068,7 @@ static void BotSFJ_LoadRouteHints(void)
 	static const char *folders[] = { "botroutes", "routes" };
 	char mapname[MAX_QPATH];
 	char path[MAX_QPATH];
+	char lowerMap[MAX_QPATH];
 	fileHandle_t f;
 	char *buffer;
 	int len;
@@ -4081,9 +4082,14 @@ static void BotSFJ_LoadRouteHints(void)
 	trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
 	if (!mapname[0])
 		return;
-	for (i = 0; i < (int)ARRAY_LEN(folders); i++)
+	Q_strncpyz(lowerMap, mapname, sizeof(lowerMap));
+	Q_strlwr(lowerMap);
+	/* exportStrafeTrack writes lower-case names; also accept a hand-made file in the map's own case. */
+	for (i = 0; i < (int)ARRAY_LEN(folders) * 2; i++)
 	{
-		Com_sprintf(path, sizeof(path), "%s/%s.botroute", folders[i], mapname);
+		if ((i & 1) && !strcmp(lowerMap, mapname))
+			continue;
+		Com_sprintf(path, sizeof(path), "%s/%s.botroute", folders[i / 2], (i & 1) ? mapname : lowerMap);
 		len = trap->FS_Open(path, &f, FS_READ);
 		if (!f)
 			continue;

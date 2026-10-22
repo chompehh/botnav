@@ -2660,6 +2660,34 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( strafetrack_export_coverage )
+{
+	// fastest first: three routes from the same spot, then two elsewhere
+	const float starts[] = {
+		0, 0, 0,
+		10, 0, 0,
+		20, 0, 0,
+		1000, 0, 0,
+		0, 1000, 0,
+	};
+	unsigned char picked[5];
+
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSelectCoverage( starts, 5, 3, 192.0f, picked ), 3 );
+	BOOST_CHECK( picked[0] );
+	BOOST_CHECK( !picked[1] );
+	BOOST_CHECK( !picked[2] );
+	BOOST_CHECK( picked[3] );
+	BOOST_CHECK( picked[4] );
+
+	// remaining slots fill in speed order
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSelectCoverage( starts, 5, 4, 192.0f, picked ), 4 );
+	BOOST_CHECK( picked[1] );
+	BOOST_CHECK( !picked[2] );
+
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSelectCoverage( starts, 5, 10, 192.0f, picked ), 5 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSelectCoverage( starts, 0, 10, 192.0f, picked ), 0 );
+}
+
 BOOST_AUTO_TEST_CASE( saber_pursuit_escape_stall )
 {
 	int still = 0;

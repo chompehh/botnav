@@ -223,15 +223,17 @@ A bot uses a route when it is within 96 units of `start_pos`, or alongside the r
 ### Recorded strafe routes (`bot_strafetrack`, `exportStrafeTrack`)
 
 With `bot_strafetrack 1` (default), the server records human strafe jumps on every map:
-- **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route N began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees a short message.
+- **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route (session #N) began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees `Recording strafe route (session #N ...)`. `N` is only a per-session counter that restarts whenever the game module loads; it is not the database id.
 - **While recording:** every server frame stores forward/strafe/jump input, yaw and yaw change, frame time, position, speed and grounded state. Each landing becomes a route node (position, speed, strafe key held on that hop, air time). Each landing is the bots' next goal.
 - **End:** the player has been on the ground at or below normal ground speed for 150 ms. The console prints the result. Routes with fewer than 2 landings or under 256 units, or that touch lava/slime/no-drop, are discarded, as are routes cut short by death, teleporting, spectating or forced movement.
 
-Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStrafeRouteNode`, `LocalStrafeRouteInput`, the same file as duel tracking). Recording alone does not change bot behaviour.
+Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStrafeRouteNode`, `LocalStrafeRouteInput`, the same file as duel tracking) and are never deleted by restarts, map changes or `resetdueltrack`. The player sees `Saved strafe route #<database id>`. Map names are stored in lower case, so `MP/FFA3` and `mp/ffa3` share routes; export also matches older mixed-case rows. A route saved with no input rows prints a warning, which usually means the server runs an older game module.
+
+With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewrites the current map's `botroutes/<map>.botroute` and reloads it, and the file is rewritten again at map end/shutdown, so bots use new routes without a manual export. `0` restores the manual `exportStrafeTrack` workflow.
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at 24 MB, like `exportDuelTrack`);
-- regenerates `botroutes/<map>.botroute` for every map with recorded routes (fastest 128 per map). Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
+- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded routes. Up to 128 routes per map are chosen: first the fastest route from each start area (starts at least 192 units apart), then the remaining slots in speed order, so routes all over the map are kept instead of only the fastest corridor. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
 - reloads the routes, so bots start using them immediately.
 
 Recorded route block format:
