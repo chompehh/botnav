@@ -1000,6 +1000,24 @@
 			}
 		}
 		
+		// Version marker: lets a screenshot or the UI module confirm which ingame.menu loaded.
+		itemDef
+		{
+			name				menuversion
+			group				none
+			text				"taystjk menu 2"
+			style				WINDOW_STYLE_EMPTY
+			rect				560 468 75 10
+			font				2
+			textscale			.45
+			textalign			ITEM_ALIGN_RIGHT
+			textalignx			75
+			textaligny			-2
+			forecolor			.6 .6 .6 .6
+			visible				1
+			decoration
+		}
+
 		itemDef 
 		{
 			name				accountButton
