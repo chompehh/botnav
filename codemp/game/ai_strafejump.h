@@ -47,6 +47,72 @@ static inline int BotSFJ_TrackNodePassed(const float *origin, const float *from,
 	return fabsf(lateral) <= tolerance;
 }
 
+/* Recorded routes come from humans at a different frame rate, so a bot rarely lands on
+ * the recorded spot. Long hops get proportionally more slack (30% of the gap). */
+#define BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE 80.0f
+#define BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE 256.0f
+#define BOT_SFJ_TRACK_LOOSE_GAP_FRACTION 0.3f
+#define BOT_SFJ_TRACK_LOOSE_HEIGHT 96.0f
+#define BOT_SFJ_TRACK_LOOSE_PICKUP_RADIUS 192.0f
+
+static inline float BotSFJ_TrackNodeTolerance(float baseTolerance, float gapLength, int loosen)
+{
+	float t;
+
+	if (!loosen)
+		return baseTolerance;
+	t = gapLength * BOT_SFJ_TRACK_LOOSE_GAP_FRACTION;
+	if (t < baseTolerance)
+		t = baseTolerance;
+	if (t < BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE)
+		t = BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE;
+	if (t > BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE)
+		t = BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE;
+	return t;
+}
+
+/* Node timeout: the configured value, or longer for hops the human took long to fly. */
+static inline int BotSFJ_TrackNodeTimeout(int configuredMs, int recordedAirMs, int loosen)
+{
+	int t = configuredMs;
+
+	if (loosen && recordedAirMs > 0 && recordedAirMs * 2 + 1500 > t)
+		t = recordedAirMs * 2 + 1500;
+	return t > 15000 ? 15000 : t;
+}
+
+/* Horizontal distance squared from origin to node. */
+static inline float BotSFJ_Dist2DSq(const float *a, const float *b)
+{
+	const float x = a[0] - b[0];
+	const float y = a[1] - b[1];
+
+	return x * x + y * y;
+}
+
+/* How many nodes to skip when the bot is already closer to a later landing. */
+static inline int BotSFJ_TrackSkipAhead(const float *origin, const float *nodesXYZ, int current,
+	int nodeCount, int maxSkip)
+{
+	int k, best = 0;
+	float bestDist;
+
+	if (current < 0 || current >= nodeCount)
+		return 0;
+	bestDist = BotSFJ_Dist2DSq(origin, &nodesXYZ[current * 3]);
+	for (k = 1; k <= maxSkip && current + k < nodeCount; k++)
+	{
+		const float d = BotSFJ_Dist2DSq(origin, &nodesXYZ[(current + k) * 3]);
+
+		if (d < bestDist)
+		{
+			bestDist = d;
+			best = k;
+		}
+	}
+	return best;
+}
+
 static inline int BotSFJ_ContinuitySlowedOut(float peakSpeed, float speed,
 	float groundSpeed)
 {

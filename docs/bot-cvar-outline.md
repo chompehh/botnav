@@ -250,6 +250,15 @@ strafejump_route
 
 A grounded bot picks up a recorded route when it is within 96 units horizontally and 64 vertically of `start_pos`, the first landing is ahead of its movement, and the last landing is closer to its current goal than it is. Recorded routes take precedence over single-jump hints and the waypoint corridor; waypoints stay the fallback. While on a route, each landing node is the bot's movement goal, the recorded strafe key chooses its strafe side, and the strafe frequency wait is skipped. Every takeoff still passes the arc, landing and hazard checks. The bot leaves the route and goes back to waypoints when the route is finished, a landing is not reached within 3 s, a jump is aborted or slowed to ground speed, or a visible enemy is within close-combat range (~384 units, unless carrying a flag).
 
+With `bot_strafe_loosen 1` (default) recorded routes allow for frame-rate differences between the human and the bot:
+- a landing counts as reached within 30% of the hop length (at least 80 and at least `bot_strafe_tolerance`, at most 256 units), or once the bot passes the landing's perpendicular plane within that width;
+- grounded height tolerance is 96 units instead of 64;
+- a bot that lands short or wide but is already closer to one of the next two landings continues from there instead of dropping the route;
+- pickup radius is 192 units instead of 96, and a bot may join a route at any landing (not only at the circle-jump start) if the next landing is ahead of it;
+- each landing's timeout is at least twice the human's recorded air time plus 1.5 s (capped at 15 s), so long hops are not abandoned by `bot_strafe_nodetimeout`.
+
+The route endpoint stays strict: a landing may never pass the last recorded landing, and all hazard checks still apply.
+
 ### Waypoint navigation
 
 - Bots remember their last 8 reached waypoints and avoid re-picking them when they re-path, unless no other waypoint is visible. This stops walking back to points already passed.

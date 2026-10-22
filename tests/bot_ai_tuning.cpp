@@ -2660,6 +2660,42 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( recorded_route_tolerance )
+{
+	const float nodes[] = {
+		400, 0, 0,
+		800, 0, 0,
+		1200, 0, 0,
+	};
+	const float nearSecond[] = { 760, 30, 0 };
+	const float nearFirst[] = { 300, 0, 0 };
+
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTolerance( 80.0f, 416.0f, 0 ), 80.0f );
+	BOOST_CHECK_CLOSE( BotSFJ_TrackNodeTolerance( 80.0f, 416.0f, 1 ), 124.8f, 0.01 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTolerance( 80.0f, 100.0f, 1 ), 80.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTolerance( 80.0f, 2000.0f, 1 ), BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTolerance( 16.0f, 50.0f, 1 ), BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE );
+
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 957, 0 ), 3000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 957, 1 ), 3414 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 100, 1 ), 3000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 20000, 1 ), 15000 );
+
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSkipAhead( nearSecond, nodes, 0, 3, 2 ), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSkipAhead( nearFirst, nodes, 0, 3, 2 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSkipAhead( nearSecond, nodes, 2, 3, 2 ), 0 );
+
+	// a 124-unit tolerance passes a landing 110 units wide of a 416-unit hop
+	{
+		const float from[] = { 0, 0, 0 };
+		const float node[] = { 416, 0, 0 };
+		const float landed[] = { 430, 110, 0 };
+		BOOST_CHECK( !BotSFJ_TrackNodePassed( landed, from, node, 1, 80.0f, 64.0f ) );
+		BOOST_CHECK( BotSFJ_TrackNodePassed( landed, from, node, 1,
+			BotSFJ_TrackNodeTolerance( 80.0f, 416.0f, 1 ), BOT_SFJ_TRACK_LOOSE_HEIGHT ) );
+	}
+}
+
 BOOST_AUTO_TEST_CASE( strafetrack_export_coverage )
 {
 	// fastest first: three routes from the same spot, then two elsewhere

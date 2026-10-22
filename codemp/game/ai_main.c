@@ -4167,6 +4167,8 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 	const vec3_t moveDirection, vec3_t direction, vec3_t destination)
 {
 	const qboolean grounded = ps->groundEntityNum != ENTITYNUM_NONE;
+	const int loosen = bot_strafe_loosen.integer ? 1 : 0;
+	const float heightTolerance = loosen ? BOT_SFJ_TRACK_LOOSE_HEIGHT : BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE;
 	const bot_sfj_track_route_t *route;
 	vec3_t toNode;
 	int i;
@@ -4179,8 +4181,9 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 	if (!bs->sfjRoute)
 	{
 		float myGoalDistance;
-		int best = -1;
-		float bestStartDistance = BOT_SFJ_TRACK_ROUTE_START_RADIUS + 1.0f;
+		int best = -1, bestEntry = 0;
+		const float pickupRadius = loosen ? BOT_SFJ_TRACK_LOOSE_PICKUP_RADIUS : BOT_SFJ_TRACK_ROUTE_START_RADIUS;
+		float bestStartDistance = pickupRadius + 1.0f;
 
 		if (!grounded)
 			return qfalse;
@@ -4188,32 +4191,39 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		for (i = 0; i < g_botSfjTrackRouteCount; i++)
 		{
 			const bot_sfj_track_route_t *candidate = &g_botSfjTrackRoutes[i];
-			vec3_t delta;
-			float startDistance;
+			int entry;
 
-			VectorSubtract(candidate->start, ps->origin, delta);
-			if (fabsf(delta[2]) > BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE)
-				continue;
-			delta[2] = 0.0f;
-			startDistance = VectorLength(delta);
-			if (startDistance > BOT_SFJ_TRACK_ROUTE_START_RADIUS ||
-				startDistance >= bestStartDistance)
-				continue;
-			VectorSubtract(candidate->node[0], ps->origin, toNode);
-			toNode[2] = 0.0f;
-			if (VectorNormalize(toNode) <= 0.0f || DotProduct(toNode, moveDirection) < BOT_SFJ_TRACK_ROUTE_MIN_ALIGNMENT)
-				continue;
-			/* The route must take the bot closer to where it is going. */
-			if (Distance(candidate->node[candidate->nodeCount - 1], bs->goalPosition) >=
-				myGoalDistance)
-				continue;
-			best = i;
-			bestStartDistance = startDistance;
+			/* Entry 0 is the circle-jump start; loosened bots may also join at a landing. */
+			for (entry = 0; entry < (loosen ? candidate->nodeCount - 1 : 1); entry++)
+			{
+				const float *entryPos = entry ? candidate->node[entry - 1] : candidate->start;
+				vec3_t delta;
+				float startDistance;
+
+				VectorSubtract(entryPos, ps->origin, delta);
+				if (fabsf(delta[2]) > heightTolerance)
+					continue;
+				delta[2] = 0.0f;
+				startDistance = VectorLength(delta);
+				if (startDistance > pickupRadius || startDistance >= bestStartDistance)
+					continue;
+				VectorSubtract(candidate->node[entry], ps->origin, toNode);
+				toNode[2] = 0.0f;
+				if (VectorNormalize(toNode) <= 0.0f || DotProduct(toNode, moveDirection) < BOT_SFJ_TRACK_ROUTE_MIN_ALIGNMENT)
+					continue;
+				/* The route must take the bot closer to where it is going. */
+				if (Distance(candidate->node[candidate->nodeCount - 1], bs->goalPosition) >=
+					myGoalDistance)
+					continue;
+				best = i;
+				bestEntry = entry;
+				bestStartDistance = startDistance;
+			}
 		}
 		if (best < 0)
 			return qfalse;
 		bs->sfjRoute = best + 1;
-		bs->sfjRouteNode = 0;
+		bs->sfjRouteNode = bestEntry;
 		bs->sfjRouteTime = level.time;
 		g_botSfjStats.routeStarts++;
 		if (bot_strafejumps_debug.integer > 1)
@@ -4228,8 +4238,19 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		const float *from = bs->sfjRouteNode > 0 ? route->node[bs->sfjRouteNode - 1] : route->start;
 
 		if (!BotSFJ_TrackNodePassed(ps->origin, from, node, grounded,
-			BotSFJ_Tolerance(), BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE))
-			break;
+			BotSFJ_TrackNodeTolerance(BotSFJ_Tolerance(), sqrtf(BotSFJ_Dist2DSq(from, node)), loosen),
+			heightTolerance))
+		{
+			/* Landed short or wide but already nearer a later landing: carry on from there. */
+			const int skip = loosen && grounded ? BotSFJ_TrackSkipAhead(ps->origin, (const float *)route->node,
+				bs->sfjRouteNode, route->nodeCount, 2) : 0;
+
+			if (!skip)
+				break;
+			bs->sfjRouteNode += skip;
+			bs->sfjRouteTime = level.time;
+			continue;
+		}
 		if (!grounded && bs->sfjRouteNode == route->nodeCount - 1)
 		{
 			/* Finish the validated last hop before returning to waypoint input. */
@@ -4249,7 +4270,8 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		return qfalse;
 	}
 	if (level.time - bs->sfjRouteTime >
-		(int)BotSFJ_ClampSetting(bot_strafe_nodetimeout.value, 1000.0f, 15000.0f))
+		BotSFJ_TrackNodeTimeout((int)BotSFJ_ClampSetting(bot_strafe_nodetimeout.value, 1000.0f, 15000.0f),
+			route->nodeAirMs[bs->sfjRouteNode], loosen))
 	{
 		BotSFJ_EndTrackRoute(bs, "recorded route node not reached in time, back to waypoints");
 		return qfalse;
