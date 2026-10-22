@@ -78,7 +78,7 @@ endif(BuildMPRend2)
 if(BuildMPGame OR BuildMPCGame OR BuildMPUI)
 	add_custom_target(Assets
 		COMMAND
-		${CMAKE_COMMAND} -E tar cf "${CMAKE_CURRENT_BINARY_DIR}/zz_taystjk_assets.pk3" --format=zip -- .
+		${CMAKE_COMMAND} -E tar cf "${CMAKE_CURRENT_BINARY_DIR}/japro-assets.pk3" --format=zip -- .
 		WORKING_DIRECTORY  "${CMAKE_SOURCE_DIR}/assets/japro")
 endif(BuildMPGame OR BuildMPCGame OR BuildMPUI)
 
@@ -849,7 +849,7 @@ if(BuildMPDed)
 endif(BuildMPDed)
 
 install(FILES
-		${CMAKE_CURRENT_BINARY_DIR}/zz_taystjk_assets.pk3
+		${CMAKE_CURRENT_BINARY_DIR}/japro-assets.pk3
 		DESTINATION "${JKAInstallDir}/taystjk"
 		COMPONENT ${JKAMPCoreComponent})
 

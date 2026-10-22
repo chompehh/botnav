@@ -1545,24 +1545,6 @@ void UI_LoadMenus(const char *menuFile, qboolean reset) {
 
 	trap->PC_RemoveAllGlobalDefines ( );
 
-	if (!Q_stricmp(menuFile, "ui/jampingame.txt"))
-		UI_CheckIngameMenuVersion();
-}
-
-/*
-An older PK3 (or a client with its own UI assets) can override ingame.menu and
-drop the Profile buttons. Warn so the override can be found and removed.
-*/
-void UI_CheckIngameMenuVersion( void ) {
-	menuDef_t *menu = Menus_FindByName("ingame");
-	itemDef_t *item = menu ? Menu_FindItemByName(menu, "menuversion") : NULL;
-
-	if (!item || !item->text || Q_stricmp(item->text, UI_INGAME_MENU_VERSION)) {
-		Com_Printf(S_COLOR_YELLOW "WARNING: ui/jamp/ingame.menu is not the " UI_INGAME_MENU_VERSION
-			" copy (found \"%s\"). Another PK3 overrides it, so the Profile button may be missing."
-			" Use /ui_openprofile to open the profile menu.\n",
-			item && item->text ? item->text : "no version marker");
-	}
 }
 
 /* Opens the profile menu without relying on the in-game menu's buttons. */

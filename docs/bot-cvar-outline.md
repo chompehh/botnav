@@ -475,18 +475,13 @@ should retain Profile. The UI now refreshes `ui_about_gametype` directly from
 opening the in-game menu, rather than relying solely on a previous cgame update.
 Unavailable server information leaves the existing value unchanged.
 
-Deploy the matching client UI module and CMake's `zz_taystjk_assets.pk3`, not only the
-server game module. The package was renamed from `japro-assets.pk3` so that it sorts
-after (and therefore overrides) older JAPro/TaystJK packs, which load alphabetically.
-Remove the old `japro-assets.pk3` from servers and clients. Check for other PK3s
-overriding `ui/jamp/ingame.menu`.
-
-The in-game menu shows a small version marker (`taystjk menu 2`) in the bottom
-right. When the UI module loads an `ingame.menu` without that marker it prints a
-yellow console warning naming what it found. A screenshot of the menu therefore
-shows which copy is loaded. `/ui_openprofile` opens the profile menu directly,
-without the menu buttons, and players in Arcade, JvM and JoM are told about it
-when they join. A
+Deploy the matching client UI module and CMake's `japro-assets.pk3`, not only the
+server game module. Clients that ship their own UI module and menus (for example
+the base Android client) never load these menus, so the Profile button can be
+missing there. As a fallback, `/ui_openprofile` (TaystJK UI) or
+`/ui_openmenu ingame_player` opens the profile menu directly, and players in
+Arcade, JvM and JoM are told about it when they join. A
+A
 server-only update cannot replace menus on an independently installed Android
 client. The refresh guards against stale state; it does not prove that stale
 state, rather than an overriding client asset, caused a particular screenshot.
