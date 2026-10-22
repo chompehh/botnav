@@ -5,6 +5,10 @@
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
+#define BOT_SFJ_TRACK_APPROACH_RADIUS 768.0f
+#define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
+#define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 5000
+#define BOT_SFJ_TRACK_RETRY_MS 5000
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
 #define BOT_SFJ_PURSUIT_STOP_DISTANCE 384.0f
 #define BOT_SFJ_PURSUIT_START_RATE 80.0f
@@ -24,6 +28,65 @@ static inline float BotSFJ_ClampSetting(float value, float minimum, float maximu
 static inline int BotSFJ_HeightAllows(float delta, float maxRise, float maxDrop)
 {
 	return isfinite(delta) && delta <= maxRise && delta >= -maxDrop;
+}
+
+static inline int BotSFJ_TrackEntryAllows(float distance, float height,
+	int circleStart, float pickupRadius)
+{
+	return isfinite(distance) && distance >= 0.0f && isfinite(height) &&
+		fabsf(height) <= (circleStart ? 64.0f : 96.0f) &&
+		distance <= (circleStart ? BOT_SFJ_TRACK_APPROACH_RADIUS : pickupRadius);
+}
+
+static inline int BotSFJ_TrackIgnoresNavigation(int route, int requiredInteraction)
+{
+	return route > 0 && !requiredInteraction;
+}
+
+static inline int BotSFJ_TrackRetryAllows(int route, int failedRoute, int retryUntil, int now)
+{
+	return route != failedRoute || now >= retryUntil;
+}
+
+static inline int BotSFJ_TrackRecoveryAllows(int loosen, int route, int grounded,
+	int nodeElapsedMs, int nodeTimeoutMs)
+{
+	return loosen && route > 0 && grounded &&
+		nodeElapsedMs >= 0 && nodeElapsedMs < nodeTimeoutMs;
+}
+
+static inline int BotSFJ_TrackSampleAllows(int elapsedMs, float distance, float speed)
+{
+	return elapsedMs > 0 && elapsedMs <= 1000 && isfinite(distance) &&
+		distance >= 0.0f && isfinite(speed) && speed >= 0.0f &&
+		distance <= (speed + 400.0f) * (float)elapsedMs / 1000.0f + 64.0f;
+}
+
+static inline int BotSFJ_TrackResolvedAttempts(int attempts, int completions, int interrupted)
+{
+	if (interrupted > 0)
+		attempts -= interrupted;
+	return attempts > completions ? attempts : completions;
+}
+
+/* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
+static inline float BotSFJ_TrackPerformance(float distance, float durationMs,
+	float speedIntegral, float referenceIntegral)
+{
+	float speed, retention;
+
+	if (!(distance > 0.0f) || !(durationMs > 0.0f) ||
+		!isfinite(distance) || !isfinite(durationMs))
+		return 1.0f;
+	speed = BotSFJ_ClampSetting(distance * 1000.0f / durationMs / 400.0f, 0.25f, 2.5f);
+	retention = referenceIntegral > 0.0f ?
+		BotSFJ_ClampSetting(speedIntegral / referenceIntegral, 0.25f, 1.5f) : 1.0f;
+	return sqrtf(speed * retention);
+}
+
+static inline int BotSFJ_BackwardPercent(int enabled, int legacyPercent)
+{
+	return enabled ? (int)BotSFJ_ClampSetting((float)legacyPercent, 0.0f, 100.0f) : 0;
 }
 
 /* A landing node is a progress marker, not an exact touchdown requirement. */

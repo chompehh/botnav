@@ -594,6 +594,16 @@ typedef struct bot_state_s
 	int					sfjRoute;			// recorded multi-node route being followed + 1 (0 = none)
 	int					sfjRouteNode;		// next landing node on sfjRoute
 	int					sfjRouteTime;		// level.time the route was last advanced
+	qboolean			sfjRouteApproach;
+	qboolean			sfjRouteAttemptActive;
+	int					sfjRouteStarted;
+	int					sfjRouteSampleTime;
+	vec3_t				sfjRouteSampleOrigin;
+	float				sfjRouteDistance;
+	float				sfjRouteSpeedIntegral;
+	float				sfjRouteReferenceIntegral;
+	int					sfjFailedRoute;
+	int					sfjRouteRetryUntil;
 	int					wpRecent[BOT_NAV_RECENT_WAYPOINTS];		// recently reached waypoint indices + 1 (0 = empty slot)
 	int					wpRecentHead;
 	wpobject_t			*wpSkipGoal;		// bot_waypointskip goal several trail points ahead (NULL = none)

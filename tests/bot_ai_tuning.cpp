@@ -2923,6 +2923,87 @@ BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
 	}
 }
 
+BOOST_AUTO_TEST_CASE( recorded_circle_start_has_bounded_reachable_approach )
+{
+	/* A nearer waypoint or opposite input does not constrain circle-start eligibility. */
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( 600.0f, 32.0f, 1, 96.0f ) );
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( 768.0f, 64.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 769.0f, 0.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 100.0f, 65.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 100.0f, -65.0f, 1, 96.0f ) );
+	/* Mid-route joins retain their smaller pickup bound. */
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( 192.0f, 96.0f, 0, 192.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 193.0f, 0.0f, 0, 192.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( -1.0f, 0.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( INFINITY, 0.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 10.0f, NAN, 1, 96.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_owns_incidental_navigation_not_required_interactions )
+{
+	BOOST_CHECK( BotSFJ_TrackIgnoresNavigation( 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackIgnoresNavigation( 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackIgnoresNavigation( 1, 1 ) );
+	/* Ownership never suppresses hard engine/use conflicts. */
+	BOOST_CHECK( BotSFJ_ConflictBlocks( BOT_SFJ_CONFLICT_HARD, BOT_SFJ_PHASE_PREPARE ) );
+	BOOST_CHECK( BotSFJ_ConflictBlocks( BOT_SFJ_CONFLICT_HARD, BOT_SFJ_PHASE_AIR ) );
+	BOOST_CHECK( BotSFJ_UseIsConflict( 1, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_UseIsConflict( 0, 1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_wall_recovery_and_retry_are_bounded )
+{
+	BOOST_CHECK( BotSFJ_TrackRecoveryAllows( 1, 2, 1, 200, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 0, 2, 1, 200, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 0, 1, 200, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 0, 200, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 1, 3000, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 1, -1, 3000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 2, 2, 6000, 5999 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 2, 2, 6000, 6000 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 3, 2, 6000, 5999 ) );
+	/* Loosened landing recovery does not relax terminal endpoint or landing slope. */
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 100, 0, 250, 0, 96 ) );
+	BOOST_CHECK( !BotSFJ_ChainLandingAllows( 1, 0, 0.6f, 1.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_actual_performance_beats_recorded_speed_alone )
+{
+	const float fast = BotSFJ_TrackPerformance( 3000.0f, 5000.0f, 3000000.0f, 3000000.0f );
+	const float stalled = BotSFJ_TrackPerformance( 300.0f, 5000.0f, 300000.0f, 3000000.0f );
+	const float lostSpeed = BotSFJ_TrackPerformance( 3000.0f, 5000.0f, 1000000.0f, 3000000.0f );
+	BOOST_CHECK( fast > stalled );
+	BOOST_CHECK( fast > lostSpeed );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackPerformance( 0, 0, 0, 0 ), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackPerformance( NAN, 100, 0, 0 ), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackPerformance( 100, INFINITY, 0, 0 ), 1.0f );
+	BOOST_CHECK( BotSFJ_TrackSampleAllows( 100, 60, 600 ) );
+	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 100, 2000, 600 ) );
+	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 1001, 60, 600 ) );
+	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 0, 0, 600 ) );
+	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 100, NAN, 600 ) );
+	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 100, 60, INFINITY ) );
+	/* Three interrupted runs leave one completion and one actual failed attempt. */
+	BOOST_CHECK_EQUAL( BotSFJ_TrackResolvedAttempts( 5, 1, 3 ), 2 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackResolvedAttempts( 5, 1, 0 ), 5 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackResolvedAttempts( 5, 1, 8 ), 1 );
+	/* Untried routes retain a positive score, instead of being permanently excluded. */
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 1000, 600, 0, 0, 600, 768 ) > 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( backward_boolean_preserves_legacy_probability_when_enabled )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 0, 100 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 50 ), 50 );
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 0 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 100 ), 100 );
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 150 ), 100 );
+	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, -1 ), 0 );
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, BotSFJ_BackwardPercent( 0, 100 ), 0 ) );
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 1, BotSFJ_BackwardPercent( 1, 100 ), 0 ) );
+	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, BotSFJ_BackwardPercent( 1, 100 ), 99 ) );
+}
+
 BOOST_AUTO_TEST_CASE( saber_only_sweeps_and_low_health )
 {
 	/* Yellow 2-4 and staff 3-6 planned sweeps; other stances keep the link roll. */
