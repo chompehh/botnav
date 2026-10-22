@@ -132,13 +132,17 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafe_minledge` | `200` | Downward route-search/continuity bound, units, clamped 0–200; not a landing-damage limit. Confirmed walkable landings use predicted engine fall damage versus current health. Lethal or unresolved falls and explicit hazards remain forbidden. A fresh validated jump may cross a gap. |
 | `bot_strafe_wallmargin` | `32` | Endpoint setback from walls for direct enemy corridors, units, clamped 0–128. Lower values allow closer approaches without shrinking the collision hull or disabling wall-slide prediction. |
 | `bot_strafe_tolerance` | `80` | Horizontal waypoint/recorded-node acceptance and landing-corridor tolerance, units, clamped 16–256. Nodes mark progress rather than requiring exact touchdown; grounded height and lateral checks prevent unrelated nodes being skipped. |
+| `bot_strafe_loosen` | `1` | `1` relaxes non-hazard strafe-jump checks so bots commit to chains: waypoint lookahead allows 64-unit rises per link and 96 units overall, a 96-unit minimum grounded corridor, a temporarily hidden current waypoint, step-ups onto stairs/ramps in the arc simulation, takeoff from and landing on solid brush entities, bumping players, and pauses (instead of aborting) a running chain during a roll. Navigation crouch is held off while a chain owns input and for 300 ms after strafe input at speed, so it cannot turn into a roll. Hazard, `trigger_hurt`, lava, slime, no-drop, fall-damage and route-endpoint checks are unchanged. `0` restores the strict limits (32/64-unit rises, 160-unit corridor, world-only contacts, roll aborts). Compare with `strafeJumpStats`. |
+| `bot_strafe_backward` | `50` | Percent of retreat strafe jumps (outside saber-only play) done backwards: the view faces back toward the enemy and the keys are mirrored (back plus the other strafe key), so the wish direction and speed are unchanged. Retreating bots in full-force/FFA play may also flee along recorded routes that end at least 128 units farther from the enemy. `0` disables it. |
+| `bot_footing` | `1` | Final movement smoother. When separate subsystems queue opposite forward/back or left/right moves within 150–250 ms (shorter for higher skill), the reversal becomes a stop until the hold has passed, and crouch/walk cannot be re-pressed within the same hold after release. Stopping is always immediate. Strafe-jump chains, flipkicks, gripkick, pullkick jumps, rolls, knockdowns and swing dodges are exempt. The drain/retreat lateral step now holds one trace-checked side for 1.2–2.4 s instead of flipping every 1.5 s. `0` disables. |
+| `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
 | `bot_onlystrafes` | `0` | Test preference: starts eligible strafe navigation without the frequency wait and also considers safe direct enemy corridors without requiring increasing separation. Requires enabled strafe jumps and positive frequency. Does not force jumping: combat, required interactions, physics, proximity, collision and hazard checks still take priority, with ordinary navigation as fallback. |
 | `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; the jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe as soon as they land after an engagement. Navigation strafes with a visible enemy are still held back inside close-combat range (~384 units) or when the enemy is closing fast. |
 | `bot_strafetrack` | `1` | Records human strafe-jump routes. `0` off, `1` record (the console prints when a route begins on a circle jump and when it ends), `2` also prints each landing. Bots and spectators are never recorded. See "Recorded strafe routes" below. |
 | `bot_strafejumps_debug` | `0` | `1` prints rejection reasons to the server console; `2` also reports starts; `3+` also broadcasts diagnostics to connected clients. All are rate-limited to once per second per bot. Includes initiation waits, final-input conflicts, and waypoint-skip rejection reasons. |
 | `bot_hopfrequency` | `0` | Deprecated but retained for existing configurations. Controls ambient and discretionary combat hops only; leave `0` to disable them. Emergency jumps, kicks and required map traversal are separate. Use `bot_strafejumpfrequency` for navigation strafe initiation. |
-| `bot_waypointskip` | `2` | Maximum extra same-direction waypoints to skip after reaching a waypoint without a visible-enemy combat lock. Supports explicit neighbor links and implicit consecutive links on linear trails. Requires near-straight, level links and a clear, grounded hull path with safe floor; flagged waypoints and destinations are retained. |
+| `bot_waypointskip` | `2` | Waypoint goal distance, in trail points, clamped 0–256 (`0` = legacy one-point-at-a-time). Out of visible combat the bot picks a goal this many points ahead along its trail direction, follows the points in between (taking the farthest directly reachable one, with a clear grounded hull path and safe floor, up to 8 points at a time), and chains a new goal in the same direction on arrival. The goal stops at flagged waypoints and the destination, which are still visited. When the next trail point fails, the bot looks for a visible unvisited point closer to the goal and only reverses direction after 750 ms without progress. Re-acquiring a lost waypoint also prefers points toward the goal instead of the nearest one, which is often behind. A visible enemy clears the goal. |
 | `bot_redirectcooldown` | `800` | Cooldown (ms) after a wall-triggered redirect reaction. During this window the bot keeps the chosen redirect heading instead of immediately rerolling another wall reaction, reducing tight-space spin loops and repeated reaction hopping. |
 
 `bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
@@ -220,15 +224,17 @@ A bot uses a route when it is within 96 units of `start_pos`, or alongside the r
 ### Recorded strafe routes (`bot_strafetrack`, `exportStrafeTrack`)
 
 With `bot_strafetrack 1` (default), the server records human strafe jumps on every map:
-- **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route N began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees a short message.
+- **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route (session #N) began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees `Recording strafe route (session #N ...)`. `N` is only a per-session counter that restarts whenever the game module loads; it is not the database id.
 - **While recording:** every server frame stores forward/strafe/jump input, yaw and yaw change, frame time, position, speed and grounded state. Each landing becomes a route node (position, speed, strafe key held on that hop, air time). Each landing is the bots' next goal.
 - **End:** the player has been on the ground at or below normal ground speed for 150 ms. The console prints the result. Routes with fewer than 2 landings or under 256 units, or that touch lava/slime/no-drop, are discarded, as are routes cut short by death, teleporting, spectating or forced movement.
 
-Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStrafeRouteNode`, `LocalStrafeRouteInput`, the same file as duel tracking). Recording alone does not change bot behaviour.
+Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStrafeRouteNode`, `LocalStrafeRouteInput`, the same file as duel tracking) and are never deleted by restarts, map changes or `resetdueltrack`. The player sees `Saved strafe route #<database id>`. Map names are stored in lower case, so `MP/FFA3` and `mp/ffa3` share routes; export also matches older mixed-case rows. A route saved with no input rows prints a warning, which usually means the server runs an older game module.
+
+With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewrites the current map's `botroutes/<map>.botroute` and reloads it, and the file is rewritten again at map end/shutdown, so bots use new routes without a manual export. `0` restores the manual `exportStrafeTrack` workflow.
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at 24 MB, like `exportDuelTrack`);
-- regenerates `botroutes/<map>.botroute` for every map with recorded routes (fastest 128 per map). Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
+- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded routes. Up to 128 routes per map are chosen: first the fastest route from each start area (starts at least 192 units apart), then the remaining slots by length x average speed, so long, fast routes come first while routes all over the map are kept. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
 - reloads the routes, so bots start using them immediately.
 
 Recorded route block format:
@@ -244,6 +250,20 @@ strafejump_route
 ```
 
 A grounded bot picks up a recorded route when it is within 96 units horizontally and 64 vertically of `start_pos`, the first landing is ahead of its movement, and the last landing is closer to its current goal than it is. Recorded routes take precedence over single-jump hints and the waypoint corridor; waypoints stay the fallback. While on a route, each landing node is the bot's movement goal, the recorded strafe key chooses its strafe side, and the strafe frequency wait is skipped. Every takeoff still passes the arc, landing and hazard checks. The bot leaves the route and goes back to waypoints when the route is finished, a landing is not reached within 3 s, a jump is aborted or slowed to ground speed, or a visible enemy is within close-combat range (~384 units, unless carrying a flag).
+
+With `bot_strafe_loosen 1` (default) recorded routes allow for frame-rate differences between the human and the bot:
+- a landing counts as reached within 30% of the hop length (at least 80 and at least `bot_strafe_tolerance`, at most 256 units), or once the bot passes the landing's perpendicular plane within that width;
+- grounded height tolerance is 96 units instead of 64;
+- a bot that lands short or wide but is already closer to one of the next two landings continues from there instead of dropping the route;
+- pickup radius is 192 units instead of 96, and a bot may join a route at any landing (not only at the circle-jump start) if the next landing is ahead of it;
+- each landing's timeout is at least twice the human's recorded air time plus 1.5 s (capped at 15 s), so long hops are not abandoned by `bot_strafe_nodetimeout`.
+
+The route endpoint stays strict: a landing may never pass the last recorded landing, and all hazard checks still apply.
+
+Route choice and chaining:
+- When several routes can be joined, the bot takes the highest score: remaining route length x average recorded speed (0.5-2.5 x 400 u/s) x bot success x nearness of the entry. Bot success is `0.25 + 1.5 x (completions + 1) / (attempts + 2)`, so an untried route counts as 50% and routes bots keep failing sink below it. Long, fast routes that bots have finished win over short ones.
+- Bot attempts and completions per route are kept in `botroutes/<map>.botroute_stats` (one line per route: start x y z, last landing x y z, attempts, completions), matched by start and last landing, so re-exports keep the history. Joining mid-route or chaining in counts as an attempt too. The file is written when routes are reloaded and at map end/shutdown.
+- When a route ends, the bot immediately joins another route whose entry is within 256 units of its landing, heads the same way as the last hop and ends closer to its goal. Short routes therefore link into longer runs. Only when none fits does it return to waypoints.
 
 ### Waypoint navigation
 
@@ -265,6 +285,22 @@ Live-map validation checklist:
 - On densely spaced trails, compare `bot_strafejumpwaypoints` at 16, 128 and 256. Verify corridor initiation and forward waypoint progression during flight without backtracking, and confirm flagged interactions, destinations and unsafe terrain remain barriers rather than being blindly skipped.
 
 Human strafe-jump demonstrations are captured with `bot_strafetrack` and exported with `exportStrafeTrack` (see above); dueltrack CSVs do not include strafe routes.
+
+### Saber technique adjustments from duel data
+
+Figures come from the exported dueltrack and learned CSVs (DuckDB over `dueltrack_events*.csv`, partitioned by `parent_id`). Bots won 7% of saber-only duels against humans (11/156) and 30% of full-force duels (109/367).
+
+- **Pursuit jump.** When the opponent moves away at more than 100 u/s at 96–260 units, the technique controller may jump forward once (20% per flight in saber-only, 8% in full force, adjusted by the learned `idle>jump>swing` bonus within ±`BOTLEARN_BONUS_CAP`/3, then a 2.2–4.2 s cooldown) and swing on landing within 0.9 s. Humans followed 21.4% of jumps with a swing within 0.9 s; bots 0.6%. The landing swing still needs a legal attack, and airborne swing starts stay gated.
+- **Longer bursts.** A burst only ends early on a soft exposure (health behind, no landed hit) after 2 swings, plus one for skill 6+ and one when the learned `swing>swing` preference is positive (max 4). Hard exposure (enemy attacking, recently hurt, blocked) still ends it after 2.
+- **Low-health escapes (full force only).** At 40 HP+armor or less, retreats choose (held 0.7–1.3 s) between a back-and-side diagonal (45), an eager escape jump (30, ± half the learned `swing>hop` bonus) and a plain back-pedal (25). Bots back-pedalled 81% of the time at low HP (humans 23%).
+- **Fewer reflexive jumps in full force.** The escape jump is skipped while recently hurt in full-force play unless the jump escape was chosen. Bots jumped after 63% of hits (humans 29%).
+- **Stall breaker.** Grounded, slower than 40 u/s within 150 units for 600 ms and not swinging or locked: the bot swings if in reach (half the time) or takes a 450 ms traced side step.
+- **Hallways and corners.** Saber footwork traces no longer reject a direction because of a wall or prop in the way; only the floor up to the contact is checked (hazards, lava, slime, drops). Solid non-player brush entities count as floor. Bots took 17.4% of hits standing still against 8.1% for humans.
+
+Saber-only adjustments from the newest sessions (`dueltrack_* (2).csv`: 32 saber-only duels, bots won 2; 18 full-force duels, bots won 9). Swings are the horizontal L2R/R2L moves; a chain link is an `attack_chain` row within 400 ms of the previous `swing_end`; range comes from the geometry row with the same `parent_id`/`event_index`:
+- **Low health does not change saber-only play.** Saber-only bots cannot heal. Below 40 HP their damage per second fell from 3.79 to 0.13 and they won 0 of 20 such duels. In saber-only play the health-based retreats, the low-HP escape styles, the critical-health safety exit and the 70 HP fan-chain cutoff no longer apply. The bot only exits when a live enemy chain is running, and fan bias is scaled by the HP difference no lower than 0.75x (was 0.35x).
+- **Responding to an incoming swing within 120 units (saber-only).** From 90–120 units the bot backs off aside and back (hit 2% when retreating vs 24% holding). From 60–90 units it steps in (60%) or holds and blocks (step-in hit 4%, retreat 24%). Under 60 units it steps in (70%) or holds (retreat hit 51%). Counter-swinging into a live swing was hit 38.5% of the time, so saber-only bots punish only within 300 ms after the enemy swing ends, within 110 units. While the enemy is linking swings (two or more within 400 ms) and the bot is 120–170 units away, it sidesteps instead of charging in.
+- **Yellow and staff sweep chains (both modes).** Humans linked 70% of horizontal swings (bots 7.5%). Yellow chains ran 2–4 swings, staff chains 3–6, alternating L2R/R2L about 300 ms apart. A chained yellow sweep landed at least once in 46% of chains (isolated 25%); staff 37% (isolated 14%). Fan bias is now 1.4x in yellow (`SS_MEDIUM`) and staff, and a chain plans 2–4 (yellow) or 3–6 (staff) swings. It links without the random link roll until it reaches that length, unless the enemy is beyond 120 units.
 
 ## Retreat Wall Escapes
 
@@ -451,8 +487,12 @@ opening the in-game menu, rather than relying solely on a previous cgame update.
 Unavailable server information leaves the existing value unchanged.
 
 Deploy the matching client UI module and CMake's `japro-assets.pk3`, not only the
-server game module. Check for older PK3s overriding `ui/jamp/ingame.menu`. A
-server-only update cannot replace menus on an independently installed Android
+server game module. Clients that ship their own UI module and menus (for example
+the base Android client) never load these menus, so the Profile button can be
+missing there. As a fallback, `/ui_openprofile` (TaystJK UI) or
+`/ui_openmenu ingame_player` opens the profile menu directly, and players in
+Arcade, JvM and JoM are told about it when they join.
+A server-only update cannot replace menus on an independently installed Android
 client. The refresh guards against stale state; it does not prove that stale
 state, rather than an overriding client asset, caused a particular screenshot.
 

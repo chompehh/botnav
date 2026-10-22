@@ -391,6 +391,7 @@ typedef struct bot_state_s
 	int					fanChainStartTime; // level.time the fan chain began - chain hard-caps at 3s
 	int					fanChainStartHealth; // health when the fan chain began
 	int					fanSwingCount; // completed fan swings in the current chain
+	int					fanChainTarget; // planned yellow/staff sweep-chain length (0 = none)
 	int					fanSwingStarted; // latched once the current HOLD window actually starts a swing
 	float				fanDwellYawOffset; // current dwell-yaw offset applied relative to normal aim
 	int					fanWobbleStartTime; // level.time when fan-chain attack hold began for delayed wiggle/wobble aim offset
@@ -402,6 +403,8 @@ typedef struct bot_state_s
 	int					swingDodgeDir; // lateral dodge direction (+1 right, -1 left)
 	qboolean			enemySwingActive; // enemy is in a saber start/attack move
 	int					enemySwingStartTime; // level.time the current enemy swing began
+	int					enemySwingEndTime; // level.time the last enemy swing ended
+	int					enemySwingChain; // enemy swings linked within NEWBOTAI_SWEEP_CHAIN_LINK_MS
 	int					swingDodgeRolledFor; // enemySwingStartTime the dodge/advance was rolled for
 	int					counterSwingFor; // enemySwingStartTime a counter-swing was pressed for
 	int					saberSidestepUntil; // post-swing sidestep-back window end
@@ -569,6 +572,7 @@ typedef struct bot_state_s
 	int					sfjStartFrequency;
 	int					sfjStrafeSide;
 	qboolean			sfjStrafeOnly;
+	qboolean			sfjBackward;		// retreat strafe jump with the view facing back (mirrored keys)
 	int					sfjJumpReleaseTime;
 	int					sfjNavPauseUntil;
 	qboolean			sfjNavPauseForJump;
@@ -592,6 +596,18 @@ typedef struct bot_state_s
 	int					sfjRouteTime;		// level.time the route was last advanced
 	int					wpRecent[BOT_NAV_RECENT_WAYPOINTS];		// recently reached waypoint indices + 1 (0 = empty slot)
 	int					wpRecentHead;
+	wpobject_t			*wpSkipGoal;		// bot_waypointskip goal several trail points ahead (NULL = none)
+	int					wpSkipGoalDir;		// wpDirection the goal was picked for
+	int					wpSkipFailSince;	// level.time the bot first failed to advance toward wpSkipGoal (0 = advancing)
+	int					footFwdSign, footFwdSince, footFwdActive;	// footing smoother: forward axis
+	int					footSideSign, footSideSince, footSideActive;	// footing smoother: side axis
+	int					footCrouchHeld, footCrouchReleased;	// footing smoother: crouch button
+	int					footWalkHeld, footWalkReleased;	// footing smoother: walk button
+	int					footDebugDeferred, footDebugTime;	// bot_footing_debug counters
+	int					lateralSideLeft, lateralSideUntil;	// held side for drain/retreat lateral movement
+	int					pursuitJumpTime, pursuitJumpCooldown;	// saber pursuit jump at a fleeing enemy
+	int					saberEscapeStyle, saberEscapeStyleUntil;	// low-health escape style hold
+	int					saberStillSince, saberStallBreakUntil;	// saber stall breaker
 	float				navProgressBest;	// best distance to the current waypoint goal
 	int					navProgressTime;	// level.time navProgressBest last improved
 	int					navProgressGoal;	// waypoint index + 1 navProgressBest refers to (0 = none)

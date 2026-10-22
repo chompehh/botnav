@@ -109,6 +109,7 @@ static consoleCommand_t	commands[] = {
 	{ "ui_load",			UI_Load },
 	{ "ui_modversion",		UI_Modversion_f },
 	{ "ui_openmenu",		UI_OpenMenu_f },
+	{ "ui_openprofile",	UI_OpenProfile_f },
 	{ "ui_opensiegemenu",	UI_OpenSiegeMenu_f },
 	{ "ui_report",			UI_Report },
 };

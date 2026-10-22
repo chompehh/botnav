@@ -47,6 +47,72 @@ static inline int BotSFJ_TrackNodePassed(const float *origin, const float *from,
 	return fabsf(lateral) <= tolerance;
 }
 
+/* Recorded routes come from humans at a different frame rate, so a bot rarely lands on
+ * the recorded spot. Long hops get proportionally more slack (30% of the gap). */
+#define BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE 80.0f
+#define BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE 256.0f
+#define BOT_SFJ_TRACK_LOOSE_GAP_FRACTION 0.3f
+#define BOT_SFJ_TRACK_LOOSE_HEIGHT 96.0f
+#define BOT_SFJ_TRACK_LOOSE_PICKUP_RADIUS 192.0f
+
+static inline float BotSFJ_TrackNodeTolerance(float baseTolerance, float gapLength, int loosen)
+{
+	float t;
+
+	if (!loosen)
+		return baseTolerance;
+	t = gapLength * BOT_SFJ_TRACK_LOOSE_GAP_FRACTION;
+	if (t < baseTolerance)
+		t = baseTolerance;
+	if (t < BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE)
+		t = BOT_SFJ_TRACK_LOOSE_MIN_TOLERANCE;
+	if (t > BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE)
+		t = BOT_SFJ_TRACK_LOOSE_MAX_TOLERANCE;
+	return t;
+}
+
+/* Node timeout: the configured value, or longer for hops the human took long to fly. */
+static inline int BotSFJ_TrackNodeTimeout(int configuredMs, int recordedAirMs, int loosen)
+{
+	int t = configuredMs;
+
+	if (loosen && recordedAirMs > 0 && recordedAirMs * 2 + 1500 > t)
+		t = recordedAirMs * 2 + 1500;
+	return t > 15000 ? 15000 : t;
+}
+
+/* Horizontal distance squared from origin to node. */
+static inline float BotSFJ_Dist2DSq(const float *a, const float *b)
+{
+	const float x = a[0] - b[0];
+	const float y = a[1] - b[1];
+
+	return x * x + y * y;
+}
+
+/* How many nodes to skip when the bot is already closer to a later landing. */
+static inline int BotSFJ_TrackSkipAhead(const float *origin, const float *nodesXYZ, int current,
+	int nodeCount, int maxSkip)
+{
+	int k, best = 0;
+	float bestDist;
+
+	if (current < 0 || current >= nodeCount)
+		return 0;
+	bestDist = BotSFJ_Dist2DSq(origin, &nodesXYZ[current * 3]);
+	for (k = 1; k <= maxSkip && current + k < nodeCount; k++)
+	{
+		const float d = BotSFJ_Dist2DSq(origin, &nodesXYZ[(current + k) * 3]);
+
+		if (d < bestDist)
+		{
+			bestDist = d;
+			best = k;
+		}
+	}
+	return best;
+}
+
 static inline int BotSFJ_ContinuitySlowedOut(float peakSpeed, float speed,
 	float groundSpeed)
 {
@@ -381,6 +447,39 @@ static inline int BotSFJ_AdvanceCurveLinkAllows(int requiredFlags, int linked,
 		alignment >= 0.5f && endpointProgress >= 0.0f;
 }
 
+/*
+ * bot_strafe_loosen relaxes obstruction checks that rejected most strafe jumps
+ * on stairs, ramps, dense waypoint triangles and brush entities.  Hazard,
+ * fall-damage and route-endpoint checks are never relaxed.
+ */
+static inline float BotSFJ_CorridorLinkRise(int loosen)
+{
+	return loosen ? 64.0f : 32.0f;
+}
+
+static inline float BotSFJ_CorridorBaseRise(int loosen)
+{
+	return loosen ? 96.0f : 64.0f;
+}
+
+static inline float BotSFJ_CorridorMinLength(int loosen, int grounded)
+{
+	if (!grounded)
+		return 64.0f;
+	return loosen ? 96.0f : 160.0f;
+}
+
+/* Whether an arc contact with an entity may count as a landing or a wall slide. */
+static inline int BotSFJ_ArcEntityAllows(int isWorld, int isClient, int landing, int loosen)
+{
+	if (isWorld)
+		return 1;
+	if (!loosen)
+		return 0;
+	/* Brush entities can be landed on; players are only bumped into. */
+	return landing ? !isClient : 1;
+}
+
 static inline int BotSFJ_EndpointAllows(float startX, float startY,
 	float endX, float endY, float landingX, float landingY, float endTolerance)
 {
@@ -614,6 +713,9 @@ static inline int BotSFJ_SlowedOutShouldRelease(int slowedOut, int slowedSince, 
  * combat-hop crouches are skipped while grounded above ground speed; deliberate
  * roll escapes pass allowRoll.
  */
+/* Navigation crouch is held off this long after strafe input while still fast. */
+#define BOT_SFJ_POST_LAND_NO_CROUCH_MS 300
+
 static inline int BotSFJ_GroundCrouchAllowed(int grounded, float horizontalSpeed,
 	float groundSpeed, int allowRoll)
 {
@@ -683,6 +785,50 @@ static inline int BotSFJ_TrackSlowSince(int slowSince, int now, int grounded,
 static inline int BotSFJ_TrackShouldEnd(int slowSince, int now)
 {
 	return slowSince && now - slowSince >= BOT_SFJ_TRACK_END_MS;
+}
+
+/* Export selection: candidates arrive fastest first. Keep the fastest route near each
+ * start area first (starts at least `spacing` apart), then fill the remaining slots in
+ * speed order, so the per-map limit covers the whole map instead of one fast corridor. */
+static inline int BotSFJ_TrackSelectCoverage(const float *startsXYZ, int count, int maxPick, float spacing,
+	unsigned char *picked)
+{
+	int i, j, n = 0;
+	const float spacingSq = spacing * spacing;
+
+	for (i = 0; i < count; i++)
+		picked[i] = 0;
+	for (i = 0; i < count && n < maxPick; i++)
+	{
+		int clear = 1;
+
+		for (j = 0; j < i && clear; j++)
+		{
+			float dx, dy, dz;
+
+			if (!picked[j])
+				continue;
+			dx = startsXYZ[i * 3] - startsXYZ[j * 3];
+			dy = startsXYZ[i * 3 + 1] - startsXYZ[j * 3 + 1];
+			dz = startsXYZ[i * 3 + 2] - startsXYZ[j * 3 + 2];
+			if (dx * dx + dy * dy + dz * dz < spacingSq)
+				clear = 0;
+		}
+		if (clear)
+		{
+			picked[i] = 1;
+			n++;
+		}
+	}
+	for (i = 0; i < count && n < maxPick; i++)
+	{
+		if (!picked[i])
+		{
+			picked[i] = 1;
+			n++;
+		}
+	}
+	return n;
 }
 
 static inline int BotSFJ_TrackKeep(int nodes, float pathDistance, int touchedHazard)
@@ -785,6 +931,51 @@ static inline int BotNav_RecentContains(const int *ring, int count, int index)
 	return 0;
 }
 
+/*
+ * Waypoint skip goals.  bot_waypointskip picks a goal that many trail points
+ * ahead; the bot follows the points in between and chains a new goal when it
+ * arrives.  A single failed step must not reverse the bot along its trail.
+ */
+#define BOT_NAV_MAX_WAYPOINT_SKIP 256
+#define BOT_NAV_SKIP_SHORTCUT_STEPS 8
+#define BOT_NAV_SKIP_FLIP_DELAY_MS 750
+#define BOT_NAV_SKIP_MIN_PROGRESS 16.0f
+
+static inline int BotNav_WaypointSkipCap(int skip)
+{
+	return skip < 0 ? 0 : (skip > BOT_NAV_MAX_WAYPOINT_SKIP ? BOT_NAV_MAX_WAYPOINT_SKIP : skip);
+}
+
+/* Trail steps still separating index from goal when walking with step (+1/-1); -1 when goal is behind. */
+static inline int BotNav_StepsToGoal(int index, int goal, int step)
+{
+	const int steps = (goal - index) * (step < 0 ? -1 : 1);
+
+	return steps < 0 ? -1 : steps;
+}
+
+/*
+ * Score for an off-trail linked neighbour.  It must not be a point the bot just
+ * left, must head roughly toward the goal and must get meaningfully closer.
+ * Returns a negative value when the neighbour is not acceptable.
+ */
+static inline float BotNav_GoalNeighborScore(float distanceBefore, float distanceAfter,
+	float alignment, int recent)
+{
+	const float gain = distanceBefore - distanceAfter;
+
+	if (recent || !isfinite(gain) || !isfinite(alignment) || alignment < 0.5f ||
+		gain < BOT_NAV_SKIP_MIN_PROGRESS)
+		return -1.0f;
+	return gain + alignment * 32.0f;
+}
+
+/* Reverse the trail direction only after failing to advance for a while. */
+static inline int BotNav_SkipShouldFlip(int failSince, int now)
+{
+	return failSince > 0 && now - failSince >= BOT_NAV_SKIP_FLIP_DELAY_MS;
+}
+
 /* Adds index to the ring (no duplicates); returns the new head. */
 static inline int BotNav_RecentPush(int *ring, int count, int head, int index)
 {
@@ -805,6 +996,63 @@ static inline int BotNav_ProgressImproved(float best, float distance)
 static inline int BotNav_ProgressStalled(int lastImproveTime, int now)
 {
 	return lastImproveTime > 0 && now - lastImproveTime >= BOT_NAV_PROGRESS_STALL_MS;
+}
+
+/*
+ * Recorded-route preference.  Long, fast routes the bots have finished before
+ * win over short or failing ones; nearer entries win ties.  Untried routes
+ * score as an even success rate, so new recordings still get attempts.
+ */
+static inline float BotSFJ_TrackRouteSuccess(int attempts, int completions)
+{
+	if (attempts < 0)
+		attempts = 0;
+	if (completions < 0)
+		completions = 0;
+	if (completions > attempts)
+		completions = attempts;
+	return ((float)completions + 1.0f) / ((float)attempts + 2.0f);
+}
+
+static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageSpeed,
+	int attempts, int completions, float entryDistance, float pickupRadius)
+{
+	float speedFactor, nearFactor;
+
+	if (!(remainingLength > 0.0f))
+		return 0.0f;
+	speedFactor = averageSpeed / 400.0f;
+	if (!(speedFactor >= 0.5f))
+		speedFactor = 0.5f;
+	if (speedFactor > 2.5f)
+		speedFactor = 2.5f;
+	nearFactor = pickupRadius > 0.0f ? 1.0f - 0.5f * entryDistance / pickupRadius : 1.0f;
+	if (nearFactor < 0.5f)
+		nearFactor = 0.5f;
+	if (nearFactor > 1.0f)
+		nearFactor = 1.0f;
+	return remainingLength * speedFactor *
+		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor;
+}
+
+/*
+ * Backward strafe jumping: the view faces back along the route and the keys are
+ * mirrored (back instead of forward, the other strafe key).  The wish direction,
+ * and therefore the air acceleration, is unchanged.
+ */
+static inline int BotSFJ_UseBackwardStrafe(int retreatIntent, int saberOnly, int percent, int roll)
+{
+	if (!retreatIntent || saberOnly || percent <= 0)
+		return 0;
+	if (percent >= 100)
+		return 1;
+	return roll >= 0 && (roll % 100) < percent;
+}
+
+static inline void BotSFJ_BackwardAxes(int *forward, int *right)
+{
+	*forward = -*forward;
+	*right = -*right;
 }
 
 #endif

@@ -1544,6 +1544,14 @@ void UI_LoadMenus(const char *menuFile, qboolean reset) {
 	trap->PC_FreeSource( handle );
 
 	trap->PC_RemoveAllGlobalDefines ( );
+
+}
+
+/* Opens the profile menu without relying on the in-game menu's buttons. */
+void UI_OpenProfile_f( void ) {
+	UI_SetActiveMenu(UIMENU_PLAYERCONFIG);
+	if (!Menus_FindByName("ingame_player"))
+		Com_Printf(S_COLOR_YELLOW "ui_openprofile: ingame_player menu is not loaded.\n");
 }
 
 void UI_Load( void ) {
@@ -11881,6 +11889,7 @@ void UI_Init( qboolean inGameLoad ) {
 
 	//console cmd autocompletion
 	trap->ext.AddCommand("ui_load");
+	trap->ext.AddCommand("ui_openprofile");
 	trap->ext.AddCommand("strafehelper");
 	trap->ext.AddCommand("stylePlayer");
 	trap->ext.AddCommand("speedometer");

@@ -999,7 +999,7 @@
 				hide			strafeHelperButton
 			}
 		}
-		
+
 		itemDef 
 		{
 			name				accountButton

@@ -51,6 +51,7 @@ void UI_LoadMenus( const char *menuFile, qboolean reset );
 void UI_LoadArenas( void );
 void UI_LoadForceConfig_List( void );
 void UI_UpdateCurrentServerInfo( void );
+void UI_OpenProfile_f( void );
 void UI_BuildQ3Model_List( void );
 void UI_BuildPlayerModel_List( qboolean inGameLoad );
 void UI_UpdateSaberHiltInfo( void );

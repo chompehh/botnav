@@ -393,6 +393,10 @@ static inline newbotai_saber_grade_t NewBotAI_GetSaberChoiceGrade(int skill, int
 
 static inline int NewBotAI_SaberNeedsSafetyExit(newbotai_saber_tactic_context_t context)
 {
+	// Saber-only: health does not change play; exit only from a live enemy chain.
+	if (context.saberOnlyDuel)
+		return context.selfBlocked || (!context.enemyVulnerable && context.enemyAttacking &&
+			context.chainLength >= 2);
 	return context.selfBlocked || (!context.enemyVulnerable &&
 		((context.ourTotalHealth <= NEWBOTAI_SABER_CRITICAL_TOTAL_HEALTH &&
 		  context.enemyTotalHealth > context.ourTotalHealth &&
@@ -1203,8 +1207,8 @@ static inline float NewBotAI_ScaleSaberDuelFanBias(float fanBias, int healthDelt
 
 	if (fanBias <= 0.0f)
 		return 0.0f;
-	if (scale < 0.35f)
-		scale = 0.35f;
+	if (scale < 0.75f)
+		scale = 0.75f;
 	else if (scale > 1.25f)
 		scale = 1.25f;
 	fanBias *= scale;
@@ -2361,6 +2365,296 @@ static inline float NewBotAI_GetSaberThrowAimOffset(int lateralMotionSide, int p
 		t = 1.0f;
 	return (lateralMotionSide < 0 ? 1.0f : -1.0f) * (NEWBOTAI_THROW_TRAIL_MIN_DEG +
 		(NEWBOTAI_THROW_TRAIL_MAX_DEG - NEWBOTAI_THROW_TRAIL_MIN_DEG) * t);
+}
+
+
+// Footing smoother. Opposite movement commands from separate subsystems within a few
+// frames make the legs twitch. A sign reversal on one axis is replaced with a stop until
+// the current direction has been held for holdMs; stopping is always allowed at once.
+#define BOT_FOOTING_HOLD_MIN_MS 150
+#define BOT_FOOTING_HOLD_MAX_MS 250
+
+static inline int BotFooting_HoldMs(int skill)
+{
+	if (skill < 1)
+		skill = 1;
+	else if (skill > 5)
+		skill = 5;
+	return BOT_FOOTING_HOLD_MAX_MS - (BOT_FOOTING_HOLD_MAX_MS - BOT_FOOTING_HOLD_MIN_MS) * (skill - 1) / 4;
+}
+
+// Returns the axis value to emit. *sign/*since/*lastActive hold the axis state;
+// *reversed is set when a reversal was deferred.
+static inline int BotFooting_FilterAxis(int desired, int *sign, int *since, int *lastActive,
+	int now, int holdMs, int *reversed)
+{
+	const int d = desired > 0 ? 1 : (desired < 0 ? -1 : 0);
+
+	*reversed = 0;
+	if (!d)
+	{
+		if (*sign && now - *lastActive >= holdMs)
+			*sign = 0;
+		return 0;
+	}
+	if (*sign && d != *sign && now - *since < holdMs)
+	{
+		*reversed = 1;
+		return 0;
+	}
+	if (d != *sign)
+	{
+		*sign = d;
+		*since = now;
+	}
+	*lastActive = now;
+	return desired;
+}
+
+// A held button (crouch/walk) may not be pressed again within holdMs of release.
+static inline int BotFooting_FilterButton(int desired, int *held, int *releasedAt, int now, int holdMs)
+{
+	if (desired)
+	{
+		if (!*held && *releasedAt && now - *releasedAt < holdMs)
+			return 0;
+		*held = 1;
+		return 1;
+	}
+	if (*held)
+	{
+		*held = 0;
+		*releasedAt = now;
+	}
+	return 0;
+}
+
+
+// Pursuit jump: in saber-only duels humans followed 21.4% of jumps with a swing inside
+// 0.9 s (bots 0.6%), and idle>jump won 91% of 98 human uses. Jump at an opponent who is
+// opening the gap, then swing on landing. Full-force air swings hit far less often than
+// ground swings (14.6% vs 37.3%), so the base rate there is lower.
+#define NEWBOTAI_PURSUIT_FLEE_SPEED 100.0f
+#define NEWBOTAI_PURSUIT_MIN_RANGE 96.0f
+#define NEWBOTAI_PURSUIT_MAX_RANGE 260.0f
+#define NEWBOTAI_PURSUIT_SWING_MS 900
+#define NEWBOTAI_PURSUIT_SABER_CHANCE 20
+#define NEWBOTAI_PURSUIT_FORCE_CHANCE 8
+#define NEWBOTAI_PURSUIT_COOLDOWN_MIN_MS 2200
+#define NEWBOTAI_PURSUIT_COOLDOWN_MAX_MS 4200
+
+static inline int NewBotAI_PursuitJumpChance(int saberOnly, int learnedBonus)
+{
+	int chance = saberOnly ? NEWBOTAI_PURSUIT_SABER_CHANCE : NEWBOTAI_PURSUIT_FORCE_CHANCE;
+
+	if (learnedBonus > BOTLEARN_BONUS_CAP)
+		learnedBonus = BOTLEARN_BONUS_CAP;
+	else if (learnedBonus < -BOTLEARN_BONUS_CAP)
+		learnedBonus = -BOTLEARN_BONUS_CAP;
+	chance += learnedBonus / 3;
+	if (chance < 0)
+		chance = 0;
+	else if (chance > 35)
+		chance = 35;
+	return chance;
+}
+
+// enemyApproachSpeed is the enemy's own velocity toward us (negative when fleeing).
+static inline int NewBotAI_ShouldPursuitJump(float enemyApproachSpeed, float range, int grounded,
+	int enemyAttacking, int selfAttacking, int cooldownReady, int chance, int roll)
+{
+	if (!grounded || enemyAttacking || selfAttacking || !cooldownReady)
+		return 0;
+	if (enemyApproachSpeed > -NEWBOTAI_PURSUIT_FLEE_SPEED)
+		return 0;
+	if (range < NEWBOTAI_PURSUIT_MIN_RANGE || range > NEWBOTAI_PURSUIT_MAX_RANGE)
+		return 0;
+	return roll <= chance;
+}
+
+// Swing once back on the ground inside the human jump-to-swing window.
+static inline int NewBotAI_PursuitLandingSwing(int now, int jumpTime, int grounded, float range, float swingRange)
+{
+	return jumpTime > 0 && grounded && now - jumpTime > 120 &&
+		now - jumpTime <= NEWBOTAI_PURSUIT_SWING_MS && range <= swingRange;
+}
+
+// Burst length before a soft exposure (health behind, no landed hit) ends it. Humans'
+// 3-4 swing chains won over 90%; bots chained 0.09 attacks per swing end vs 0.72.
+static inline int NewBotAI_SaberBurstLimit(int skill, int learnedPreference)
+{
+	int limit = 2;
+
+	if (skill >= 6)
+		limit++;
+	if (learnedPreference > 0)
+		limit++;
+	return limit > 4 ? 4 : limit;
+}
+
+static inline int NewBotAI_SaberBurstCompleteScaled(newbotai_saber_family_t family, int acceptedAttacks,
+	int hardExposed, int softExposed, int limit)
+{
+	if (family != NEWBOTAI_SABER_BURST)
+		return 0;
+	if (acceptedAttacks >= 2 && hardExposed)
+		return 1;
+	return acceptedAttacks >= limit && softExposed;
+}
+
+// Low-health escape style. Bots back-pedalled 81% of the time at 40 HP or less (humans
+// 23%) and only half as often opened 150+ units of distance.
+typedef enum
+{
+	NEWBOTAI_ESCAPE_BACKPEDAL = 0,
+	NEWBOTAI_ESCAPE_DIAGONAL,
+	NEWBOTAI_ESCAPE_JUMP
+} newbotai_escape_style_t;
+
+#define NEWBOTAI_ESCAPE_LOW_HEALTH 40
+
+static inline newbotai_escape_style_t NewBotAI_ChooseEscapeStyle(int ourTotalHealth, int sideAllowed,
+	int jumpReady, int learnedHopBonus, int roll)
+{
+	int diagonal, jumpWeight, total;
+
+	if (ourTotalHealth > NEWBOTAI_ESCAPE_LOW_HEALTH)
+		return NEWBOTAI_ESCAPE_BACKPEDAL;
+	if (learnedHopBonus > BOTLEARN_BONUS_CAP)
+		learnedHopBonus = BOTLEARN_BONUS_CAP;
+	else if (learnedHopBonus < -BOTLEARN_BONUS_CAP)
+		learnedHopBonus = -BOTLEARN_BONUS_CAP;
+	diagonal = sideAllowed ? 45 : 0;
+	jumpWeight = jumpReady ? 30 + learnedHopBonus / 2 : 0;
+	if (jumpWeight < 0)
+		jumpWeight = 0;
+	total = 25 + diagonal + jumpWeight;
+	roll = roll % total;
+	if (roll < diagonal)
+		return NEWBOTAI_ESCAPE_DIAGONAL;
+	if (roll < diagonal + jumpWeight)
+		return NEWBOTAI_ESCAPE_JUMP;
+	return NEWBOTAI_ESCAPE_BACKPEDAL;
+}
+
+// Planting: bots took 17.4% of hits standing still (humans 8.1%). Break a stall that
+// lasts this long within this range when not attacking or locked.
+#define NEWBOTAI_STALL_RANGE 150.0f
+#define NEWBOTAI_STALL_SPEED 40.0f
+#define NEWBOTAI_STALL_MS 600
+#define NEWBOTAI_STALL_BREAK_MS 450
+
+static inline int NewBotAI_StallBreakDue(int now, int *stillSince, float speed2D, float range,
+	int grounded, int busy)
+{
+	if (!grounded || busy || speed2D >= NEWBOTAI_STALL_SPEED || range > NEWBOTAI_STALL_RANGE)
+	{
+		*stillSince = 0;
+		return 0;
+	}
+	if (!*stillSince)
+	{
+		*stillSince = now;
+		return 0;
+	}
+	if (now - *stillSince >= NEWBOTAI_STALL_MS)
+	{
+		*stillSince = 0;
+		return 1;
+	}
+	return 0;
+}
+
+// Sweep chains (dueltrack (2) saber-only sessions): humans linked 70% of swings into
+// another, bots 7.5%. Yellow chains ran 2-4 swings (1:52 2:54 3:46 4:11), staff chains
+// averaged 2.75 with 45 of 3+; links alternate L2R/R2L ~300ms start to start. Chained
+// swings landed at least once in 46% (yellow) / 37% (staff) of chains vs 25% / 14% for
+// isolated swings, at 65-110u. Stance ids follow saberAnimLevel (SS_MEDIUM 2, SS_STAFF 7).
+#define NEWBOTAI_STANCE_MEDIUM 2
+#define NEWBOTAI_STANCE_STAFF 7
+#define NEWBOTAI_SWEEP_CHAIN_MAX_RANGE 120.0f
+#define NEWBOTAI_SWEEP_STANCE_FAN_SCALE 1.4f
+
+static inline int NewBotAI_IsSweepStance(int stance)
+{
+	return stance == NEWBOTAI_STANCE_MEDIUM || stance == NEWBOTAI_STANCE_STAFF;
+}
+
+// Planned chain length rolled when a chain opens (roll 1-100); 0 = no planned length.
+static inline int NewBotAI_SweepChainTarget(int stance, int roll)
+{
+	if (stance == NEWBOTAI_STANCE_MEDIUM)
+		return roll <= 50 ? 2 : (roll <= 90 ? 3 : 4);
+	if (stance == NEWBOTAI_STANCE_STAFF)
+		return roll <= 35 ? 3 : (roll <= 70 ? 4 : (roll <= 90 ? 5 : 6));
+	return 0;
+}
+
+// Link without the random link roll while short of the planned length and still in reach.
+static inline int NewBotAI_SweepChainForceLink(int swingsDone, int target, float enemyDistance2D)
+{
+	return target > 0 && swingsDone < target && enemyDistance2D <= NEWBOTAI_SWEEP_CHAIN_MAX_RANGE;
+}
+
+static inline float NewBotAI_SweepStanceFanBias(float fanBias, int stance)
+{
+	if (fanBias <= 0.0f || !NewBotAI_IsSweepStance(stance))
+		return fanBias;
+	fanBias *= NEWBOTAI_SWEEP_STANCE_FAN_SCALE;
+	return fanBias > 100.0f ? 100.0f : fanBias;
+}
+
+// Saber-only answer to an enemy swing starting within 120u (same sessions, bot movement
+// over the next 250ms): from 90-120u backing off was hit 2% (holding 24%); from 60-90u
+// stepping in was hit 4% vs retreating 24%; under 60u retreating was hit 51%. Counter-
+// swinging into the live swing was the worst answer (38.5%), so it waits for the gap.
+#define NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE 120.0f
+#define NEWBOTAI_SWEEP_BACKOFF_MIN_RANGE 90.0f
+#define NEWBOTAI_SWEEP_STEPIN_MIN_RANGE 60.0f
+#define NEWBOTAI_SWEEP_PUNISH_WINDOW_MS 300
+#define NEWBOTAI_SWEEP_PUNISH_RANGE 110.0f
+// An enemy linking swings within this gap is sweep-chaining; don't charge in from outside reach.
+#define NEWBOTAI_SWEEP_CHAIN_LINK_MS 400
+#define NEWBOTAI_SWEEP_NO_CHARGE_RANGE 170.0f
+
+static inline newbotai_swing_dodge_t NewBotAI_GetSaberOnlySweepResponse(float enemyDistance2D,
+	int mistakeChance, int mistakeRoll, int styleRoll)
+{
+	if (enemyDistance2D > NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE)
+		return NEWBOTAI_SWING_DODGE_NONE;
+	if (mistakeChance > 0 && mistakeRoll > 0 && mistakeRoll <= mistakeChance)
+		return NEWBOTAI_SWING_DODGE_BACKPEDAL;
+	if (enemyDistance2D >= NEWBOTAI_SWEEP_BACKOFF_MIN_RANGE)
+		return NEWBOTAI_SWING_DODGE_LATERAL;
+	if (enemyDistance2D >= NEWBOTAI_SWEEP_STEPIN_MIN_RANGE)
+		return styleRoll <= 60 ? NEWBOTAI_SWING_DODGE_ADVANCE : NEWBOTAI_SWING_DODGE_NONE;
+	return styleRoll <= 70 ? NEWBOTAI_SWING_DODGE_ADVANCE : NEWBOTAI_SWING_DODGE_NONE;
+}
+
+static inline int NewBotAI_SweepPunishReady(int msSinceEnemySwingEnd, float range2D, int alreadyPunished)
+{
+	return !alreadyPunished && msSinceEnemySwingEnd >= 0 &&
+		msSinceEnemySwingEnd <= NEWBOTAI_SWEEP_PUNISH_WINDOW_MS && range2D <= NEWBOTAI_SWEEP_PUNISH_RANGE;
+}
+
+static inline int NewBotAI_EnemySweepChainCount(int previousCount, int msSincePreviousEnd)
+{
+	return (msSincePreviousEnd >= 0 && msSincePreviousEnd <= NEWBOTAI_SWEEP_CHAIN_LINK_MS) ?
+		previousCount + 1 : 1;
+}
+
+// Hold position (no forward) while an enemy sweep-chains just outside reach.
+static inline int NewBotAI_ShouldHoldOffSweeper(int enemyChain, int enemySwinging, float enemyDistance2D)
+{
+	return enemySwinging && enemyChain >= 2 && enemyDistance2D > NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE &&
+		enemyDistance2D <= NEWBOTAI_SWEEP_NO_CHARGE_RANGE;
+}
+
+// Saber-only play cannot heal, so low health does not change it (the low-HP escape styles
+// and health-based retreats apply to full-force play only).
+static inline int NewBotAI_EscapeHealthFor(int ourTotalHealth, int saberOnly)
+{
+	return saberOnly ? 100 : ourTotalHealth;
 }
 
 #endif

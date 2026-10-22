@@ -4639,6 +4639,8 @@ void G_TrackedPersistShutdown(void)
 	}
 	if (pending > 0)
 		G_PerfWarn("duel persist shutdown flush", trap->Milliseconds() - start);
+	if (bot_strafetrack_autoexport.integer)
+		G_StrafeTrackExportCurrentMap(qfalse);
 	G_CloseTrackedPersistDB();
 }
 
@@ -11361,6 +11363,8 @@ botroutes/<map>.botroute so bots start using them.
 */
 #define STRAFETRACK_MAX_INPUTS 1536
 #define STRAFETRACK_ROUTES_PER_MAP 128
+#define STRAFETRACK_EXPORT_CANDIDATES 4096
+#define STRAFETRACK_COVERAGE_SPACING 192.0f
 #define STRAFETRACK_BEGIN_MARKER "// BEGIN recorded strafe routes (exportStrafeTrack)"
 #define STRAFETRACK_END_MARKER "// END recorded strafe routes"
 
@@ -11435,7 +11439,7 @@ static void G_EnsureStrafeTrackSchema(sqlite3 *db)
 }
 
 static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client_t *track, float endSpeed,
-	int endTime)
+	int endTime, sqlite3_int64 *savedId)
 {
 	sqlite3 *db = G_GetTrackedPersistDB();
 	sqlite3_stmt *stmt = NULL;
@@ -11449,6 +11453,8 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 		return qfalse;
 	G_EnsureStrafeTrackSchema(db);
 	trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
+	/* Map names are case-insensitive in game; MP/FFA3 and mp/ffa3 must share routes. */
+	Q_strlwr(mapname);
 	Q_strncpyz(player, ent->client->pers.netname, sizeof(player));
 	Q_CleanStr(player);
 	if (sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
@@ -11536,6 +11542,8 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 		ok = qfalse;
 
 	sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+	if (ok && savedId)
+		*savedId = routeId;
 	return ok;
 }
 
@@ -11547,18 +11555,31 @@ static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, con
 	track->active = qfalse;
 	if (!discard && BotSFJ_TrackKeep(track->nodeCount, track->distance, track->hazard))
 	{
-		const qboolean saved = G_StrafeTrackSave(ent, track, endSpeed, level.time);
+		sqlite3_int64 routeId = 0;
+		const qboolean saved = G_StrafeTrackSave(ent, track, endSpeed, level.time, &routeId);
 
-		trap->Print("Strafe route %i by %s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f%s\n",
+		trap->Print("Strafe route (session #%i) by %s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f%s\n",
 			track->routeNum, ent->client->pers.netname, why, track->nodeCount, track->distance,
 			(float)(level.time - track->startTime) / 1000.0f, track->maxSpeed,
-			saved ? ", saved" : ", NOT saved (database unavailable)");
-		trap->SendServerCommand(ent - g_entities, va("print \"Strafe route %i recorded (%i landings). "
-			"Bots use it after exportStrafeTrack.\n\"", track->routeNum, track->nodeCount));
+			saved ? va(", saved as database route #%lld", (long long)routeId) : ", NOT saved (database unavailable)");
+		if (saved && !track->inputCount)
+			trap->Print(S_COLOR_YELLOW "Strafe route #%lld has no recorded inputs; check that the server runs the current game module.\n",
+				(long long)routeId);
+		if (saved)
+		{
+			trap->SendServerCommand(ent - g_entities, va("print \"Saved strafe route #%lld (%i landings, this session's #%i). "
+				"Routes are kept in the database across restarts.\n\"", (long long)routeId, track->nodeCount,
+				track->routeNum));
+			if (bot_strafetrack_autoexport.integer)
+				G_StrafeTrackExportCurrentMap(qtrue);
+		}
+		else
+			trap->SendServerCommand(ent - g_entities, va("print \"Strafe route (session #%i) NOT saved: database unavailable.\n\"",
+				track->routeNum));
 	}
 	else
 	{
-		trap->Print("Strafe route %i by %s discarded (%s): %i landing(s), %.0f units%s\n",
+		trap->Print("Strafe route (session #%i) by %s discarded (%s): %i landing(s), %.0f units%s\n",
 			track->routeNum, ent->client->pers.netname, why, track->nodeCount, track->distance,
 			track->hazard ? ", touched a hazard" : "");
 	}
@@ -11681,10 +11702,10 @@ void G_StrafeTrackFrame(gentity_t *ent)
 			VectorCopy(client->ps.origin, track->start);
 			VectorCopy(client->ps.origin, track->lastOrigin);
 			trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
-			trap->Print("Strafe route %i began: %s circle-jumped on %s at (%.0f %.0f %.0f), speed %.0f\n",
+			trap->Print("Strafe route (session #%i) began: %s circle-jumped on %s at (%.0f %.0f %.0f), speed %.0f\n",
 				track->routeNum, client->pers.netname, mapname,
 				track->start[0], track->start[1], track->start[2], speed);
-			trap->SendServerCommand(clientNum, va("print \"Strafe route %i began (circle jump at %.0f ups).\n\"",
+			trap->SendServerCommand(clientNum, va("print \"Recording strafe route (session #%i, circle jump at %.0f ups).\n\"",
 				track->routeNum, speed));
 		}
 	}
@@ -11783,17 +11804,24 @@ static void G_StrafeTrackAppend(strafetrack_text_t *text, const char *chunk)
 }
 
 //Writes botroutes/<map>.botroute keeping any hand-written blocks outside the recorded section.
-static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapname)
+static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qboolean quiet)
 {
+	static sqlite3_int64 candidateIds[STRAFETRACK_EXPORT_CANDIDATES];
+	static float candidateStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
+	static float candidateSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
+	static unsigned char candidatePicked[STRAFETRACK_EXPORT_CANDIDATES];
 	sqlite3_stmt *routes = NULL, *nodes = NULL;
 	strafetrack_text_t text;
 	fileHandle_t f;
 	char path[MAX_QPATH];
-	int len, written = 0;
+	char mapname[MAX_QPATH];
+	int len, written = 0, candidates = 0, c;
 
-	if (!mapname || !mapname[0] || strstr(mapname, "..") || strchr(mapname, '\\') || strchr(mapname, ':') ||
-		mapname[0] == '/')
+	if (!mapnameIn || !mapnameIn[0] || strstr(mapnameIn, "..") || strchr(mapnameIn, '\\') || strchr(mapnameIn, ':') ||
+		mapnameIn[0] == '/')
 		return 0;
+	Q_strncpyz(mapname, mapnameIn, sizeof(mapname));
+	Q_strlwr(mapname);
 	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute", mapname);
 	text.capacity = 65536;
 	text.length = 0;
@@ -11838,23 +11866,37 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapname)
 		G_StrafeTrackAppend(&text, "\n");
 
 	G_StrafeTrackAppend(&text, STRAFETRACK_BEGIN_MARKER "\n");
-	//Fastest routes first: average speed over the route, then longer routes.
+	//Long, fast routes first (length x average speed); the per-map limit is then spread
+	//over distinct start areas so other routes elsewhere on the map are not dropped.
 	if (sqlite3_prepare_v2(db, "SELECT id, start_x, start_y, start_z, start_speed FROM LocalStrafeRoute "
-		"WHERE mapname = ? AND node_count >= ? ORDER BY (distance * 1000.0 / MAX(duration_ms, 1)) DESC, "
+		"WHERE lower(mapname) = ? AND node_count >= ? ORDER BY (distance * distance / MAX(duration_ms, 1)) DESC, "
 		"distance DESC LIMIT ?", -1, &routes, NULL) == SQLITE_OK &&
 		sqlite3_prepare_v2(db, "SELECT x, y, z, speed, side, air_ms FROM LocalStrafeRouteNode "
 		"WHERE route_id = ? ORDER BY node_index", -1, &nodes, NULL) == SQLITE_OK)
 	{
 		sqlite3_bind_text(routes, 1, mapname, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_int(routes, 2, BOT_SFJ_TRACK_MIN_NODES);
-		sqlite3_bind_int(routes, 3, STRAFETRACK_ROUTES_PER_MAP);
-		while (sqlite3_step(routes) == SQLITE_ROW)
+		sqlite3_bind_int(routes, 3, STRAFETRACK_EXPORT_CANDIDATES);
+		while (sqlite3_step(routes) == SQLITE_ROW && candidates < STRAFETRACK_EXPORT_CANDIDATES)
 		{
+			candidateIds[candidates] = sqlite3_column_int64(routes, 0);
+			candidateStarts[candidates * 3] = (float)sqlite3_column_double(routes, 1);
+			candidateStarts[candidates * 3 + 1] = (float)sqlite3_column_double(routes, 2);
+			candidateStarts[candidates * 3 + 2] = (float)sqlite3_column_double(routes, 3);
+			candidateSpeeds[candidates] = (float)sqlite3_column_double(routes, 4);
+			candidates++;
+		}
+		BotSFJ_TrackSelectCoverage(candidateStarts, candidates, STRAFETRACK_ROUTES_PER_MAP,
+			STRAFETRACK_COVERAGE_SPACING, candidatePicked);
+		for (c = 0; c < candidates; c++)
+		{
+			if (!candidatePicked[c])
+				continue;
 			G_StrafeTrackAppend(&text, va("strafejump_route\n{\n\tstart_pos %.1f %.1f %.1f\n\tmin_speed %.0f\n",
-				sqlite3_column_double(routes, 1), sqlite3_column_double(routes, 2),
-				sqlite3_column_double(routes, 3), sqlite3_column_double(routes, 4)));
+				candidateStarts[c * 3], candidateStarts[c * 3 + 1], candidateStarts[c * 3 + 2],
+				candidateSpeeds[c]));
 			sqlite3_reset(nodes);
-			sqlite3_bind_int64(nodes, 1, sqlite3_column_int64(routes, 0));
+			sqlite3_bind_int64(nodes, 1, candidateIds[c]);
 			while (sqlite3_step(nodes) == SQLITE_ROW)
 			{
 				G_StrafeTrackAppend(&text, va("\tnode %.1f %.1f %.1f %.0f %i %i\n",
@@ -11882,8 +11924,41 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapname)
 	trap->FS_Write(text.data, text.length, f);
 	trap->FS_Close(f);
 	free(text.data);
-	trap->Print("Wrote %i recorded strafe route(s) to %s\n", written, path);
+	if (!quiet || candidates > written)
+		trap->Print("Wrote %i of %i recorded strafe route(s) to %s\n", written, candidates, path);
 	return written;
+}
+
+/* Rewrite the current map's route file from the database so bots see new routes without
+ * a manual exportStrafeTrack. */
+void G_StrafeTrackExportCurrentMap(qboolean reload)
+{
+	sqlite3 *db = G_GetTrackedPersistDB();
+	sqlite3_stmt *count = NULL;
+	char mapname[MAX_QPATH];
+	int routes = 0;
+
+	if (!db)
+		return;
+	G_EnsureStrafeTrackSchema(db);
+	trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
+	Q_strlwr(mapname);
+	if (!mapname[0])
+		return;
+	if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM LocalStrafeRoute WHERE lower(mapname) = ? AND node_count >= ?",
+		-1, &count, NULL) == SQLITE_OK)
+	{
+		sqlite3_bind_text(count, 1, mapname, -1, SQLITE_TRANSIENT);
+		sqlite3_bind_int(count, 2, BOT_SFJ_TRACK_MIN_NODES);
+		if (sqlite3_step(count) == SQLITE_ROW)
+			routes = sqlite3_column_int(count, 0);
+	}
+	sqlite3_finalize(count);
+	if (routes <= 0)
+		return;
+	G_StrafeTrackWriteRouteFile(db, mapname, qtrue);
+	if (reload)
+		BotSFJ_ReloadRouteHints();
 }
 
 void Svcmd_ExportStrafeTrack_f(void)
@@ -11938,7 +12013,7 @@ void Svcmd_ExportStrafeTrack_f(void)
 		dbDir, pathSep, safePrefix, exportSuffix);
 	g_trackedExportKind = "dueltrack";
 
-	if (sqlite3_prepare_v2(db, "SELECT DISTINCT mapname FROM LocalStrafeRoute WHERE mapname <> ''",
+	if (sqlite3_prepare_v2(db, "SELECT DISTINCT lower(mapname) FROM LocalStrafeRoute WHERE mapname <> ''",
 		-1, &maps, NULL) == SQLITE_OK)
 	{
 		while (sqlite3_step(maps) == SQLITE_ROW)
@@ -11947,7 +12022,7 @@ void Svcmd_ExportStrafeTrack_f(void)
 
 			if (mapname)
 			{
-				routeCount += G_StrafeTrackWriteRouteFile(db, mapname);
+				routeCount += G_StrafeTrackWriteRouteFile(db, mapname, qfalse);
 				mapCount++;
 			}
 		}

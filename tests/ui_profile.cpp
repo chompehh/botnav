@@ -36,6 +36,7 @@ bool ButtonVisible(const std::string &button, int gametype)
 		return match[1].str().find(mode) != std::string::npos;
 	return true;
 }
+
 }
 
 BOOST_AUTO_TEST_SUITE(ui_profile)

@@ -3267,6 +3267,10 @@ void ClientBegin( int clientNum, qboolean allowTeamReset ) {
 		if (Q_stricmp(g_consoleMOTD.string, ""))
 			trap->SendServerCommand(ent-g_entities, va("print \"%s\n\"", g_consoleMOTD.string));
 
+		if (!(ent->r.svFlags & SVF_BOT) && (level.gametype == GT_ARCADE ||
+			level.gametype == GT_JVM || level.gametype == GT_JOM))
+			trap->SendServerCommand(ent-g_entities, "print \"^3Profile menu missing? Type ^7/ui_openprofile^3 (or ^7/ui_openmenu ingame_player^3).\n\"");
+
 		if (Q_stricmp(g_centerMOTD.string, "")) {
 			strcpy(ent->client->csMessage, G_NewString(va("^7%s\n", g_centerMOTD.string )));
 			ent->client->csTimeLeft = g_centerMOTDTime.integer;
