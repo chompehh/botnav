@@ -4031,6 +4031,22 @@ static void BotSFJ_ParseTrackRoute(const char **text, const char *path)
 			route.nodeStyle[route.nodeCount].airMs = airMs;
 			route.nodeCount++;
 		}
+		else if (!Q_stricmp(token, "node_force"))
+		{
+			/* The human force jumped on the hop that ended at the preceding node. */
+			float height = 0.0f;
+
+			if (COM_ParseFloat(text, &height) || !isfinite(height))
+			{
+				valid = qfalse;
+				continue;
+			}
+			if (route.nodeCount > 0 && route.nodeCount <= BOT_SFJ_TRACK_MAX_NODES)
+			{
+				route.nodeStyle[route.nodeCount - 1].forceJump = 1;
+				route.nodeStyle[route.nodeCount - 1].forceHeight = BotSFJ_ClampSetting(height, 0.0f, 2048.0f);
+			}
+		}
 		else if (!Q_stricmp(token, "node_style"))
 		{
 			/* Human style of the hop that ended at the preceding node. */
@@ -4463,6 +4479,42 @@ void BotSFJ_ReloadRouteHints(void)
 	BotSFJ_SaveRouteStats();
 	g_botSfjRouteHintsLoaded = qfalse;
 	BotSFJ_LoadRouteHints();
+}
+
+/*
+ * Export ranking multiplier for a recorded route from the bots' own results on
+ * the loaded map (neutral for other maps or routes the bots have not tried).
+ */
+float BotSFJ_RouteExportFactor(const char *lowerMap, const float *start, const float *end)
+{
+	vec3_t s, e;
+	int k;
+	const bot_sfj_route_stat_t *stat;
+
+	if (!lowerMap || !start || !end || !g_botSfjRouteStatsMap[0] ||
+		Q_stricmp(lowerMap, g_botSfjRouteStatsMap))
+		return 1.0f;
+	VectorCopy(start, s);
+	VectorCopy(end, e);
+	k = BotSFJ_FindRouteStat(s, e, qfalse);
+	if (k < 0)
+		return 1.0f;
+	stat = &g_botSfjRouteStats[k];
+	return BotSFJ_TrackExportFactor(BotSFJ_TrackResolvedAttempts(stat->attempts, stat->completions,
+		stat->interrupted), stat->completions, BotSFJ_TrackPerformance(stat->distance,
+		stat->durationMs, stat->speedIntegral, stat->referenceIntegral));
+}
+
+/* Whether a bot's strafe-jump controller is running (bot strafe recording). */
+qboolean BotSFJ_ClientIsStrafeJumping(int clientNum)
+{
+	const bot_state_t *bs;
+
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
+		return qfalse;
+	bs = botstates[clientNum];
+	return (bs && bs->inuse && bs->sfjPhase != BOT_SFJ_PHASE_OFF &&
+		bs->sfjPhase != BOT_SFJ_PHASE_ABORT) ? qtrue : qfalse;
 }
 
 /* Current recorded-route node for a bot following one (movement goal override). */
@@ -6105,6 +6157,12 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		candidate.actionflags |= ACTION_MOVERIGHT;
 	if (BotSFJ_JumpPressed(bs->sfjPhase, grounded))
 		candidate.actionflags |= ACTION_JUMP;
+	else if (bs->sfjRoute > 0 && !bs->sfjRouteApproach && (ps->pm_flags & PMF_JUMP_HELD) &&
+		BotSFJ_ForceJumpHold(hopStyle.forceJump, hopStyle.forceHeight,
+			bot_forcepowers.integer && !(g_forcePowerDisable.integer & (1 << FP_LEVITATION)) &&
+			ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 && ps->fd.forcePower > 0,
+			grounded, ps->origin[2] - ps->fd.forceJumpZStart, ps->velocity[2]))
+		candidate.actionflags |= ACTION_JUMP;	/* copy the human's force jump on this hop */
 	if (!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
 		DotProduct(effectiveDirection, bs->sfjIntentDirection) < 0.25f)
 	{

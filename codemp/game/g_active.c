@@ -5234,6 +5234,9 @@ void ClientThink_real( gentity_t *ent ) {
 
 	Pmove (&pmove);
 
+	if ( !isNPC )
+		G_StrafeTrackCommand( ent );
+
 	if (ent->client->solidHack)
 	{
 		if (ent->client->solidHack > level.time)

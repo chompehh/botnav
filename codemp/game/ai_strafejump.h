@@ -699,6 +699,8 @@ typedef struct
 	float takeoffRate;
 	float airRate;
 	int airMs;
+	int forceJump;		/* the human force jumped on this hop */
+	float forceHeight;	/* peak height above the takeoff point */
 } bot_sfj_hop_style_t;
 
 static inline void BotSFJ_HopStyleClear(bot_sfj_hop_style_t *style)
@@ -709,6 +711,8 @@ static inline void BotSFJ_HopStyleClear(bot_sfj_hop_style_t *style)
 	style->takeoffRate = 0.0f;
 	style->airRate = 0.0f;
 	style->airMs = 0;
+	style->forceJump = 0;
+	style->forceHeight = 0.0f;
 }
 
 /* Full beat (W+side) below 400 u/s, where humans rarely let go of forward;
@@ -802,6 +806,8 @@ typedef struct
 	float takeoffRate;
 	float airYawSum;
 	int airYawMs;
+	int forceJump;
+	float riseMax;
 } bot_sfj_style_accum_t;
 
 static inline void BotSFJ_StyleAccumReset(bot_sfj_style_accum_t *acc)
@@ -815,6 +821,17 @@ static inline void BotSFJ_StyleAccumReset(bot_sfj_style_accum_t *acc)
 	acc->takeoffRate = 0.0f;
 	acc->airYawSum = 0.0f;
 	acc->airYawMs = 0;
+	acc->forceJump = 0;
+	acc->riseMax = 0.0f;
+}
+
+/* Force jump (levitation active) and the highest point above the takeoff, per airborne command. */
+static inline void BotSFJ_StyleAccumForce(bot_sfj_style_accum_t *acc, int levitating, float riseHeight)
+{
+	if (levitating)
+		acc->forceJump = 1;
+	if (isfinite(riseHeight) && riseHeight > acc->riseMax)
+		acc->riseMax = riseHeight;
 }
 
 static inline void BotSFJ_StyleAccumAdd(bot_sfj_style_accum_t *acc, int msec,
@@ -862,6 +879,23 @@ static inline void BotSFJ_StyleAccumFinish(const bot_sfj_style_accum_t *acc, bot
 	style->firstSide = acc->firstSide;
 	style->takeoffRate = acc->takeoffRate;
 	style->airRate = acc->airYawMs > 0 ? acc->airYawSum * 1000.0f / (float)acc->airYawMs : 0.0f;
+	style->forceJump = acc->forceJump;
+	style->forceHeight = acc->forceJump ? acc->riseMax : 0.0f;
+}
+
+/*
+ * Copy a recorded force jump: keep holding jump in the air while rising until
+ * the bot is as high above its takeoff as the human got. Only with
+ * levitation available; a hop the human did not force jump never holds.
+ */
+static inline int BotSFJ_ForceJumpHold(int recordedForce, float recordedHeight, int canLevitate,
+	int grounded, float riseHeight, float velocityZ)
+{
+	if (!recordedForce || !canLevitate || grounded || !(velocityZ > 0.0f))
+		return 0;
+	if (recordedHeight > 0.0f && !(riseHeight < recordedHeight))
+		return 0;
+	return 1;
 }
 
 /* Reject hairpins, but allow a gently curving, linked trail to be considered. */

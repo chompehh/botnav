@@ -3370,6 +3370,35 @@ BOOST_AUTO_TEST_CASE( style_accumulator_measures_human_hop )
 	BOOST_CHECK_EQUAL( style.firstSide, 0 );
 }
 
+BOOST_AUTO_TEST_CASE( recorded_force_jump_is_measured_and_copied )
+{
+	bot_sfj_style_accum_t acc;
+	bot_sfj_hop_style_t style;
+	BotSFJ_StyleAccumReset( &acc );
+	for (int t = 0; t < 800; t += 8)
+	{
+		BotSFJ_StyleAccumAdd( &acc, 8, 127, 127, 0.3f );
+		BotSFJ_StyleAccumForce( &acc, t > 100 && t < 300, t < 400 ? t * 0.4f : 160.0f - (t - 400) * 0.4f );
+	}
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.forceJump, 1 );
+	BOOST_CHECK_CLOSE( style.forceHeight, 160.0f, 0.5f );
+	BotSFJ_StyleAccumReset( &acc );
+	BotSFJ_StyleAccumAdd( &acc, 8, 127, 127, 0.3f );
+	BotSFJ_StyleAccumForce( &acc, 0, 40.0f );
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.forceJump, 0 );
+	BOOST_CHECK_EQUAL( style.forceHeight, 0.0f );
+
+	BOOST_CHECK( BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 160.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 50.0f, -10.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 0, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 0, 160.0f, 1, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 1, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, std::numeric_limits<float>::quiet_NaN(), 200.0f ) );
+}
+
 BOOST_AUTO_TEST_CASE( failing_routes_decay_and_lose_export_rank )
 {
 	BOOST_CHECK_EQUAL( BotSFJ_TrackFailureDecay( 3, 0 ), 1.0f );
