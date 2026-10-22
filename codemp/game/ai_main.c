@@ -3065,6 +3065,9 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjStartFrequency = 0;
 	bs->sfjStrafeOnly = qfalse;
 	bs->sfjBackward = qfalse;
+	bs->sfjViewTime = 0;
+	bs->sfjAirSince = 0;
+	bs->sfjAirSwitched = 0;
 	bs->sfjJumpReleaseTime = 0;
 	bs->sfjRollPauseTime = 0;
 	bs->sfjNavPauseUntil = 0;
@@ -3910,6 +3913,7 @@ typedef struct
 	float nodeSpeed[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeSide[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeAirMs[BOT_SFJ_TRACK_MAX_NODES];
+	bot_sfj_hop_style_t nodeStyle[BOT_SFJ_TRACK_MAX_NODES];
 	int stat; /* index into g_botSfjRouteStats, -1 if none */
 } bot_sfj_track_route_t;
 
@@ -4022,7 +4026,51 @@ static void BotSFJ_ParseTrackRoute(const char **text, const char *path)
 			route.nodeSpeed[route.nodeCount] = speed;
 			route.nodeSide[route.nodeCount] = side < 0 ? -1 : (side > 0 ? 1 : 0);
 			route.nodeAirMs[route.nodeCount] = airMs;
+			BotSFJ_HopStyleClear(&route.nodeStyle[route.nodeCount]);
+			route.nodeStyle[route.nodeCount].firstSide = route.nodeSide[route.nodeCount];
+			route.nodeStyle[route.nodeCount].airMs = airMs;
 			route.nodeCount++;
+		}
+		else if (!Q_stricmp(token, "node_force"))
+		{
+			/* The human force jumped on the hop that ended at the preceding node. */
+			float height = 0.0f;
+
+			if (COM_ParseFloat(text, &height) || !isfinite(height))
+			{
+				valid = qfalse;
+				continue;
+			}
+			if (route.nodeCount > 0 && route.nodeCount <= BOT_SFJ_TRACK_MAX_NODES)
+			{
+				route.nodeStyle[route.nodeCount - 1].forceJump = 1;
+				route.nodeStyle[route.nodeCount - 1].forceHeight = BotSFJ_ClampSetting(height, 0.0f, 2048.0f);
+			}
+		}
+		else if (!Q_stricmp(token, "node_style"))
+		{
+			/* Human style of the hop that ended at the preceding node. */
+			bot_sfj_hop_style_t style;
+			float takeoffRate = 0.0f, airRate = 0.0f;
+
+			BotSFJ_HopStyleClear(&style);
+			if (COM_ParseInt(text, &style.sideOnlyPct) || COM_ParseInt(text, &style.switchPct) ||
+				COM_ParseInt(text, &style.firstSide) || COM_ParseFloat(text, &takeoffRate) ||
+				COM_ParseFloat(text, &airRate) || !isfinite(takeoffRate) || !isfinite(airRate))
+			{
+				valid = qfalse;
+				continue;
+			}
+			if (route.nodeCount > 0 && route.nodeCount <= BOT_SFJ_TRACK_MAX_NODES)
+			{
+				bot_sfj_hop_style_t *dest = &route.nodeStyle[route.nodeCount - 1];
+
+				dest->sideOnlyPct = style.sideOnlyPct < 0 ? -1 : (style.sideOnlyPct > 100 ? 100 : style.sideOnlyPct);
+				dest->switchPct = style.switchPct < 0 ? 0 : (style.switchPct > 100 ? 100 : style.switchPct);
+				dest->firstSide = style.firstSide < 0 ? -1 : (style.firstSide > 0 ? 1 : 0);
+				dest->takeoffRate = takeoffRate > 0.0f ? takeoffRate : 0.0f;
+				dest->airRate = airRate > 0.0f ? airRate : 0.0f;
+			}
 		}
 		else
 			COM_ParseExt(text, qfalse);
@@ -4433,6 +4481,42 @@ void BotSFJ_ReloadRouteHints(void)
 	BotSFJ_LoadRouteHints();
 }
 
+/*
+ * Export ranking multiplier for a recorded route from the bots' own results on
+ * the loaded map (neutral for other maps or routes the bots have not tried).
+ */
+float BotSFJ_RouteExportFactor(const char *lowerMap, const float *start, const float *end)
+{
+	vec3_t s, e;
+	int k;
+	const bot_sfj_route_stat_t *stat;
+
+	if (!lowerMap || !start || !end || !g_botSfjRouteStatsMap[0] ||
+		Q_stricmp(lowerMap, g_botSfjRouteStatsMap))
+		return 1.0f;
+	VectorCopy(start, s);
+	VectorCopy(end, e);
+	k = BotSFJ_FindRouteStat(s, e, qfalse);
+	if (k < 0)
+		return 1.0f;
+	stat = &g_botSfjRouteStats[k];
+	return BotSFJ_TrackExportFactor(BotSFJ_TrackResolvedAttempts(stat->attempts, stat->completions,
+		stat->interrupted), stat->completions, BotSFJ_TrackPerformance(stat->distance,
+		stat->durationMs, stat->speedIntegral, stat->referenceIntegral));
+}
+
+/* Whether a bot's strafe-jump controller is running (bot strafe recording). */
+qboolean BotSFJ_ClientIsStrafeJumping(int clientNum)
+{
+	const bot_state_t *bs;
+
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
+		return qfalse;
+	bs = botstates[clientNum];
+	return (bs && bs->inuse && bs->sfjPhase != BOT_SFJ_PHASE_OFF &&
+		bs->sfjPhase != BOT_SFJ_PHASE_ABORT) ? qtrue : qfalse;
+}
+
 /* Current recorded-route node for a bot following one (movement goal override). */
 static qboolean BotSFJ_GetTrackRouteGoal(const bot_state_t *bs, vec3_t goal)
 {
@@ -4715,17 +4799,18 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 	return qtrue;
 }
 
-/* Strafe key the human held on the hop toward the bot's next route node (0 = any). */
-static int BotSFJ_TrackRouteSide(const bot_state_t *bs)
+/* Human style of the hop toward the bot's next route node (cleared = none). */
+static void BotSFJ_TrackRouteStyle(const bot_state_t *bs, bot_sfj_hop_style_t *style)
 {
 	const bot_sfj_track_route_t *route;
 
+	BotSFJ_HopStyleClear(style);
 	if (!bs || bs->sfjRoute <= 0 || bs->sfjRoute > g_botSfjTrackRouteCount)
-		return 0;
+		return;
 	route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
 	if (bs->sfjRouteNode < 0 || bs->sfjRouteNode >= route->nodeCount)
-		return 0;
-	return route->nodeSide[bs->sfjRouteNode];
+		return;
+	*style = route->nodeStyle[bs->sfjRouteNode];
 }
 
 /*
@@ -4972,8 +5057,6 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	gravity = (float)ps->gravity;
 	routeYaw = vectoyaw(routeDirection);
 	side = bs->sfjStrafeSide ? bs->sfjStrafeSide : 1;
-	if (bs->sfjStrafeOnly)
-		side = -side;
 	if (launched && forceEligible && ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_1)
 	{
 		vec3_t sideEnd;
@@ -5390,6 +5473,13 @@ static void BotSFJ_Reject(bot_state_t *bs, const char *reason)
 		BotSFJ_Abort(bs, level.time);
 }
 
+/* Whether an escape strafe could be done backwards (facing the enemy) at all. */
+static qboolean BotSFJ_EscapeBackwardAvailable(bot_state_t *bs)
+{
+	return (!NewBotAI_IsSaberOnlyDuel(bs) && BotSFJ_BackwardPercent(bot_strafes_backwards.integer,
+		bot_strafe_backward.integer) > 0) ? qtrue : qfalse;
+}
+
 static void BotSFJ_SelectIntent(bot_state_t *bs)
 {
 	bot_input_t queued;
@@ -5568,7 +5658,15 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 
 		if (retreating && alignment < -0.25f &&
 			enemyDistance >= BotSFJ_EscapeStartDistance(minStrafe))
+		{
+			if (!BotSFJ_EscapeFacingAllows(BotSFJ_EscapeBackwardAvailable(bs),
+				bs->frame_Enemy_Vis, enemyDistance, minStrafe))
+			{
+				BotSFJ_Reject(bs, "escape would turn the bot's back on a close visible enemy");
+				return;
+			}
 			purpose = BOT_SFJ_INTENT_RETREAT;
+		}
 		else if ((bs->sfjPursuitLatched ||
 				(bot_onlystrafes.integer && enemyDistance >= minStrafe) ||
 				(enemyCarriesFlag && enemyDistance >= minStrafe)) &&
@@ -5607,17 +5705,15 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	}
 	if (bs->sfjPhase == BOT_SFJ_PHASE_OFF || bs->sfjPhase == BOT_SFJ_PHASE_ABORT)
 	{
-		bs->sfjStrafeSide = BotSFJ_SelectSide(vectoyaw(routeDirection),
-			ps->velocity[0], ps->velocity[1], bs->sfjStrafeSide ?
-			bs->sfjStrafeSide : ((bs->client & 1) ? -1 : 1));
-		bs->sfjStrafeOnly = qfalse;
-		/* The recording seeds the first half-beat; subsequent hops alternate. */
-		{
-			const int recordedSide = BotSFJ_TrackRouteSide(bs);
+		bot_sfj_hop_style_t style;
 
-			if (recordedSide)
-				bs->sfjStrafeSide = recordedSide;
-		}
+		/* Turn toward the route; a recording seeds the human's first key side. */
+		BotSFJ_TrackRouteStyle(bs, &style);
+		bs->sfjStrafeSide = BotSFJ_HopSide(vectoyaw(routeDirection),
+			ps->velocity[0], ps->velocity[1], bs->sfjStrafeSide ?
+			bs->sfjStrafeSide : ((bs->client & 1) ? -1 : 1), style.firstSide);
+		bs->sfjStrafeOnly = qfalse;
+		bs->sfjAirSwitched = 0;
 	}
 	fallbackMsec = sv_fps.integer > 0 ? 1000 / sv_fps.integer : 25;
 	if (!BotSFJ_GetCommandTiming(ps, level.time, fallbackMsec,
@@ -5682,6 +5778,10 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		bs->sfjBackward = BotSFJ_UseBackwardStrafe(purpose == BOT_SFJ_INTENT_RETREAT,
 			NewBotAI_IsSaberOnlyDuel(bs), BotSFJ_BackwardPercent(bot_strafes_backwards.integer,
 				bot_strafe_backward.integer), rand() % 100) ? qtrue : qfalse;
+		/* Close to a visible enemy an escape is only allowed facing it (backward circle jump). */
+		if (purpose == BOT_SFJ_INTENT_RETREAT && !bs->sfjBackward &&
+			!BotSFJ_EscapeFacingAllows(0, bs->frame_Enemy_Vis, enemyDistance, minStrafe))
+			bs->sfjBackward = qtrue;
 		bs->sfjPhase = BOT_SFJ_PHASE_PREPARE;
 		bs->sfjPhaseTime = level.time;
 		bs->sfjPeakSpeed = 0.0f;
@@ -5716,6 +5816,11 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	int forwardMove;
 	int rightMove;
 	int airTimeout = 1500;
+	bot_sfj_hop_style_t hopStyle;
+	qboolean backward;
+	float targetView;
+	float viewYaw;
+	float yawRate;
 
 	if (!bs || !bi)
 		return;
@@ -5930,7 +6035,17 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		nextPhase != bs->sfjPhase)
 	{
 		if (nextPhase == BOT_SFJ_PHASE_REJUMP)
-			bs->sfjStrafeOnly = !bs->sfjStrafeOnly;
+		{
+			bot_sfj_hop_style_t style;
+
+			/* Per-hop style: keep turning toward the route, follow the human's keys. */
+			BotSFJ_TrackRouteStyle(bs, &style);
+			bs->sfjStrafeOnly = BotSFJ_HopStrafeOnly(horizontalSpeed, bs->sfjStrafeOnly,
+				style.sideOnlyPct) ? qtrue : qfalse;
+			bs->sfjStrafeSide = BotSFJ_HopSide(vectoyaw(bs->sfjIntentDirection),
+				ps->velocity[0], ps->velocity[1], bs->sfjStrafeSide, style.firstSide);
+			bs->sfjAirSwitched = 0;
+		}
 		/* Landing position and route may have changed since the cached check. */
 		if (!BotSFJ_CachedArcIsSafe(bs, ps, bs->sfjIntentDirection,
 				bs->sfjIntentDestination, commandMsec, sliceMsec, time, qtrue))
@@ -5966,10 +6081,27 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	}
 
 	routeYaw = vectoyaw(bs->sfjIntentDirection);
+	BotSFJ_TrackRouteStyle(bs, &hopStyle);
+	if (grounded)
+		bs->sfjAirSince = 0;
+	else
+	{
+		int side;
+
+		if (!bs->sfjAirSince)
+			bs->sfjAirSince = time;
+		/* Mid-air switch at the human's point of the hop, or when the route bends the other way. */
+		side = BotSFJ_AirSideSwitch(bs->sfjStrafeSide, routeYaw, ps->velocity[0], ps->velocity[1],
+			time - bs->sfjAirSince, hopStyle.airMs, hopStyle.switchPct, &bs->sfjAirSwitched);
+		if (side != bs->sfjStrafeSide)
+		{
+			bs->sfjStrafeSide = side;
+			bs->sfjArcCheckedTime = 0;
+		}
+	}
 	commandYaw = BotSFJ_CommandYaw(routeYaw, ps->velocity[0], ps->velocity[1],
 		(float)ps->speed, pm_airaccelerate,
-		(float)sliceMsec / 1000.0f,
-		bs->sfjStrafeOnly ? -bs->sfjStrafeSide : bs->sfjStrafeSide);
+		(float)sliceMsec / 1000.0f, bs->sfjStrafeSide);
 	if (circleJump)
 	{
 		const float swing = 30.0f * (1.0f - (float)(time - bs->sfjPhaseTime) / 120.0f);
@@ -5977,11 +6109,40 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			(bs->sfjStrafeSide < 0 ? -swing : swing));
 	}
 	candidate = *bi;
+	backward = (bs->sfjBackward && bs->sfjIntent == BOT_SFJ_INTENT_RETREAT) ? qtrue : qfalse;
 	BotSFJ_HalfBeatAxes(bs->sfjStrafeSide, bs->sfjStrafeOnly,
 		&forwardMove, &rightMove);
-	if (bs->sfjBackward && bs->sfjIntent == BOT_SFJ_INTENT_RETREAT)
+	if (backward)
 		BotSFJ_BackwardAxes(&forwardMove, &rightMove);
-	candidate.viewangles[YAW] = BotSFJ_ViewYawForAxes(commandYaw, forwardMove, rightMove);
+	targetView = BotSFJ_ViewYawForAxes(commandYaw, forwardMove, rightMove);
+	viewYaw = targetView;
+	/* Human-shaped aim: flick on the ground, settle after takeoff, then track slowly. */
+	if (!bs->sfjOwnsInput || !bs->sfjViewTime || time < bs->sfjViewTime ||
+		time - bs->sfjViewTime > 250)
+		bs->sfjViewYaw = ps->viewangles[YAW];
+	yawRate = BotSFJ_ViewYawRate(bs->settings.skill, grounded || circleJump,
+		bs->sfjAirSince ? time - bs->sfjAirSince : 0, hopStyle.takeoffRate, hopStyle.airRate);
+	if (yawRate > 0.0f)
+	{
+		const int dt = bs->sfjViewTime ? (int)BotSFJ_ClampSetting((float)(time - bs->sfjViewTime), 0.0f, 100.0f) : 0;
+		int limitedForward = forwardMove, limitedRight = rightMove;
+
+		viewYaw = BotSFJ_SteerYaw(bs->sfjViewYaw, targetView, yawRate * (float)dt / 1000.0f);
+		BotSFJ_PickAxesForView(viewYaw, commandYaw, bs->sfjStrafeSide, bs->sfjStrafeOnly,
+			backward, &limitedForward, &limitedRight);
+		/* Never let a lagging view steer the wish off the validated corridor. */
+		if (cosf(BotSFJ_AngleDelta(viewYaw - BotSFJ_AxesYaw(limitedForward, limitedRight),
+				routeYaw) * 0.017453292519943295f) < 0.26f)
+			viewYaw = targetView;
+		else
+		{
+			forwardMove = limitedForward;
+			rightMove = limitedRight;
+		}
+	}
+	bs->sfjViewYaw = AngleNormalize360(viewYaw);
+	bs->sfjViewTime = time;
+	candidate.viewangles[YAW] = bs->sfjViewYaw;
 	VectorClear(candidate.dir);
 	candidate.speed = 400.0f;
 	candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
@@ -5990,9 +6151,18 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		candidate.actionflags |= ACTION_MOVEFORWARD;
 	else if (forwardMove < 0)
 		candidate.actionflags |= ACTION_MOVEBACK;
-	candidate.actionflags |= rightMove < 0 ? ACTION_MOVELEFT : ACTION_MOVERIGHT;
+	if (rightMove < 0)
+		candidate.actionflags |= ACTION_MOVELEFT;
+	else if (rightMove > 0)
+		candidate.actionflags |= ACTION_MOVERIGHT;
 	if (BotSFJ_JumpPressed(bs->sfjPhase, grounded))
 		candidate.actionflags |= ACTION_JUMP;
+	else if (bs->sfjRoute > 0 && !bs->sfjRouteApproach && (ps->pm_flags & PMF_JUMP_HELD) &&
+		BotSFJ_ForceJumpHold(hopStyle.forceJump, hopStyle.forceHeight,
+			bot_forcepowers.integer && !(g_forcePowerDisable.integer & (1 << FP_LEVITATION)) &&
+			ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 && ps->fd.forcePower > 0,
+			grounded, ps->origin[2] - ps->fd.forceJumpZStart, ps->velocity[2]))
+		candidate.actionflags |= ACTION_JUMP;	/* copy the human's force jump on this hop */
 	if (!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
 		DotProduct(effectiveDirection, bs->sfjIntentDirection) < 0.25f)
 	{

@@ -4639,6 +4639,7 @@ void G_TrackedPersistShutdown(void)
 	}
 	if (pending > 0)
 		G_PerfWarn("duel persist shutdown flush", trap->Milliseconds() - start);
+	G_StrafeTrackFlushAll();
 	if (bot_strafetrack_autoexport.integer)
 		G_StrafeTrackExportCurrentMap(qfalse);
 	G_CloseTrackedPersistDB();
@@ -11361,24 +11362,33 @@ database; exportStrafeTrack writes strafetrack_*.csv and regenerates
 botroutes/<map>.botroute so bots start using them.
 =============================================================================
 */
-#define STRAFETRACK_MAX_INPUTS 1536
+#define STRAFETRACK_MAX_INPUTS 4096
+#define STRAFETRACK_PREROLL 32
+#define STRAFETRACK_PREROLL_MS 150
+#define STRAFETRACK_SAVE_BATCH 512
 #define STRAFETRACK_ROUTES_PER_MAP 128
 #define STRAFETRACK_EXPORT_CANDIDATES 4096
 #define STRAFETRACK_COVERAGE_SPACING 192.0f
 #define STRAFETRACK_BEGIN_MARKER "// BEGIN recorded strafe routes (exportStrafeTrack)"
 #define STRAFETRACK_END_MARKER "// END recorded strafe routes"
 
+/* One processed usercmd (recorded per command, not per server frame). */
 typedef struct
 {
 	int timeMs;
+	int cmdTime;
 	short msec;
 	signed char forwardmove;
 	signed char rightmove;
 	signed char upmove;
-	qboolean grounded;
+	unsigned char grounded;
+	unsigned char jumpHeld;
+	unsigned char forceJump;
 	float yaw;
+	float pitch;
 	float yawDelta;
 	vec3_t origin;
+	float velocity[2];
 	float speed;
 } strafetrack_input_t;
 
@@ -11389,10 +11399,12 @@ typedef struct
 	int side;
 	int airMs;
 	int timeMs;
+	bot_sfj_hop_style_t style;
 } strafetrack_node_t;
 
 typedef struct
 {
+	/* Per-frame route detection. */
 	qboolean havePrev;
 	qboolean prevGrounded;
 	float prevYaw;
@@ -11400,10 +11412,30 @@ typedef struct
 	int prevTime;
 	int prevTeleport;
 
+	/* Per-usercmd capture: hop style and a short pre-roll before a route starts. */
+	qboolean haveCmd;
+	qboolean cmdPrevGrounded;
+	float cmdPrevYaw;
+	int cmdPrevTime;
+	float cmdTakeoffZ;
+	bot_sfj_style_accum_t accum;
+	bot_sfj_hop_style_t lastHop;
+	qboolean lastHopValid;
+	strafetrack_input_t preroll[STRAFETRACK_PREROLL];
+	int prerollHead;
+	int prerollCount;
+
+	/* Input rows still being written to the database, a batch per server frame. */
+	qboolean pendingSave;
+	sqlite3_int64 pendingRouteId;
+	int pendingInput;
+
 	qboolean active;
 	qboolean hazard;
+	qboolean bot;
 	int routeNum;
 	int startTime;
+	int startCmdTime;
 	int liftOffTime;
 	int slowSince;
 	int sideVotes;
@@ -11423,6 +11455,29 @@ static int g_strafeTrackRouteCounter;
 
 static void G_EnsureStrafeTrackSchema(sqlite3 *db)
 {
+	static const char *const addColumns[] = {
+		"ALTER TABLE LocalStrafeRoute ADD COLUMN bot INTEGER DEFAULT 0",
+		"ALTER TABLE LocalStrafeRoute ADD COLUMN pmove_fixed INTEGER",
+		"ALTER TABLE LocalStrafeRoute ADD COLUMN pmove_msec INTEGER",
+		"ALTER TABLE LocalStrafeRoute ADD COLUMN move_style INTEGER",
+		"ALTER TABLE LocalStrafeRoute ADD COLUMN per_command INTEGER DEFAULT 0",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN side_only_pct INTEGER",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN switch_pct INTEGER",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN first_side INTEGER",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN takeoff_yaw_rate REAL",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN air_yaw_rate REAL",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN force_jump INTEGER",
+		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN force_height REAL",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN cmd_time INTEGER",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN pitch REAL",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN vel_x REAL",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN vel_y REAL",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN jump_held INTEGER",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN force_jump INTEGER"
+	};
+	static sqlite3 *migrated;
+	int i;
+
 	if (!db)
 		return;
 	sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS LocalStrafeRoute(id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -11436,9 +11491,87 @@ static void G_EnsureStrafeTrackSchema(sqlite3 *db)
 		"yaw REAL, yaw_delta REAL, x REAL, y REAL, z REAL, speed REAL, grounded INTEGER)", NULL, NULL, NULL);
 	sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS LocalStrafeRouteMap ON LocalStrafeRoute(mapname)",
 		NULL, NULL, NULL);
+	if (migrated == db)
+		return;
+	migrated = db;
+	/* Older databases: add the new columns (fails harmlessly when they exist). */
+	for (i = 0; i < (int)ARRAY_LEN(addColumns); i++)
+		sqlite3_exec(db, addColumns[i], NULL, NULL, NULL);
+	sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS LocalStrafeRouteNodeRoute ON LocalStrafeRouteNode(route_id, node_index)",
+		NULL, NULL, NULL);
+	sqlite3_exec(db, "CREATE INDEX IF NOT EXISTS LocalStrafeRouteInputRoute ON LocalStrafeRouteInput(route_id, frame)",
+		NULL, NULL, NULL);
 }
 
-static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client_t *track, float endSpeed,
+/* Writes up to maxRows of a saved route's input rows; returns qfalse when finished or failed. */
+static qboolean G_StrafeTrackSaveInputs(strafetrack_client_t *track, int maxRows)
+{
+	sqlite3 *db = G_GetTrackedPersistDB();
+	sqlite3_stmt *stmt = NULL;
+	int end, i;
+	qboolean ok = qtrue;
+
+	if (!track->pendingSave)
+		return qfalse;
+	if (!db || sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
+	{
+		track->pendingSave = qfalse;
+		return qfalse;
+	}
+	end = track->pendingInput + maxRows;
+	if (end > track->inputCount)
+		end = track->inputCount;
+	if (sqlite3_prepare_v2(db, "INSERT INTO LocalStrafeRouteInput(route_id, frame, time_ms, msec, forwardmove, "
+		"rightmove, upmove, yaw, yaw_delta, x, y, z, speed, grounded, cmd_time, pitch, vel_x, vel_y, jump_held, "
+		"force_jump) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &stmt, NULL) == SQLITE_OK)
+	{
+		for (i = track->pendingInput; ok && i < end; i++)
+		{
+			const strafetrack_input_t *in = &track->inputs[i];
+
+			sqlite3_reset(stmt);
+			sqlite3_bind_int64(stmt, 1, track->pendingRouteId);
+			sqlite3_bind_int(stmt, 2, i);
+			sqlite3_bind_int(stmt, 3, in->timeMs);
+			sqlite3_bind_int(stmt, 4, in->msec);
+			sqlite3_bind_int(stmt, 5, in->forwardmove);
+			sqlite3_bind_int(stmt, 6, in->rightmove);
+			sqlite3_bind_int(stmt, 7, in->upmove);
+			sqlite3_bind_double(stmt, 8, in->yaw);
+			sqlite3_bind_double(stmt, 9, in->yawDelta);
+			sqlite3_bind_double(stmt, 10, in->origin[0]);
+			sqlite3_bind_double(stmt, 11, in->origin[1]);
+			sqlite3_bind_double(stmt, 12, in->origin[2]);
+			sqlite3_bind_double(stmt, 13, in->speed);
+			sqlite3_bind_int(stmt, 14, in->grounded ? 1 : 0);
+			sqlite3_bind_int(stmt, 15, in->cmdTime);
+			sqlite3_bind_double(stmt, 16, in->pitch);
+			sqlite3_bind_double(stmt, 17, in->velocity[0]);
+			sqlite3_bind_double(stmt, 18, in->velocity[1]);
+			sqlite3_bind_int(stmt, 19, in->jumpHeld ? 1 : 0);
+			sqlite3_bind_int(stmt, 20, in->forceJump ? 1 : 0);
+			if (sqlite3_step(stmt) != SQLITE_DONE)
+				ok = qfalse;
+		}
+		sqlite3_finalize(stmt);
+	}
+	else
+		ok = qfalse;
+	sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
+	track->pendingInput = end;
+	if (!ok || end >= track->inputCount)
+	{
+		if (!ok)
+			trap->Print(S_COLOR_YELLOW "Strafe route #%lld: input rows could not be saved.\n",
+				(long long)track->pendingRouteId);
+		track->pendingSave = qfalse;
+		return qfalse;
+	}
+	return qtrue;
+}
+
+/* Saves the route and its nodes now; the input rows follow in batches (no frame hitch). */
+static qboolean G_StrafeTrackSave(const gentity_t *ent, strafetrack_client_t *track, float endSpeed,
 	int endTime, sqlite3_int64 *savedId)
 {
 	sqlite3 *db = G_GetTrackedPersistDB();
@@ -11457,10 +11590,13 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 	Q_strlwr(mapname);
 	Q_strncpyz(player, ent->client->pers.netname, sizeof(player));
 	Q_CleanStr(player);
+	if (track->bot)
+		Q_strncpyz(player, va("[bot] %s", player), sizeof(player));
 	if (sqlite3_exec(db, "BEGIN", NULL, NULL, NULL) != SQLITE_OK)
 		return qfalse;
 	if (sqlite3_prepare_v2(db, "INSERT INTO LocalStrafeRoute(created, mapname, player, start_x, start_y, start_z, "
-		"start_speed, max_speed, end_speed, node_count, distance, duration_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+		"start_speed, max_speed, end_speed, node_count, distance, duration_ms, bot, pmove_fixed, pmove_msec, "
+		"move_style, per_command) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1)",
 		-1, &stmt, NULL) != SQLITE_OK)
 	{
 		sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
@@ -11478,6 +11614,10 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 	sqlite3_bind_int(stmt, 10, track->nodeCount);
 	sqlite3_bind_double(stmt, 11, track->distance);
 	sqlite3_bind_int(stmt, 12, endTime - track->startTime);
+	sqlite3_bind_int(stmt, 13, track->bot ? 1 : 0);
+	sqlite3_bind_int(stmt, 14, pmove_fixed.integer);
+	sqlite3_bind_int(stmt, 15, pmove_msec.integer);
+	sqlite3_bind_int(stmt, 16, ent->client->sess.movementStyle);
 	if (sqlite3_step(stmt) != SQLITE_DONE)
 		ok = qfalse;
 	sqlite3_finalize(stmt);
@@ -11485,7 +11625,8 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 	routeId = sqlite3_last_insert_rowid(db);
 
 	if (ok && sqlite3_prepare_v2(db, "INSERT INTO LocalStrafeRouteNode(route_id, node_index, x, y, z, speed, side, "
-		"air_ms, time_ms) VALUES (?,?,?,?,?,?,?,?,?)", -1, &stmt, NULL) == SQLITE_OK)
+		"air_ms, time_ms, side_only_pct, switch_pct, first_side, takeoff_yaw_rate, air_yaw_rate, force_jump, "
+		"force_height) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)", -1, &stmt, NULL) == SQLITE_OK)
 	{
 		for (i = 0; ok && i < track->nodeCount; i++)
 		{
@@ -11501,6 +11642,13 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 			sqlite3_bind_int(stmt, 7, node->side);
 			sqlite3_bind_int(stmt, 8, node->airMs);
 			sqlite3_bind_int(stmt, 9, node->timeMs);
+			sqlite3_bind_int(stmt, 10, node->style.sideOnlyPct);
+			sqlite3_bind_int(stmt, 11, node->style.switchPct);
+			sqlite3_bind_int(stmt, 12, node->style.firstSide);
+			sqlite3_bind_double(stmt, 13, node->style.takeoffRate);
+			sqlite3_bind_double(stmt, 14, node->style.airRate);
+			sqlite3_bind_int(stmt, 15, node->style.forceJump);
+			sqlite3_bind_double(stmt, 16, node->style.forceHeight);
 			if (sqlite3_step(stmt) != SQLITE_DONE)
 				ok = qfalse;
 		}
@@ -11510,46 +11658,22 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, const strafetrack_client
 	else
 		ok = qfalse;
 
-	if (ok && sqlite3_prepare_v2(db, "INSERT INTO LocalStrafeRouteInput(route_id, frame, time_ms, msec, forwardmove, "
-		"rightmove, upmove, yaw, yaw_delta, x, y, z, speed, grounded) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-		-1, &stmt, NULL) == SQLITE_OK)
-	{
-		for (i = 0; ok && i < track->inputCount; i++)
-		{
-			const strafetrack_input_t *in = &track->inputs[i];
-
-			sqlite3_reset(stmt);
-			sqlite3_bind_int64(stmt, 1, routeId);
-			sqlite3_bind_int(stmt, 2, i);
-			sqlite3_bind_int(stmt, 3, in->timeMs);
-			sqlite3_bind_int(stmt, 4, in->msec);
-			sqlite3_bind_int(stmt, 5, in->forwardmove);
-			sqlite3_bind_int(stmt, 6, in->rightmove);
-			sqlite3_bind_int(stmt, 7, in->upmove);
-			sqlite3_bind_double(stmt, 8, in->yaw);
-			sqlite3_bind_double(stmt, 9, in->yawDelta);
-			sqlite3_bind_double(stmt, 10, in->origin[0]);
-			sqlite3_bind_double(stmt, 11, in->origin[1]);
-			sqlite3_bind_double(stmt, 12, in->origin[2]);
-			sqlite3_bind_double(stmt, 13, in->speed);
-			sqlite3_bind_int(stmt, 14, in->grounded ? 1 : 0);
-			if (sqlite3_step(stmt) != SQLITE_DONE)
-				ok = qfalse;
-		}
-		sqlite3_finalize(stmt);
-	}
-	else
-		ok = qfalse;
-
 	sqlite3_exec(db, ok ? "COMMIT" : "ROLLBACK", NULL, NULL, NULL);
-	if (ok && savedId)
+	if (!ok)
+		return qfalse;
+	if (savedId)
 		*savedId = routeId;
-	return ok;
+	track->pendingSave = track->inputCount > 0 ? qtrue : qfalse;
+	track->pendingRouteId = routeId;
+	track->pendingInput = 0;
+	return qtrue;
 }
 
 static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, const char *why, qboolean discard,
 	float endSpeed)
 {
+	const qboolean verbose = (!track->bot || bot_strafetrack.integer >= 2) ? qtrue : qfalse;
+
 	if (!track->active)
 		return;
 	track->active = qfalse;
@@ -11558,13 +11682,16 @@ static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, con
 		sqlite3_int64 routeId = 0;
 		const qboolean saved = G_StrafeTrackSave(ent, track, endSpeed, level.time, &routeId);
 
-		trap->Print("Strafe route (session #%i) by %s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f%s\n",
-			track->routeNum, ent->client->pers.netname, why, track->nodeCount, track->distance,
-			(float)(level.time - track->startTime) / 1000.0f, track->maxSpeed,
-			saved ? va(", saved as database route #%lld", (long long)routeId) : ", NOT saved (database unavailable)");
+		if (verbose)
+			trap->Print("Strafe route (session #%i) by %s%s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f, %i commands%s\n",
+				track->routeNum, track->bot ? "bot " : "", ent->client->pers.netname, why, track->nodeCount,
+				track->distance, (float)(level.time - track->startTime) / 1000.0f, track->maxSpeed, track->inputCount,
+				saved ? va(", saved as database route #%lld", (long long)routeId) : ", NOT saved (database unavailable)");
 		if (saved && !track->inputCount)
 			trap->Print(S_COLOR_YELLOW "Strafe route #%lld has no recorded inputs; check that the server runs the current game module.\n",
 				(long long)routeId);
+		if (track->bot)
+			return;
 		if (saved)
 		{
 			trap->SendServerCommand(ent - g_entities, va("print \"Saved strafe route #%lld (%i landings, this session's #%i). "
@@ -11577,32 +11704,133 @@ static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, con
 			trap->SendServerCommand(ent - g_entities, va("print \"Strafe route (session #%i) NOT saved: database unavailable.\n\"",
 				track->routeNum));
 	}
-	else
+	else if (verbose)
 	{
-		trap->Print("Strafe route (session #%i) by %s discarded (%s): %i landing(s), %.0f units%s\n",
-			track->routeNum, ent->client->pers.netname, why, track->nodeCount, track->distance,
-			track->hazard ? ", touched a hazard" : "");
+		trap->Print("Strafe route (session #%i) by %s%s discarded (%s): %i landing(s), %.0f units%s\n",
+			track->routeNum, track->bot ? "bot " : "", ent->client->pers.netname, why, track->nodeCount,
+			track->distance, track->hazard ? ", touched a hazard" : "");
 	}
 }
 
-static void G_StrafeTrackRecordInput(strafetrack_client_t *track, const gclient_t *client, qboolean grounded,
-	float yawDelta, float speed)
+static qboolean G_StrafeTrackClientRecorded(const gentity_t *ent)
 {
-	strafetrack_input_t *in;
+	if (bot_strafetrack.integer <= 0)
+		return qfalse;
+	return (!(ent->r.svFlags & SVF_BOT) || bot_strafetrack_bots.integer > 0) ? qtrue : qfalse;
+}
 
-	if (track->inputCount >= STRAFETRACK_MAX_INPUTS)
+/*
+ * Called after every Pmove (once per processed usercmd, about every 8 ms for a
+ * 125 fps client). Only copies a few numbers into fixed buffers; the database
+ * is written later in batches, so recording every command costs no frame time.
+ */
+void G_StrafeTrackCommand(gentity_t *ent)
+{
+	strafetrack_client_t *track;
+	gclient_t *client;
+	strafetrack_input_t in;
+	qboolean grounded;
+	int clientNum, msec;
+
+	if (!ent || !ent->client || !ent->inuse)
 		return;
-	in = &track->inputs[track->inputCount++];
-	in->timeMs = level.time - track->startTime;
-	in->msec = (short)(level.time - track->prevTime);
-	in->forwardmove = client->pers.cmd.forwardmove;
-	in->rightmove = client->pers.cmd.rightmove;
-	in->upmove = client->pers.cmd.upmove;
-	in->grounded = grounded;
-	in->yaw = client->ps.viewangles[YAW];
-	in->yawDelta = yawDelta;
-	VectorCopy(client->ps.origin, in->origin);
-	in->speed = speed;
+	clientNum = ent - g_entities;
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
+		return;
+	track = &g_strafeTrack[clientNum];
+	client = ent->client;
+	if (!G_StrafeTrackClientRecorded(ent))
+	{
+		track->haveCmd = qfalse;
+		return;
+	}
+	grounded = client->ps.groundEntityNum != ENTITYNUM_NONE ? qtrue : qfalse;
+	msec = client->ps.commandTime - track->cmdPrevTime;
+	if (!track->haveCmd || msec <= 0 || msec > 250)
+	{
+		if (track->haveCmd && msec == 0)
+			return;
+		track->haveCmd = qtrue;
+		track->cmdPrevGrounded = grounded;
+		track->cmdPrevYaw = client->ps.viewangles[YAW];
+		track->cmdPrevTime = client->ps.commandTime;
+		track->cmdTakeoffZ = client->ps.origin[2];
+		track->prerollCount = 0;
+		BotSFJ_StyleAccumReset(&track->accum);
+		return;
+	}
+
+	memset(&in, 0, sizeof(in));
+	in.cmdTime = client->ps.commandTime;
+	in.msec = (short)msec;
+	in.forwardmove = client->pers.cmd.forwardmove;
+	in.rightmove = client->pers.cmd.rightmove;
+	in.upmove = client->pers.cmd.upmove;
+	in.grounded = grounded ? 1 : 0;
+	in.jumpHeld = (client->ps.pm_flags & PMF_JUMP_HELD) ? 1 : 0;
+	in.yaw = client->ps.viewangles[YAW];
+	in.pitch = client->ps.viewangles[PITCH];
+	in.yawDelta = AngleDelta(client->ps.viewangles[YAW], track->cmdPrevYaw);
+	VectorCopy(client->ps.origin, in.origin);
+	in.velocity[0] = client->ps.velocity[0];
+	in.velocity[1] = client->ps.velocity[1];
+	in.speed = sqrtf(in.velocity[0] * in.velocity[0] + in.velocity[1] * in.velocity[1]);
+
+	in.forceJump = (client->ps.fd.forcePowersActive & (1 << FP_LEVITATION)) ? 1 : 0;
+
+	/* Per-hop human style: reset at liftoff, measured in the air, finished on landing. */
+	if (track->cmdPrevGrounded && !grounded)
+	{
+		BotSFJ_StyleAccumReset(&track->accum);
+		track->cmdTakeoffZ = client->ps.fd.forceJumpZStart ? client->ps.fd.forceJumpZStart : client->ps.origin[2];
+	}
+	if (!grounded)
+	{
+		BotSFJ_StyleAccumAdd(&track->accum, msec, in.forwardmove, in.rightmove, in.yawDelta);
+		BotSFJ_StyleAccumForce(&track->accum, in.forceJump, client->ps.origin[2] - track->cmdTakeoffZ);
+	}
+	else if (!track->cmdPrevGrounded)
+	{
+		BotSFJ_StyleAccumFinish(&track->accum, &track->lastHop);
+		track->lastHopValid = qtrue;
+	}
+
+	if (track->active)
+	{
+		if (track->inputCount < STRAFETRACK_MAX_INPUTS)
+		{
+			in.timeMs = in.cmdTime - track->startCmdTime;
+			track->inputs[track->inputCount++] = in;
+		}
+	}
+	else
+	{
+		track->preroll[track->prerollHead] = in;
+		track->prerollHead = (track->prerollHead + 1) % STRAFETRACK_PREROLL;
+		if (track->prerollCount < STRAFETRACK_PREROLL)
+			track->prerollCount++;
+	}
+	track->cmdPrevGrounded = grounded;
+	track->cmdPrevYaw = client->ps.viewangles[YAW];
+	track->cmdPrevTime = client->ps.commandTime;
+}
+
+/* Copies the commands just before the route start (the takeoff flick) into the route. */
+static void G_StrafeTrackTakePreroll(strafetrack_client_t *track)
+{
+	int i;
+
+	for (i = 0; i < track->prerollCount && track->inputCount < STRAFETRACK_MAX_INPUTS; i++)
+	{
+		const int slot = (track->prerollHead - track->prerollCount + i + STRAFETRACK_PREROLL) % STRAFETRACK_PREROLL;
+		strafetrack_input_t *in = &track->preroll[slot];
+
+		if (in->cmdTime < track->startCmdTime - STRAFETRACK_PREROLL_MS)
+			continue;
+		in->timeMs = in->cmdTime - track->startCmdTime;
+		track->inputs[track->inputCount++] = *in;
+	}
+	track->prerollCount = 0;
 }
 
 //Called once per server frame for every client (ClientEndFrame).
@@ -11611,7 +11839,7 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	strafetrack_client_t *track;
 	gclient_t *client;
 	qboolean grounded;
-	float speed, groundSpeed, yawDelta = 0.0f;
+	float speed, groundSpeed;
 	int teleport;
 	int clientNum;
 
@@ -11622,7 +11850,10 @@ void G_StrafeTrackFrame(gentity_t *ent)
 		return;
 	track = &g_strafeTrack[clientNum];
 	client = ent->client;
-	if (bot_strafetrack.integer <= 0 || (ent->r.svFlags & SVF_BOT))
+	/* One batch of a finished route's input rows per frame keeps saving hitch-free. */
+	if (track->pendingSave)
+		G_StrafeTrackSaveInputs(track, STRAFETRACK_SAVE_BATCH);
+	if (!G_StrafeTrackClientRecorded(ent))
 	{
 		track->active = qfalse;
 		track->havePrev = qfalse;
@@ -11666,10 +11897,9 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	}
 	if (level.time > track->prevTime)
 	{
-		float instant;
+		const float instant = AngleDelta(client->ps.viewangles[YAW], track->prevYaw) * 1000.0f /
+			(float)(level.time - track->prevTime);
 
-		yawDelta = AngleDelta(client->ps.viewangles[YAW], track->prevYaw);
-		instant = yawDelta * 1000.0f / (float)(level.time - track->prevTime);
 		track->yawRate = track->yawRate * 0.5f + instant * 0.5f;
 	}
 	if (teleport != track->prevTeleport)
@@ -11680,33 +11910,57 @@ void G_StrafeTrackFrame(gentity_t *ent)
 		track->prevYaw = client->ps.viewangles[YAW];
 		track->prevTime = level.time;
 		track->prevTeleport = teleport;
+		track->haveCmd = qfalse;
 		return;
 	}
 
 	if (!track->active)
 	{
-		//Circle jump: on the ground last frame, holding forward + strafe, turning, faster than run speed, jumping.
-		if (!grounded && BotSFJ_TrackCircleJumpStart(track->prevGrounded, client->pers.cmd.forwardmove,
-			client->pers.cmd.rightmove, track->yawRate, speed, groundSpeed, client->pers.cmd.upmove > 0))
+		const qboolean isBot = (ent->r.svFlags & SVF_BOT) ? qtrue : qfalse;
+		qboolean start;
+
+		/* Humans: circle jump (on the ground last frame, holding forward + strafe, turning,
+		 * faster than run speed, jumping). Bots: their strafe-jump controller left the ground. */
+		if (isBot)
+			start = (!grounded && track->prevGrounded && BotSFJ_ClientIsStrafeJumping(clientNum)) ? qtrue : qfalse;
+		else
+			start = (!grounded && BotSFJ_TrackCircleJumpStart(track->prevGrounded, client->pers.cmd.forwardmove,
+				client->pers.cmd.rightmove, track->yawRate, speed, groundSpeed, client->pers.cmd.upmove > 0)) ?
+				qtrue : qfalse;
+		/* A new route waits until the previous one's inputs are in the database. */
+		if (start && !track->pendingSave)
 		{
 			char mapname[MAX_QPATH];
 
-			memset(track, 0, sizeof(*track));
-			track->havePrev = qtrue;
 			track->active = qtrue;
+			track->bot = isBot;
+			track->hazard = qfalse;
 			track->routeNum = ++g_strafeTrackRouteCounter;
 			track->startTime = level.time;
+			track->startCmdTime = client->ps.commandTime;
 			track->liftOffTime = level.time;
+			track->slowSince = 0;
+			track->sideVotes = 0;
 			track->startSpeed = speed;
 			track->maxSpeed = speed;
+			track->distance = 0.0f;
+			track->inputCount = 0;
+			track->nodeCount = 0;
+			track->lastHopValid = qfalse;
 			VectorCopy(client->ps.origin, track->start);
 			VectorCopy(client->ps.origin, track->lastOrigin);
-			trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
-			trap->Print("Strafe route (session #%i) began: %s circle-jumped on %s at (%.0f %.0f %.0f), speed %.0f\n",
-				track->routeNum, client->pers.netname, mapname,
-				track->start[0], track->start[1], track->start[2], speed);
-			trap->SendServerCommand(clientNum, va("print \"Recording strafe route (session #%i, circle jump at %.0f ups).\n\"",
-				track->routeNum, speed));
+			G_StrafeTrackTakePreroll(track);
+			if (!isBot || bot_strafetrack.integer >= 2)
+			{
+				trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
+				trap->Print("Strafe route (session #%i) began: %s%s %s on %s at (%.0f %.0f %.0f), speed %.0f\n",
+					track->routeNum, isBot ? "bot " : "", client->pers.netname,
+					isBot ? "strafe-jumped" : "circle-jumped", mapname,
+					track->start[0], track->start[1], track->start[2], speed);
+			}
+			if (!isBot)
+				trap->SendServerCommand(clientNum, va("print \"Recording strafe route (session #%i, circle jump at %.0f ups).\n\"",
+					track->routeNum, speed));
 		}
 	}
 	else
@@ -11723,7 +11977,6 @@ void G_StrafeTrackFrame(gentity_t *ent)
 			track->maxSpeed = speed;
 		if (!grounded)
 			track->sideVotes += client->pers.cmd.rightmove > 0 ? 1 : (client->pers.cmd.rightmove < 0 ? -1 : 0);
-		G_StrafeTrackRecordInput(track, client, grounded, yawDelta, speed);
 
 		if (BotSFJ_TrackLanded(track->prevGrounded, grounded))
 		{
@@ -11736,10 +11989,20 @@ void G_StrafeTrackFrame(gentity_t *ent)
 				node->side = track->sideVotes > 0 ? 1 : (track->sideVotes < 0 ? -1 : 0);
 				node->airMs = level.time - track->liftOffTime;
 				node->timeMs = level.time - track->startTime;
+				/* Style of the hop that ended here, measured per usercmd. */
+				if (track->lastHopValid)
+				{
+					node->style = track->lastHop;
+					track->lastHopValid = qfalse;
+				}
+				else
+					BotSFJ_HopStyleClear(&node->style);
 				if (bot_strafetrack.integer >= 2)
-					trap->Print("Strafe route %i landing %i at (%.0f %.0f %.0f), speed %.0f, air %i ms\n",
+					trap->Print("Strafe route %i landing %i at (%.0f %.0f %.0f), speed %.0f, air %i ms, side-only %i%%, switch %i%%, takeoff yaw %.0f/s, air yaw %.0f/s%s\n",
 						track->routeNum, track->nodeCount, node->origin[0], node->origin[1], node->origin[2],
-						speed, node->airMs);
+						speed, node->airMs, node->style.sideOnlyPct, node->style.switchPct,
+						node->style.takeoffRate, node->style.airRate,
+						node->style.forceJump ? va(", force jump %.0f high", node->style.forceHeight) : "");
 			}
 		}
 		if (track->prevGrounded && !grounded)
@@ -11760,13 +12023,31 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	track->prevTeleport = teleport;
 }
 
+/* Writes every route's remaining input rows (shutdown, disconnect). */
+static void G_StrafeTrackFlushClient(strafetrack_client_t *track)
+{
+	while (track->pendingSave && G_StrafeTrackSaveInputs(track, STRAFETRACK_MAX_INPUTS))
+		;
+}
+
+void G_StrafeTrackFlushAll(void)
+{
+	int i;
+
+	for (i = 0; i < MAX_CLIENTS; i++)
+		G_StrafeTrackFlushClient(&g_strafeTrack[i]);
+}
+
 //Disconnect / map change: drop any half-recorded route for this slot.
 void G_StrafeTrackReset(int clientNum)
 {
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
 		return;
+	G_StrafeTrackFlushClient(&g_strafeTrack[clientNum]);
 	g_strafeTrack[clientNum].active = qfalse;
 	g_strafeTrack[clientNum].havePrev = qfalse;
+	g_strafeTrack[clientNum].haveCmd = qfalse;
+	g_strafeTrack[clientNum].prerollCount = 0;
 }
 
 typedef struct
@@ -11803,12 +12084,110 @@ static void G_StrafeTrackAppend(strafetrack_text_t *text, const char *chunk)
 	text->length += len;
 }
 
+/*
+ * Routes saved by older builds have no per-hop style: measure it once from
+ * their stored inputs (same accumulator as live recording) and keep it.
+ */
+static void G_StrafeTrackBackfillStyle(sqlite3 *db, sqlite3_int64 routeId)
+{
+	sqlite3_stmt *check = NULL, *inputs = NULL, *update = NULL;
+	bot_sfj_style_accum_t acc;
+	bot_sfj_hop_style_t style;
+	qboolean missing = qfalse, prevGrounded = qtrue;
+	int node = 0, nodeCount = 0;
+
+	if (sqlite3_prepare_v2(db, "SELECT COUNT(*), SUM(side_only_pct IS NULL) FROM LocalStrafeRouteNode WHERE route_id = ?",
+		-1, &check, NULL) == SQLITE_OK)
+	{
+		sqlite3_bind_int64(check, 1, routeId);
+		if (sqlite3_step(check) == SQLITE_ROW)
+		{
+			nodeCount = sqlite3_column_int(check, 0);
+			missing = sqlite3_column_int(check, 1) > 0 ? qtrue : qfalse;
+		}
+	}
+	sqlite3_finalize(check);
+	if (!missing)
+		return;
+	if (sqlite3_prepare_v2(db, "SELECT msec, forwardmove, rightmove, yaw_delta, grounded FROM LocalStrafeRouteInput "
+		"WHERE route_id = ? ORDER BY frame", -1, &inputs, NULL) != SQLITE_OK ||
+		sqlite3_prepare_v2(db, "UPDATE LocalStrafeRouteNode SET side_only_pct = ?, switch_pct = ?, first_side = ?, "
+		"takeoff_yaw_rate = ?, air_yaw_rate = ? WHERE route_id = ? AND node_index = ?", -1, &update, NULL) != SQLITE_OK)
+	{
+		sqlite3_finalize(inputs);
+		sqlite3_finalize(update);
+		return;
+	}
+	sqlite3_exec(db, "BEGIN", NULL, NULL, NULL);
+	BotSFJ_StyleAccumReset(&acc);
+	sqlite3_bind_int64(inputs, 1, routeId);
+	while (node <= nodeCount)
+	{
+		const qboolean row = sqlite3_step(inputs) == SQLITE_ROW ? qtrue : qfalse;
+		qboolean landed = qfalse;
+
+		if (row)
+		{
+			const qboolean grounded = sqlite3_column_int(inputs, 4) ? qtrue : qfalse;
+
+			if (!grounded)
+			{
+				if (prevGrounded)
+					BotSFJ_StyleAccumReset(&acc);
+				BotSFJ_StyleAccumAdd(&acc, sqlite3_column_int(inputs, 0), sqlite3_column_int(inputs, 1),
+					sqlite3_column_int(inputs, 2), (float)sqlite3_column_double(inputs, 3));
+			}
+			else if (!prevGrounded)
+				landed = qtrue;
+			prevGrounded = grounded;
+			if (!landed)
+				continue;
+			BotSFJ_StyleAccumFinish(&acc, &style);
+		}
+		else
+			BotSFJ_HopStyleClear(&style);
+		if (node >= nodeCount)
+			break;
+		sqlite3_reset(update);
+		sqlite3_bind_int(update, 1, style.sideOnlyPct);
+		sqlite3_bind_int(update, 2, style.switchPct);
+		sqlite3_bind_int(update, 3, style.firstSide);
+		sqlite3_bind_double(update, 4, style.takeoffRate);
+		sqlite3_bind_double(update, 5, style.airRate);
+		sqlite3_bind_int64(update, 6, routeId);
+		sqlite3_bind_int(update, 7, node);
+		sqlite3_step(update);
+		node++;
+	}
+	sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+	sqlite3_finalize(inputs);
+	sqlite3_finalize(update);
+}
+
+static const float *g_strafeTrackSortScores;
+
+static int G_StrafeTrackCompareScore(const void *a, const void *b)
+{
+	const int ia = *(const int *)a, ib = *(const int *)b;
+
+	if (g_strafeTrackSortScores[ia] > g_strafeTrackSortScores[ib])
+		return -1;
+	if (g_strafeTrackSortScores[ia] < g_strafeTrackSortScores[ib])
+		return 1;
+	return ia - ib;
+}
+
 //Writes botroutes/<map>.botroute keeping any hand-written blocks outside the recorded section.
 static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qboolean quiet)
 {
 	static sqlite3_int64 candidateIds[STRAFETRACK_EXPORT_CANDIDATES];
 	static float candidateStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
 	static float candidateSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
+	static float candidateScores[STRAFETRACK_EXPORT_CANDIDATES];
+	static int candidateOrder[STRAFETRACK_EXPORT_CANDIDATES];
+	static sqlite3_int64 sortedIds[STRAFETRACK_EXPORT_CANDIDATES];
+	static float sortedStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
+	static float sortedSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
 	static unsigned char candidatePicked[STRAFETRACK_EXPORT_CANDIDATES];
 	sqlite3_stmt *routes = NULL, *nodes = NULL;
 	strafetrack_text_t text;
@@ -11866,43 +12245,81 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		G_StrafeTrackAppend(&text, "\n");
 
 	G_StrafeTrackAppend(&text, STRAFETRACK_BEGIN_MARKER "\n");
-	//Long, fast routes first (length x average speed); the per-map limit is then spread
-	//over distinct start areas so other routes elsewhere on the map are not dropped.
-	if (sqlite3_prepare_v2(db, "SELECT id, start_x, start_y, start_z, start_speed FROM LocalStrafeRoute "
-		"WHERE lower(mapname) = ? AND node_count >= ? ORDER BY (distance * distance / MAX(duration_ms, 1)) DESC, "
-		"distance DESC LIMIT ?", -1, &routes, NULL) == SQLITE_OK &&
-		sqlite3_prepare_v2(db, "SELECT x, y, z, speed, side, air_ms FROM LocalStrafeRouteNode "
-		"WHERE route_id = ? ORDER BY node_index", -1, &nodes, NULL) == SQLITE_OK)
+	//Long, fast human routes first (length x average speed), weighted by how well the bots
+	//complete them; the per-map limit is then spread over distinct start areas so other
+	//routes elsewhere on the map are not dropped. Bot recordings are never exported.
+	if (sqlite3_prepare_v2(db, "SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
+		"(r.distance * r.distance / MAX(r.duration_ms, 1)), n.x, n.y, n.z FROM LocalStrafeRoute r "
+		"LEFT JOIN LocalStrafeRouteNode n ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
+		"WHERE lower(r.mapname) = ? AND r.node_count >= ? AND COALESCE(r.bot, 0) = 0 "
+		"ORDER BY (r.distance * r.distance / MAX(r.duration_ms, 1)) DESC, r.distance DESC LIMIT ?",
+		-1, &routes, NULL) == SQLITE_OK &&
+		sqlite3_prepare_v2(db, "SELECT x, y, z, speed, side, air_ms, side_only_pct, switch_pct, first_side, "
+		"takeoff_yaw_rate, air_yaw_rate, force_jump, force_height FROM LocalStrafeRouteNode WHERE route_id = ? "
+		"ORDER BY node_index",
+		-1, &nodes, NULL) == SQLITE_OK)
 	{
 		sqlite3_bind_text(routes, 1, mapname, -1, SQLITE_TRANSIENT);
 		sqlite3_bind_int(routes, 2, BOT_SFJ_TRACK_MIN_NODES);
 		sqlite3_bind_int(routes, 3, STRAFETRACK_EXPORT_CANDIDATES);
 		while (sqlite3_step(routes) == SQLITE_ROW && candidates < STRAFETRACK_EXPORT_CANDIDATES)
 		{
+			float end[3];
+
 			candidateIds[candidates] = sqlite3_column_int64(routes, 0);
 			candidateStarts[candidates * 3] = (float)sqlite3_column_double(routes, 1);
 			candidateStarts[candidates * 3 + 1] = (float)sqlite3_column_double(routes, 2);
 			candidateStarts[candidates * 3 + 2] = (float)sqlite3_column_double(routes, 3);
 			candidateSpeeds[candidates] = (float)sqlite3_column_double(routes, 4);
+			candidateScores[candidates] = (float)sqlite3_column_double(routes, 5);
+			if (sqlite3_column_type(routes, 6) != SQLITE_NULL)
+			{
+				end[0] = (float)sqlite3_column_double(routes, 6);
+				end[1] = (float)sqlite3_column_double(routes, 7);
+				end[2] = (float)sqlite3_column_double(routes, 8);
+				candidateScores[candidates] *= BotSFJ_RouteExportFactor(mapname,
+					&candidateStarts[candidates * 3], end);
+			}
+			candidateOrder[candidates] = candidates;
 			candidates++;
 		}
-		BotSFJ_TrackSelectCoverage(candidateStarts, candidates, STRAFETRACK_ROUTES_PER_MAP,
+		g_strafeTrackSortScores = candidateScores;
+		qsort(candidateOrder, candidates, sizeof(candidateOrder[0]), G_StrafeTrackCompareScore);
+		for (c = 0; c < candidates; c++)
+		{
+			const int k = candidateOrder[c];
+
+			sortedIds[c] = candidateIds[k];
+			VectorCopy(&candidateStarts[k * 3], &sortedStarts[c * 3]);
+			sortedSpeeds[c] = candidateSpeeds[k];
+		}
+		BotSFJ_TrackSelectCoverage(sortedStarts, candidates, STRAFETRACK_ROUTES_PER_MAP,
 			STRAFETRACK_COVERAGE_SPACING, candidatePicked);
 		for (c = 0; c < candidates; c++)
 		{
 			if (!candidatePicked[c])
 				continue;
+			G_StrafeTrackBackfillStyle(db, sortedIds[c]);
 			G_StrafeTrackAppend(&text, va("strafejump_route\n{\n\tstart_pos %.1f %.1f %.1f\n\tmin_speed %.0f\n",
-				candidateStarts[c * 3], candidateStarts[c * 3 + 1], candidateStarts[c * 3 + 2],
-				candidateSpeeds[c]));
+				sortedStarts[c * 3], sortedStarts[c * 3 + 1], sortedStarts[c * 3 + 2],
+				sortedSpeeds[c]));
 			sqlite3_reset(nodes);
-			sqlite3_bind_int64(nodes, 1, candidateIds[c]);
+			sqlite3_bind_int64(nodes, 1, sortedIds[c]);
 			while (sqlite3_step(nodes) == SQLITE_ROW)
 			{
 				G_StrafeTrackAppend(&text, va("\tnode %.1f %.1f %.1f %.0f %i %i\n",
 					sqlite3_column_double(nodes, 0), sqlite3_column_double(nodes, 1),
 					sqlite3_column_double(nodes, 2), sqlite3_column_double(nodes, 3),
 					sqlite3_column_int(nodes, 4), sqlite3_column_int(nodes, 5)));
+				/* Human keys and yaw speeds for the hop that ended at this node. */
+				if (sqlite3_column_type(nodes, 6) != SQLITE_NULL &&
+					(sqlite3_column_int(nodes, 6) >= 0 || sqlite3_column_int(nodes, 8)))
+					G_StrafeTrackAppend(&text, va("\tnode_style %i %i %i %.0f %.0f\n",
+						sqlite3_column_int(nodes, 6), sqlite3_column_int(nodes, 7),
+						sqlite3_column_int(nodes, 8), sqlite3_column_double(nodes, 9),
+						sqlite3_column_double(nodes, 10)));
+				if (sqlite3_column_int(nodes, 11) > 0)
+					G_StrafeTrackAppend(&text, va("\tnode_force %.0f\n", sqlite3_column_double(nodes, 12)));
 			}
 			G_StrafeTrackAppend(&text, "}\n");
 			written++;
@@ -11945,7 +12362,8 @@ void G_StrafeTrackExportCurrentMap(qboolean reload)
 	Q_strlwr(mapname);
 	if (!mapname[0])
 		return;
-	if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM LocalStrafeRoute WHERE lower(mapname) = ? AND node_count >= ?",
+	if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM LocalStrafeRoute WHERE lower(mapname) = ? AND node_count >= ? "
+		"AND COALESCE(bot, 0) = 0",
 		-1, &count, NULL) == SQLITE_OK)
 	{
 		sqlite3_bind_text(count, 1, mapname, -1, SQLITE_TRANSIENT);

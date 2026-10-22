@@ -573,6 +573,10 @@ typedef struct bot_state_s
 	int					sfjStrafeSide;
 	qboolean			sfjStrafeOnly;
 	qboolean			sfjBackward;		// retreat strafe jump with the view facing back (mirrored keys)
+	float				sfjViewYaw;			// last emitted strafe view yaw (rate-limited aim)
+	int					sfjViewTime;		// time sfjViewYaw was emitted (0 = reseed from the player state)
+	int					sfjAirSince;		// time the current hop left the ground (0 = grounded)
+	int					sfjAirSwitched;		// recorded mid-air side switch already done this hop
 	int					sfjJumpReleaseTime;
 	int					sfjRollPauseTime;
 	int					sfjNavPauseUntil;

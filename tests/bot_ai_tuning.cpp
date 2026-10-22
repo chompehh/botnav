@@ -3196,22 +3196,223 @@ BOOST_AUTO_TEST_CASE( missing_release_keeps_releasing_until_engine_confirms )
 	BOOST_CHECK_EQUAL( BotSFJ_ReleasedNextPhase( phase, 1, 0, 1 ), BOT_SFJ_PHASE_REJUMP );
 }
 
-BOOST_AUTO_TEST_CASE( halfbeat_switches_diagonal_to_opposite_strafe_only_every_hop )
+BOOST_AUTO_TEST_CASE( halfbeat_strafe_key_matches_turn_side_for_both_styles )
 {
 	for (int side = -1; side <= 1; side += 2)
 	{
-		int previousRight = 0;
-		for (int hop = 0; hop < 8; ++hop)
+		for (int only = 0; only < 2; ++only)
 		{
 			int forward, right;
-			BotSFJ_HalfBeatAxes( side, hop & 1, &forward, &right );
-			BOOST_CHECK_EQUAL( forward, hop & 1 ? 0 : 127 );
-			BOOST_CHECK_EQUAL( right, side * (hop & 1 ? -127 : 127) );
-			if (previousRight)
-				BOOST_CHECK_EQUAL( right, -previousRight );
-			previousRight = right;
+			BotSFJ_HalfBeatAxes( side, only, &forward, &right );
+			BOOST_CHECK_EQUAL( forward, only ? 0 : 127 );
+			/* Left turn (side > 0) holds A, right turn holds D, like humans. */
+			BOOST_CHECK_EQUAL( right, side > 0 ? -127 : 127 );
 		}
 	}
+}
+
+BOOST_AUTO_TEST_CASE( strafe_view_stays_near_velocity_like_humans )
+{
+	/* Humans look within 10-25 degrees of their velocity; the old key mapping put
+	 * the bot's view 105-150 degrees off it (the "random backwards strafe"). */
+	for (int side = -1; side <= 1; side += 2)
+	{
+		for (int only = 0; only < 2; ++only)
+		{
+			for (int speed = only ? 400 : 300; speed <= 700; speed += 50)
+			{
+				int forward, right;
+				const float wishYaw = BotSFJ_CommandYaw( 0.0f, (float)speed, 0.0f,
+					250.0f, 1.0f, 0.008f, side );
+				BotSFJ_HalfBeatAxes( side, only, &forward, &right );
+				const float viewYaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right );
+				BOOST_CHECK_LT( fabsf( BotSFJ_AngleDelta( viewYaw, 0.0f ) ), 40.0f );
+				/* A left turn (side > 0) puts the wish left of the velocity. */
+				BOOST_CHECK( side > 0 ? BotSFJ_AngleDelta( wishYaw, 0.0f ) > 0.0f :
+					BotSFJ_AngleDelta( wishYaw, 0.0f ) < 0.0f );
+			}
+		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE( backward_strafe_view_faces_back_along_route )
+{
+	for (int side = -1; side <= 1; side += 2)
+	{
+		int forward, right;
+		const float wishYaw = BotSFJ_CommandYaw( 0.0f, 450.0f, 0.0f, 250.0f, 1.0f, 0.008f, side );
+		BotSFJ_HalfBeatAxes( side, 0, &forward, &right );
+		BotSFJ_BackwardAxes( &forward, &right );
+		const float viewYaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right );
+		BOOST_CHECK_GT( fabsf( BotSFJ_AngleDelta( viewYaw, 0.0f ) ), 140.0f );
+	}
+}
+
+BOOST_AUTO_TEST_CASE( human_wish_offset_is_wider_than_optimum_and_capped )
+{
+	BOOST_CHECK_CLOSE( BotSFJ_HumanWishOffset( 400.0f ), 63.5f, 0.1f );
+	BOOST_CHECK_CLOSE( BotSFJ_HumanWishOffset( 5000.0f ), 72.0f, 0.1f );
+	BOOST_CHECK( BotSFJ_HumanWishOffset( 300.0f ) < BotSFJ_HumanWishOffset( 500.0f ) );
+	for (int speed = 300; speed <= 700; speed += 100)
+	{
+		const float optimum = BotSFJ_OptimalWishOffset( (float)speed, 250.0f, 1.0f, 0.033f );
+		const float yaw = BotSFJ_CommandYaw( 0.0f, (float)speed, 0.0f, 250.0f, 1.0f, 0.033f, 1 );
+		BOOST_CHECK_GE( yaw, optimum - 0.01f );
+		BOOST_CHECK_LE( yaw, BOT_SFJ_WISH_OFFSET_MAX + 0.01f );
+	}
+	/* Always inside the controller's 0.25 input/intent alignment gate. */
+	BOOST_CHECK_GT( cosf( BOT_SFJ_ROUTE_CLAMP * 0.017453292519943295f ), 0.25f );
+}
+
+BOOST_AUTO_TEST_CASE( rate_limited_view_picks_keys_closest_to_wish )
+{
+	int forward = 0, right = 0;
+	/* View already at the target: the hop's own style is chosen. */
+	const float wishYaw = 60.0f;
+	int f0, r0;
+	BotSFJ_HalfBeatAxes( 1, 0, &f0, &r0 );
+	const float target = BotSFJ_ViewYawForAxes( wishYaw, f0, r0 );
+	BOOST_CHECK_SMALL( BotSFJ_PickAxesForView( target, wishYaw, 1, 0, 0, &forward, &right ), 0.01f );
+	BOOST_CHECK_EQUAL( forward, f0 );
+	BOOST_CHECK_EQUAL( right, r0 );
+	/* View lagging toward the wish: forward only (the human W-only frame). */
+	BotSFJ_PickAxesForView( wishYaw, wishYaw, 1, 0, 0, &forward, &right );
+	BOOST_CHECK_EQUAL( forward, 127 );
+	BOOST_CHECK_EQUAL( right, 0 );
+	/* View lagging the other way: side-only on the same side. */
+	BotSFJ_PickAxesForView( wishYaw - 90.0f, wishYaw, 1, 0, 0, &forward, &right );
+	BOOST_CHECK_EQUAL( forward, 0 );
+	BOOST_CHECK_EQUAL( right, -127 );
+	/* Backward mirrors every candidate. */
+	BotSFJ_PickAxesForView( wishYaw + 180.0f, wishYaw, 1, 0, 1, &forward, &right );
+	BOOST_CHECK_EQUAL( forward, -127 );
+	BOOST_CHECK_EQUAL( right, 0 );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_view_yaw_rate_follows_human_profile_and_skill )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_ViewYawRate( 3.0f, 1, 0, 0.0f, 0.0f ), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_ViewYawRate( 10.0f, 0, 50, 0.0f, 0.0f ), 0.0f );
+	BOOST_CHECK( BotSFJ_ViewYawRate( 2.0f, 0, 50, 0.0f, 0.0f ) <
+		BotSFJ_ViewYawRate( 8.0f, 0, 50, 0.0f, 0.0f ) );
+	BOOST_CHECK( BotSFJ_ViewYawRate( 5.0f, 0, 400, 0.0f, 0.0f ) <
+		BotSFJ_ViewYawRate( 5.0f, 0, 50, 0.0f, 0.0f ) );
+	BOOST_CHECK_CLOSE( BotSFJ_ViewYawRate( 5.0f, 0, 400, 0.0f, 0.0f ), 90.0f, 0.1f );
+	BOOST_CHECK_CLOSE( BotSFJ_ViewYawRate( 5.0f, 0, 400, 0.0f, 100.0f ), 200.0f, 0.1f );
+	BOOST_CHECK_CLOSE( BotSFJ_ViewYawRate( 5.0f, 0, 400, 0.0f, 900.0f ), 240.0f, 0.1f );
+	BOOST_CHECK_CLOSE( BotSFJ_ViewYawRate( 5.0f, 0, 50, 2000.0f, 0.0f ), 720.0f, 0.1f );
+	BOOST_CHECK( BotSFJ_ViewYawRate( std::numeric_limits<float>::quiet_NaN(), 0, 400, 0.0f,
+		std::numeric_limits<float>::quiet_NaN() ) > 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( hop_style_keeps_side_and_uses_full_beat_when_slow )
+{
+	BOOST_CHECK( !BotSFJ_HopStrafeOnly( 350.0f, 0, -1 ) );
+	BOOST_CHECK( BotSFJ_HopStrafeOnly( 500.0f, 0, -1 ) );
+	BOOST_CHECK( !BotSFJ_HopStrafeOnly( 500.0f, 1, -1 ) );
+	BOOST_CHECK( BotSFJ_HopStrafeOnly( 450.0f, 1, 80 ) );
+	BOOST_CHECK( !BotSFJ_HopStrafeOnly( 450.0f, 0, 10 ) );
+	BOOST_CHECK( !BotSFJ_HopStrafeOnly( 250.0f, 0, 80 ) );
+	/* Route left of the velocity: keep turning left across the landing. */
+	BOOST_CHECK_EQUAL( BotSFJ_HopSide( 40.0f, 500.0f, 0.0f, 1, 0 ), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopSide( 40.0f, 500.0f, 0.0f, 1, 1 ), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopSide( -40.0f, 500.0f, 0.0f, 1, 0 ), -1 );
+	/* Near the route the human's key side decides: D (+1) turns right (-1). */
+	BOOST_CHECK_EQUAL( BotSFJ_HopSide( 5.0f, 500.0f, 0.0f, 1, 1 ), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopSide( 5.0f, 500.0f, 0.0f, -1, -1 ), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( air_side_switch_follows_recorded_fraction_once )
+{
+	int switched = 0;
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( 1, 0.0f, 500.0f, 0.0f, 200, 1000, 45, &switched ), 1 );
+	BOOST_CHECK_EQUAL( switched, 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( 1, 0.0f, 500.0f, 0.0f, 460, 1000, 45, &switched ), -1 );
+	BOOST_CHECK_EQUAL( switched, 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( -1, 0.0f, 500.0f, 0.0f, 600, 1000, 45, &switched ), -1 );
+	switched = 0;
+	/* The route bending the other way switches regardless of the recording. */
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( 1, -20.0f, 500.0f, 0.0f, 100, 0, 0, &switched ), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( -1, 20.0f, 500.0f, 0.0f, 100, 0, 0, &switched ), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitch( 1, -5.0f, 500.0f, 0.0f, 100, 0, 0, &switched ), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( escape_never_turns_back_on_close_visible_enemy )
+{
+	BOOST_CHECK( !BotSFJ_EscapeFacingAllows( 0, 1, 300.0f, 0.0f ) );
+	BOOST_CHECK( BotSFJ_EscapeFacingAllows( 1, 1, 300.0f, 0.0f ) );
+	BOOST_CHECK( BotSFJ_EscapeFacingAllows( 0, 0, 300.0f, 0.0f ) );
+	BOOST_CHECK( BotSFJ_EscapeFacingAllows( 0, 1, 400.0f, 0.0f ) );
+	BOOST_CHECK( !BotSFJ_EscapeFacingAllows( 0, 1, 400.0f, 448.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( style_accumulator_measures_human_hop )
+{
+	bot_sfj_style_accum_t acc;
+	bot_sfj_hop_style_t style;
+	BotSFJ_StyleAccumReset( &acc );
+	/* 1000 ms hop: WD flick at takeoff, D only, then W, then WA from 500 ms. */
+	for (int t = 0; t < 1000; t += 8)
+	{
+		const int fwd = (t >= 200 && t < 480) ? 0 : 127;
+		const int right = t < 480 ? 127 : (t < 500 ? 0 : -127);
+		BotSFJ_StyleAccumAdd( &acc, 8, fwd, right, t < 16 ? 2.0f : 0.4f );
+	}
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.firstSide, 1 );
+	BOOST_CHECK_EQUAL( style.switchPct, 50 );
+	BOOST_CHECK( style.sideOnlyPct > 20 && style.sideOnlyPct < 35 );
+	BOOST_CHECK_CLOSE( style.takeoffRate, 250.0f, 0.1f );
+	BOOST_CHECK_CLOSE( style.airRate, 50.0f, 0.5f );
+	BotSFJ_StyleAccumReset( &acc );
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.sideOnlyPct, -1 );
+	BOOST_CHECK_EQUAL( style.firstSide, 0 );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_force_jump_is_measured_and_copied )
+{
+	bot_sfj_style_accum_t acc;
+	bot_sfj_hop_style_t style;
+	BotSFJ_StyleAccumReset( &acc );
+	for (int t = 0; t < 800; t += 8)
+	{
+		BotSFJ_StyleAccumAdd( &acc, 8, 127, 127, 0.3f );
+		BotSFJ_StyleAccumForce( &acc, t > 100 && t < 300, t < 400 ? t * 0.4f : 160.0f - (t - 400) * 0.4f );
+	}
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.forceJump, 1 );
+	BOOST_CHECK_CLOSE( style.forceHeight, 160.0f, 0.5f );
+	BotSFJ_StyleAccumReset( &acc );
+	BotSFJ_StyleAccumAdd( &acc, 8, 127, 127, 0.3f );
+	BotSFJ_StyleAccumForce( &acc, 0, 40.0f );
+	BotSFJ_StyleAccumFinish( &acc, &style );
+	BOOST_CHECK_EQUAL( style.forceJump, 0 );
+	BOOST_CHECK_EQUAL( style.forceHeight, 0.0f );
+
+	BOOST_CHECK( BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 160.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, 50.0f, -10.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 0, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 0, 160.0f, 1, 0, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 1, 50.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, std::numeric_limits<float>::quiet_NaN(), 200.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( failing_routes_decay_and_lose_export_rank )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_TrackFailureDecay( 3, 0 ), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackFailureDecay( 20, 1 ), 1.0f );
+	BOOST_CHECK( BotSFJ_TrackFailureDecay( 8, 0 ) < BotSFJ_TrackFailureDecay( 5, 0 ) );
+	BOOST_CHECK_GE( BotSFJ_TrackFailureDecay( 1000, 0 ), 0.05f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackExportFactor( 2, 0, 1.0f ), 1.0f );
+	BOOST_CHECK( BotSFJ_TrackExportFactor( 10, 9, 1.0f ) > BotSFJ_TrackExportFactor( 10, 2, 1.0f ) );
+	BOOST_CHECK( BotSFJ_TrackExportFactor( 10, 0, 1.0f ) < BotSFJ_TrackExportFactor( 10, 1, 1.0f ) );
+	BOOST_CHECK_GE( BotSFJ_TrackExportFactor( 500, 0, 0.1f ), 0.05f );
+	BOOST_CHECK_LE( BotSFJ_TrackExportFactor( 500, 500, 99.0f ), 3.0f );
+	/* A fast human route the bots never finish loses its pick score to a finished one. */
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 3000.0f, 800.0f, 12, 0, 0.0f, 256.0f ) <
+		BotSFJ_TrackRouteScore( 1500.0f, 500.0f, 12, 10, 0.0f, 256.0f ) );
 }
 
 BOOST_AUTO_TEST_CASE( emitted_halfbeat_axes_match_predictor_world_wish_direction )
@@ -3225,7 +3426,7 @@ BOOST_AUTO_TEST_CASE( emitted_halfbeat_axes_match_predictor_world_wish_direction
 				int forward, right;
 				float x, y;
 				const float wishYaw = BotSFJ_CommandYaw( (float)yaw, 550.0f, 125.0f,
-					250.0f, 1.0f, 0.008f, only ? -side : side );
+					250.0f, 1.0f, 0.008f, side );
 				BotSFJ_HalfBeatAxes( side, only, &forward, &right );
 				const float viewYaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right );
 				BotSFJ_EffectiveMovement( 0, 0, 400, viewYaw, 1, forward, 1, right, &x, &y );
