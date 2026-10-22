@@ -1,5 +1,6 @@
 #include <math.h>
 #include <limits>
+#include <cstdlib>
 
 #include "ai_combat_tuning.h"
 #include "ai_strafejump.h"
@@ -2653,6 +2654,13 @@ BOOST_AUTO_TEST_CASE( strafe_chain_survives_brief_wall_scrapes )
 	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 1, 0, 5000 ) );
 	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 1, 1000, 1000 + BOT_SFJ_WALL_SCRAPE_GRACE_MS - 1 ) );
 	BOOST_CHECK( BotSFJ_SlowedOutShouldRelease( 1, 1000, 1000 + BOT_SFJ_WALL_SCRAPE_GRACE_MS ) );
+	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 1, 2805, 2805 + 999 ) );
+	/* A recovered speed resets the slowdown condition even at the grace boundary. */
+	BOOST_CHECK( !BotSFJ_SlowedOutShouldRelease( 0, 1782, 1782 + 1000 ) );
+	BOOST_CHECK_GE( BOT_SFJ_WALL_SCRAPE_GRACE_MS, 1000 );
+	BOOST_CHECK( BotSFJ_WallSlowdownLandingAllows( 1, 0.1f ) );
+	BOOST_CHECK( !BotSFJ_WallSlowdownLandingAllows( 0, 0.1f ) );
+	BOOST_CHECK( BotSFJ_WallSlowdownLandingAllows( 0, 0.4f ) );
 }
 
 BOOST_AUTO_TEST_CASE( no_grounded_crouch_roll_at_strafe_speed )
@@ -2694,6 +2702,12 @@ BOOST_AUTO_TEST_CASE( recorded_route_tolerance )
 	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 957, 1 ), 3414 );
 	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 100, 1 ), 3000 );
 	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 20000, 1 ), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 8811, 1 ), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackNodeTimeout( 3000, 2147483647, 1 ), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackAirTimeout( 1, 3000, 8811, 1 ), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackAirTimeout( 1, 3000, 3500, 1 ), 8500 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackAirTimeout( 1, 3000, 8811, 0 ), 1500 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackAirTimeout( 0, 3000, 8811, 1 ), 1500 );
 
 	BOOST_CHECK_EQUAL( BotSFJ_TrackSkipAhead( nearSecond, nodes, 0, 3, 2 ), 1 );
 	BOOST_CHECK_EQUAL( BotSFJ_TrackSkipAhead( nearFirst, nodes, 0, 3, 2 ), 0 );
@@ -2951,20 +2965,87 @@ BOOST_AUTO_TEST_CASE( recorded_route_owns_incidental_navigation_not_required_int
 	BOOST_CHECK( BotSFJ_UseIsConflict( 0, 1, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( loosened_roll_pauses_only_running_chain_without_input_ownership )
+{
+	BOOST_CHECK( BotSFJ_RollPauseAllows( 1, 1, 1, 0, 500 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 0, 1, 1, 0, 500 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 1, 0, 1, 0, 500 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 1, 1, 0, 0, 500 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 1, 1, 1, 1, 500 ) );
+	BOOST_CHECK( BotSFJ_RollPauseAllows( 1, 1, 1, 0, 1500 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 1, 1, 1, 0, 1501 ) );
+	BOOST_CHECK( !BotSFJ_RollPauseAllows( 1, 1, 1, 0, -1 ) );
+}
+
 BOOST_AUTO_TEST_CASE( recorded_route_wall_recovery_and_retry_are_bounded )
 {
+	int retryUntil[BOT_SFJ_MAX_TRACK_ROUTES] = { 0 };
+
 	BOOST_CHECK( BotSFJ_TrackRecoveryAllows( 1, 2, 1, 200, 3000 ) );
 	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 0, 2, 1, 200, 3000 ) );
 	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 0, 1, 200, 3000 ) );
 	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 0, 200, 3000 ) );
 	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 1, 3000, 3000 ) );
 	BOOST_CHECK( !BotSFJ_TrackRecoveryAllows( 1, 2, 1, -1, 3000 ) );
-	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 2, 2, 6000, 5999 ) );
-	BOOST_CHECK( BotSFJ_TrackRetryAllows( 2, 2, 6000, 6000 ) );
-	BOOST_CHECK( BotSFJ_TrackRetryAllows( 3, 2, 6000, 5999 ) );
+	BotSFJ_DelayTrackRetry( 1, retryUntil, 1000 );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 1, retryUntil, 5999 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 1, retryUntil, 6000 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 2, retryUntil, 5999 ) );
 	/* Loosened landing recovery does not relax terminal endpoint or landing slope. */
 	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 100, 0, 250, 0, 96 ) );
 	BOOST_CHECK( !BotSFJ_ChainLandingAllows( 1, 0, 0.6f, 1.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_cooldowns_survive_alternating_failures_and_reset_on_reload )
+{
+	int retryUntil[BOT_SFJ_MAX_TRACK_ROUTES] = { 0 };
+	BotSFJ_DelayTrackRetry( 0, retryUntil, 1000 );
+	BotSFJ_DelayTrackRetry( 1, retryUntil, 1500 );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 0, retryUntil, 1600 ) );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 1, retryUntil, 1600 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 2, retryUntil, 1600 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 0, retryUntil, 6000 ) );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( 1, retryUntil, 6000 ) );
+	BOOST_CHECK( BotSFJ_TrackRetryAllows( 1, retryUntil, 6500 ) );
+	BotSFJ_DelayTrackRetry( BOT_SFJ_MAX_TRACK_ROUTES - 1, retryUntil, 2000 );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( BOT_SFJ_MAX_TRACK_ROUTES - 1, retryUntil, 2001 ) );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( -1, retryUntil, 2001 ) );
+	BOOST_CHECK( !BotSFJ_TrackRetryAllows( BOT_SFJ_MAX_TRACK_ROUTES, retryUntil, 2001 ) );
+	BotSFJ_ClearTrackRetries( retryUntil );
+	for ( int i = 0; i < BOT_SFJ_MAX_TRACK_ROUTES; i++ )
+		BOOST_CHECK( BotSFJ_TrackRetryAllows( i, retryUntil, 2001 ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_stats_skip_header_and_inter_record_newlines )
+{
+	const char *text = "botroute_stats 2\n"
+		"1 2 3 4 5 6 10 7 2 1 3000.0 5000 3000000.0 3500000.0\n"
+		"\r\n \t7 8 9 10 11 12 4 2 1 1 1200.0 3000 1200000.0 1500000.0\n";
+	const char header[] = "botroute_stats 2";
+	text += sizeof( header ) - 1;
+	for ( int row = 0; row < 2; row++ )
+	{
+		text = BotSFJ_SkipStatsRecordWhitespace( text );
+		double values[14];
+		for ( int column = 0; column < 14; column++ )
+		{
+			/* Model the engine parser's refusal to cross a newline inside a row. */
+			while ( *text == ' ' || *text == '\t' )
+				text++;
+			BOOST_REQUIRE( *text && *text != '\n' && *text != '\r' );
+			char *end;
+			values[column] = std::strtod( text, &end );
+			BOOST_REQUIRE( end != text );
+			text = end;
+		}
+		BOOST_CHECK_EQUAL( values[0], row ? 7 : 1 );
+		BOOST_CHECK_EQUAL( values[6], row ? 4 : 10 );
+		BOOST_CHECK_EQUAL( values[10], row ? 1200 : 3000 );
+	}
+	BOOST_CHECK_EQUAL( *BotSFJ_SkipStatsRecordWhitespace( text ), '\0' );
+	const char *legacy = BotSFJ_SkipStatsRecordWhitespace( "\n\r\t 1 2 3 4 5 6 10 7\n" );
+	BOOST_CHECK_EQUAL( *legacy, '1' );
+	BOOST_CHECK( !BotSFJ_SkipStatsRecordWhitespace( NULL ) );
 }
 
 BOOST_AUTO_TEST_CASE( recorded_route_actual_performance_beats_recorded_speed_alone )
@@ -2983,6 +3064,14 @@ BOOST_AUTO_TEST_CASE( recorded_route_actual_performance_beats_recorded_speed_alo
 	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 0, 0, 600 ) );
 	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 100, NAN, 600 ) );
 	BOOST_CHECK( !BotSFJ_TrackSampleAllows( 100, 60, INFINITY ) );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackMeasuredDuration( 1, 1000, 5000 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackMeasuredDuration( 0, 5000, 6000 ), 1000 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackMeasuredDuration( 0, 6000, 6000 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackMeasuredDuration( 0, 6000, 5000 ), 0 );
+	/* A rejected, trace-blocked takeoff teaches a failure before real contact. */
+	BOOST_CHECK( BotSFJ_TrackBlockedFailure( 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_TrackBlockedFailure( 1, 1 ) );
+	BOOST_CHECK( !BotSFJ_TrackBlockedFailure( 0, 0 ) );
 	/* Three interrupted runs leave one completion and one actual failed attempt. */
 	BOOST_CHECK_EQUAL( BotSFJ_TrackResolvedAttempts( 5, 1, 3 ), 2 );
 	BOOST_CHECK_EQUAL( BotSFJ_TrackResolvedAttempts( 5, 1, 0 ), 5 );

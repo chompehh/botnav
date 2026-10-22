@@ -574,6 +574,7 @@ typedef struct bot_state_s
 	qboolean			sfjStrafeOnly;
 	qboolean			sfjBackward;		// retreat strafe jump with the view facing back (mirrored keys)
 	int					sfjJumpReleaseTime;
+	int					sfjRollPauseTime;
 	int					sfjNavPauseUntil;
 	qboolean			sfjNavPauseForJump;
 	qboolean			sfjOwnsInput;
@@ -584,6 +585,7 @@ typedef struct bot_state_s
 	int					sfjLastEnemyTargetNum;
 	int					sfjArcCheckedTime;
 	qboolean			sfjArcSafe;
+	qboolean			sfjArcBlocked;
 	vec3_t				sfjArcDirection;
 	vec3_t				sfjArcDestination;
 	int					sfjArcSide;
@@ -602,8 +604,7 @@ typedef struct bot_state_s
 	float				sfjRouteDistance;
 	float				sfjRouteSpeedIntegral;
 	float				sfjRouteReferenceIntegral;
-	int					sfjFailedRoute;
-	int					sfjRouteRetryUntil;
+	int					sfjRouteRetryUntil[BOT_SFJ_MAX_TRACK_ROUTES];
 	int					wpRecent[BOT_NAV_RECENT_WAYPOINTS];		// recently reached waypoint indices + 1 (0 = empty slot)
 	int					wpRecentHead;
 	wpobject_t			*wpSkipGoal;		// bot_waypointskip goal several trail points ahead (NULL = none)

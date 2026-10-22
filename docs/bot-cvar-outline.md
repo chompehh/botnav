@@ -238,13 +238,24 @@ walls, lethal volumes, low ceilings, moving blockers, and required interactions.
 Walls: the takeoff arc uses the real 15-unit player hull and removes speed into
 walls while continuing bounded wall-slide simulation (up to 64 contact slices).
 Brief speed losses near ground speed no longer immediately discard an established
-chain; a substantial slowdown releases it to ordinary navigation. Predicted
-wall stops still require useful flight and a safe landing. Lava, slime, no-drop
-and `trigger_hurt`/kill checks are unchanged.
+chain: slowdown must persist for one second before recovery or release. Loosened
+recorded routes may rebuild speed after a safe landing while node progress remains
+within its timeout. Recoverable predicted contacts continue acceleration and
+wall-slide simulation rather than requiring a collision-free hop. A safe landing
+is still required; lava, slime, no-drop and `trigger_hurt`/kill checks are unchanged.
 
 Initiation ignores queued navigation jump/delayed-jump/walk requests (the controller supplies its own jump timing once it owns input).
 
 `strafeJumpStats [reset]` (server console) prints how often bots started, took off, followed recorded routes, aborted and were released by a wall/slow-down, plus the most frequent rejection reasons since the last reset. Rejection reasons are only tallied after the command has been run once (or while `bot_strafejumps_debug` is on), so run `strafeJumpStats reset`, play, then `strafeJumpStats` to compare wall rejections before and after tuning.
+
+It also reports recorded completions, stalls, interruptions, blocked takeoffs,
+and circle approaches started/reached. Compare these with takeoffs per route
+start and retained speed, rather than treating every rejected frame as a failed
+route. Live map acceptance still requires an in-game run: approach a human start
+past a nearer jump/duck waypoint, complete and chain routes, bump an ordinary wall,
+then repeat near lethal terrain and required doors/lifts. Confirm ordinary
+navigation resumes when no reachable start or continuation exists, and compare
+retreat view/input with `bot_strafes_backwards` set to `0` and `1`.
 
 Movement references: [OpenJK](https://github.com/JACoders/OpenJK) maintains the
 Jedi Academy engine, derived from the Quake III/id Tech 3 family.
@@ -341,6 +352,8 @@ Route choice and chaining:
   milliseconds, speed integral and reference-speed integral. Legacy eight-field
   rows remain readable. Joining mid-route or chaining in counts as an attempt.
   Interrupted attempts are excluded from the completion-rate denominator.
+  Approach walking is excluded from the measured distance, duration and speed
+  integrals; measurement begins at the circle start.
   Measured travel speed and retention relative to recorded speed influence
   selection; unmeasured history stays neutral. Occasional exploration favors
   less-tried routes, and an unsuccessful route has a five-second per-bot retry
