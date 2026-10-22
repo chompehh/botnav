@@ -6,6 +6,7 @@ numbers. The general report requires duckdb; --saber-evidence uses stdlib CSV/SQ
 
 Usage: python3 scripts/dueltrack_report.py [csv_dir] [--revision REV]
        python3 scripts/dueltrack_report.py . --saber-evidence --release-dir PATH
+       python3 scripts/dueltrack_report.py . --throw-evidence
 
 Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 - Some export parts contain latin-1 bytes; files are re-encoded to UTF-8 first.
@@ -78,7 +79,7 @@ def print_batch_inventory(batch, directory):
 		[name for name in required if not os.path.isfile(os.path.join(directory, name))]}))
 
 
-def saber_evidence(batches):
+def saber_evidence(batches, throws_only=False):
 	"""Keep exports separate; identity overlap is not proof of identical payloads."""
 	con = sqlite3.connect(":memory:")
 	con.execute("PRAGMA temp_store = MEMORY")
@@ -87,7 +88,8 @@ def saber_evidence(batches):
 		"note", "capture_version", "capture_revision", "torso_timer", "torso_anim",
 		"yaw_sweep", "self_pitch", "sequence_id", "opponent_key", "export_format_version",
 		"amount", "attack_elapsed_ms", "grounded", "range_bucket", "forwardmove", "rightmove",
-		"upmove", "self_footing", "enemy_stance", "saber_defense_state",
+		"upmove", "self_footing", "enemy_stance", "buttons", "power", "damage_source",
+		"saber_defense_state",
 		"enemy_saber_defense_state", "recovery", "enemy_recovery", "controller_owns_inputs"]
 	con.execute("CREATE TABLE raw(batch TEXT, filename TEXT, identity TEXT, payload TEXT, observation TEXT, " +
 		", ".join(f"{f} TEXT" for f in fields) + ")")
@@ -98,6 +100,10 @@ def saber_evidence(batches):
 		start_time TEXT, end_time TEXT, mapname TEXT, duel_type TEXT)""")
 	con.execute("""CREATE TABLE snapshots(batch TEXT, family TEXT, schema_json TEXT,
 		payload TEXT)""")
+	if throws_only:
+		con.execute("""CREATE TABLE geometry_raw(batch TEXT, source_context TEXT, parent_id TEXT,
+			participant_key TEXT, opponent_key TEXT, rel_time INTEGER,
+			self_yaw REAL, distance REAL)""")
 	for batch, directory in batches:
 		print_batch_inventory(batch, directory)
 		for path in sorted(glob.glob(os.path.join(directory, "dueltrack_events*.csv"))):
@@ -158,6 +164,13 @@ def saber_evidence(batches):
 						con.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?)",
 							[batch, row["source_context"], row["record_id"], row["start_time"],
 							 row["end_time"], row["mapname"], row["type"]])
+					elif throws_only and family == "dueltrack_geometry.csv":
+						distance = sum((float(row["self_" + axis]) -
+							float(row["enemy_" + axis])) ** 2 for axis in ("x", "y")) ** 0.5
+						con.execute("INSERT INTO geometry_raw VALUES (?,?,?,?,?,?,?,?)",
+							[batch, row["source_context"], row["parent_id"],
+							 row["participant_key"], row["opponent_key"], int(row["rel_time"]),
+							 float(row["self_yaw"]), distance])
 				print(json.dumps({"batch": batch, "file": os.path.basename(path),
 					"path": path, "rows": n, "sha256": digest,
 					"encoding": encoding, "columns": reader.fieldnames}))
@@ -172,6 +185,9 @@ def saber_evidence(batches):
 	con.execute("""CREATE TABLE events AS SELECT v.* FROM event_variants v
 		LEFT JOIN conflicts c ON c.batch = v.batch AND c.identity = v.identity
 		WHERE c.identity IS NULL""")
+	if throws_only:
+		throw_evidence(con)
+		return
 	con.execute("""CREATE INDEX accepted_links ON events
 		(batch,source_context,parent_id,participant_key,rel_time,saber_move)
 		WHERE event_type = 'attack_chain' AND note = 'accepted_link'""")
@@ -398,6 +414,122 @@ GROUP BY 1,2"""),
 		"These individual attack outcomes do not demonstrate complete recipe effectiveness.")
 
 
+def throw_evidence(con):
+	"""Measure flight and sampled inputs separately; never infer button-release times."""
+	con.execute("""CREATE INDEX throw_event_lookup ON events
+		(batch,source_context,parent_id,participant_key,opponent_key,event_type,rel_time)""")
+	con.execute("""CREATE TABLE throw_conflicts AS
+		SELECT DISTINCT v.batch,v.source_context,v.parent_id,v.participant_key,v.opponent_key,
+		 CAST(v.rel_time AS INTEGER) AS at FROM event_variants v
+		JOIN conflicts c ON c.batch=v.batch AND c.identity=v.identity
+		WHERE v.event_type IN ('throw_start','throw_end')""")
+	con.execute("""CREATE INDEX throw_conflict_lookup ON throw_conflicts
+		(batch,source_context,parent_id,participant_key,opponent_key,at)""")
+	con.execute("""CREATE TABLE flights AS
+		WITH boundaries AS (
+		 SELECT *, lead(event_type) OVER w AS next_type,
+		  lead(CAST(rel_time AS INTEGER)) OVER w AS ended,
+		  lead(CAST(amount AS INTEGER)) OVER w AS damage
+		 FROM events WHERE event_type IN ('throw_start','throw_end')
+		 WINDOW w AS (PARTITION BY batch,source_context,parent_id,participant_key,opponent_key
+		  ORDER BY CAST(rel_time AS INTEGER),CAST(event_index AS INTEGER)))
+		SELECT *, CAST(rel_time AS INTEGER) AS started,
+		 ended - CAST(rel_time AS INTEGER) AS flight_ms FROM boundaries
+		WHERE participant_kind IN ('1','2') AND event_type = 'throw_start'
+		 AND next_type = 'throw_end' AND ended > CAST(rel_time AS INTEGER)
+		 AND NOT EXISTS (SELECT 1 FROM throw_conflicts c WHERE c.batch=boundaries.batch
+		  AND c.source_context=boundaries.source_context AND c.parent_id=boundaries.parent_id
+		  AND c.participant_key=boundaries.participant_key AND c.opponent_key=boundaries.opponent_key
+		  AND c.at BETWEEN CAST(boundaries.rel_time AS INTEGER) AND boundaries.ended)""")
+	con.execute("""CREATE TABLE geometry AS SELECT DISTINCT * FROM geometry_raw
+		GROUP BY batch,source_context,parent_id,participant_key,opponent_key,rel_time
+		HAVING count(DISTINCT self_yaw || ':' || distance) = 1""")
+	con.execute("""CREATE INDEX throw_geometry_lookup ON geometry
+		(batch,source_context,parent_id,participant_key,opponent_key,rel_time)""")
+	queries = [
+		("Human capture coverage (not all starts have a recorded end)", """
+SELECT batch, event_type, count(*) AS observations FROM events
+WHERE participant_kind IN ('1','2')
+ AND event_type IN ('throw_start','throw_end','input_start','input_end','attack_sample')
+GROUP BY 1,2 ORDER BY 1,2"""),
+		("Human complete throw airtime, not alt-input duration", """
+SELECT batch, count(*) AS complete_flights, round(avg(flight_ms),1) AS mean_airtime_ms,
+ min(flight_ms) AS min_ms, max(flight_ms) AS max_ms,
+ sum(flight_ms >= 1500) AS flights_ge_1500ms,
+ sum(flight_ms >= 3000) AS flights_ge_3000ms,
+ sum(flight_ms >= 3000 AND damage > 0) AS damaging_flights_ge_3000ms
+FROM flights GROUP BY 1"""),
+		("Sampled alt input during complete human flights (128 = BUTTON_ALT_ATTACK)", """
+WITH sampled AS (
+ SELECT f.batch,f.identity,f.flight_ms,
+  count(e.identity) AS samples,
+  sum((CAST(e.buttons AS INTEGER) & 128) != 0) AS held_samples,
+  min(CASE WHEN (CAST(e.buttons AS INTEGER) & 128) != 0
+   THEN CAST(e.rel_time AS INTEGER) END) AS first_held,
+  max(CASE WHEN (CAST(e.buttons AS INTEGER) & 128) != 0
+   THEN CAST(e.rel_time AS INTEGER) END) AS last_held,
+  sum((CAST(e.buttons AS INTEGER) & 128) != 0 AND CAST(e.forwardmove AS INTEGER) > 0) AS forward_held
+ FROM flights f LEFT JOIN events e ON e.batch=f.batch AND e.source_context=f.source_context
+  AND e.parent_id=f.parent_id AND e.participant_key=f.participant_key
+  AND e.opponent_key=f.opponent_key AND e.event_type='attack_sample'
+  AND CAST(e.rel_time AS INTEGER) BETWEEN f.started AND f.ended
+ GROUP BY f.batch,f.identity)
+SELECT batch,sum(samples > 0) AS sampled_flights,sum(samples) AS samples,
+ sum(held_samples) AS held_samples,sum(forward_held) AS forward_held_samples,
+ sum(last_held-first_held >= 1500) AS held_observations_span_ge_1500ms,
+ sum(last_held-first_held >= 3000) AS held_observations_span_ge_3000ms
+FROM sampled GROUP BY 1"""),
+		("Human turning/closing and opponent drain during flight (observational, not a motor recipe)", """
+WITH steps AS (
+ SELECT f.batch,f.identity,f.started,f.ended,g.rel_time,g.self_yaw,g.distance,
+  lag(g.self_yaw) OVER w AS previous_yaw,
+  first_value(g.distance) OVER w AS first_distance,
+  last_value(g.distance) OVER (PARTITION BY f.batch,f.identity ORDER BY g.rel_time
+   ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) AS last_distance
+ FROM flights f JOIN geometry g ON g.batch=f.batch AND g.source_context=f.source_context
+  AND g.parent_id=f.parent_id AND g.participant_key=f.participant_key
+  AND g.opponent_key=f.opponent_key AND g.rel_time BETWEEN f.started AND f.ended
+ WINDOW w AS (PARTITION BY f.batch,f.identity ORDER BY g.rel_time)),
+ turns AS (
+ SELECT batch,identity,count(*) AS samples,
+  sum(abs((self_yaw-previous_yaw+540) % 360 - 180)) AS cumulative_turn,
+  max(first_distance-last_distance) AS closed_distance FROM steps GROUP BY 1,2),
+ context AS (
+ SELECT f.batch,f.identity,
+  EXISTS(SELECT 1 FROM events e WHERE e.batch=f.batch AND e.source_context=f.source_context
+   AND e.parent_id=f.parent_id AND e.participant_key=f.opponent_key
+   AND e.opponent_key=f.participant_key AND e.event_type='force' AND e.power='3'
+   AND CAST(e.rel_time AS INTEGER) BETWEEN f.started AND f.ended) AS opponent_drain,
+  EXISTS(SELECT 1 FROM events e WHERE e.batch=f.batch AND e.source_context=f.source_context
+   AND e.parent_id=f.parent_id AND e.participant_key=f.participant_key
+   AND e.opponent_key=f.opponent_key AND e.event_type='damage_dealt' AND e.damage_source='2'
+   AND CAST(e.rel_time AS INTEGER) BETWEEN f.started AND f.ended+1000) AS nearby_melee
+ FROM flights f)
+SELECT t.batch,count(*) AS geometry_flights,
+ sum(cumulative_turn >= 360) AS accumulated_turn_ge_360deg,
+ sum(opponent_drain) AS opponent_drain_flights,
+ sum(opponent_drain AND closed_distance > 32) AS drain_flights_closing_gt_32u,
+ sum(opponent_drain AND cumulative_turn >= 360 AND closed_distance > 32) AS turning_closing_drain,
+ sum(opponent_drain AND cumulative_turn >= 360 AND closed_distance > 32 AND nearby_melee)
+  AS turning_closing_drain_near_melee
+FROM turns t JOIN context c ON c.batch=t.batch AND c.identity=t.identity GROUP BY 1"""),
+	]
+	for title, query in queries:
+		print("\n## " + title + "\n```sql\n" + query.strip() + "\n```")
+		cursor = con.execute(query)
+		print(json.dumps([d[0] for d in cursor.description]))
+		for row in cursor:
+			print(json.dumps(row))
+	print("\nLimits: batches remain separate; conflicting event identities are excluded. "
+		"Only adjacent start/end boundaries with the same duel, actor and opponent are paired. "
+		"No input_end is captured: held-sample spans do not establish continuous alt holds, "
+		"and airtime includes the saber return. Geometry yaw steps are shortest-path sampled "
+		"turns, not proof of a deliberate circle or continuous spinning. Closing uses the first "
+		"and last available geometry samples, not exact release/return positions. MOD_MELEE "
+		"does not distinguish flipkicks. Opponent drain spend is not proof of drain denial. "
+		"These observations cannot establish a causal spin/hold/kick technique or its efficacy.")
+
+
 QUERIES = [
 	("Swing starts and roll-stab use (saber_move 14 = LS_ROLL_STAB) by participant kind", """
 SELECT participant_kind,
@@ -493,16 +625,20 @@ def main():
 	parser.add_argument("--revision", help="only events with this capture_revision")
 	parser.add_argument("--saber-evidence", action="store_true",
 		help="stdlib CSV/SQLite batch provenance and saber evidence (prints exact SQL)")
+	parser.add_argument("--throw-evidence", action="store_true",
+		help="stdlib CSV/SQLite human throw airtime, sampled inputs and movement (prints exact SQL)")
 	parser.add_argument("--release-dir", help="separately downloaded Dueltracks1 CSV directory")
 	args = parser.parse_args()
 
-	if args.saber_evidence:
+	if args.saber_evidence or args.throw_evidence:
+		if args.saber_evidence and args.throw_evidence:
+			parser.error("choose either --saber-evidence or --throw-evidence")
 		if args.revision:
-			parser.error("--revision is for the general report; saber evidence preserves every capture revision")
+			parser.error("--revision is for the general report; evidence reports preserve every capture revision")
 		batches = [("repository", args.csv_dir)]
 		if args.release_dir:
 			batches.append(("Dueltracks1", args.release_dir))
-		saber_evidence(batches)
+		saber_evidence(batches, throws_only=args.throw_evidence)
 		return
 	try:
 		import duckdb

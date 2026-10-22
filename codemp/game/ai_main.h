@@ -351,6 +351,8 @@ typedef struct bot_state_s
 	int					saberSTime;
 	int					saberThrowTime;
 	int					saberThrowStartTime;
+	int					saberThrowCompletionKey;
+	int					saberThrowCompletionMs;
 	qboolean			saberThrowPassedTarget; // current throw has flown past the target once
 	int					saberThrowPhase;
 	int					saberThrowPhaseTime;
@@ -543,6 +545,14 @@ typedef struct bot_state_s
 	int					navHoldUntil; // expiry for navRecoverMode==2 temporary walk-forward traversal
 	qboolean			navBuildWaypointTrail; // on maps that start with no waypoints, append a waypoint at each adventure-phase end
 	int					lightningHoldUntil; // keep selecting lightning until this time unless the target closes inside bot_lightningdistance
+	int					forceChoice;
+	int					forceChoiceEnemy;
+	int					forceChoiceUntil;
+	int					forceChoiceSide;
+	int					forcePreferenceUntil;
+	int					forcePreferenceEnemy;
+	int					forcePreferenceValid;
+	int					forcePreferenceBonus[4];
 	vec3_t				navHoldDirection; // held walk-forward direction captured from waypoint guidance
 	vec3_t				navHoldGoal; // runtime forward target projected from navHoldDirection
 	qboolean			navHoldGoalValid; // true after waypoint phase acquires a walk-forward direction

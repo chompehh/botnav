@@ -4,6 +4,93 @@
 #include <math.h>
 #include "g_bot_learning.h"
 
+/* Preference never supplies permission: callers first compute a legal base score. */
+static inline int NewBotAI_PreferenceBonus(int prior, int learned, float category, float aggression,
+	int defensive)
+{
+	float scale;
+	int learnedBonus;
+	if (category < 0.0f) category = 0.0f;
+	if (category > 100.0f) category = 100.0f;
+	if (aggression < -1.0f) aggression = -1.0f;
+	if (aggression > 1.0f) aggression = 1.0f;
+	if (learned > BOTLEARN_BONUS_CAP) learned = BOTLEARN_BONUS_CAP;
+	if (learned < -BOTLEARN_BONUS_CAP) learned = -BOTLEARN_BONUS_CAP;
+	scale = (0.5f + category * 0.005f) *
+		(1.0f + (defensive ? -aggression : aggression) * 0.35f);
+	learnedBonus = (int)(learned * scale);
+	if (learnedBonus > BOTLEARN_BONUS_CAP) learnedBonus = BOTLEARN_BONUS_CAP;
+	if (learnedBonus < -BOTLEARN_BONUS_CAP) learnedBonus = -BOTLEARN_BONUS_CAP;
+	return (int)(prior * scale) + learnedBonus;
+}
+
+static inline int NewBotAI_DiscretionaryWeight(int base, int bonus, float category,
+	float aggression, int defensive)
+{
+	float scale;
+	int weight;
+	if (base <= 0)
+		return 0;
+	if (category < 0.0f) category = 0.0f;
+	if (category > 100.0f) category = 100.0f;
+	if (aggression < -1.0f) aggression = -1.0f;
+	if (aggression > 1.0f) aggression = 1.0f;
+	scale = (0.75f + category * 0.005f) *
+		(1.0f + (defensive ? -aggression : aggression) * 0.35f);
+	weight = (int)(base * scale) + bonus;
+	return weight < 1 ? 1 : weight;
+}
+
+static inline int NewBotAI_CredibleChoiceWeight(int score, int best, int skill)
+{
+	int floor, weight;
+	if (score <= 0 || best <= 0)
+		return 0;
+	if (best > 10000) best = 10000;
+	if (score > best) score = best;
+	floor = best * (skill >= 7 ? 75 : 60) / 100;
+	if (score < floor)
+		return 0;
+	weight = 1 + (score - floor) * 100 / (best - floor + 1);
+	weight *= weight;
+	if (score == best && skill >= 7)
+		weight *= skill >= 10 ? 5 : 3;
+	return weight;
+}
+
+/* roll is uniform in [0,999999]; independent of the mistake roll, including skill 10. */
+static inline int NewBotAI_WeightedChoice(const int *scores, int count, int skill, int roll)
+{
+	int i, best = 0, total = 0, draw;
+	for (i = 0; i < count; i++)
+		if (scores[i] > best) best = scores[i];
+	for (i = 0; i < count; i++)
+		total += NewBotAI_CredibleChoiceWeight(scores[i], best, skill);
+	if (total <= 0)
+		return -1;
+	if (roll < 0) roll = 0;
+	if (roll > 999999) roll = 999999;
+	draw = (int)((double)roll * total / 1000000.0);
+	for (i = 0; i < count; i++)
+	{
+		draw -= NewBotAI_CredibleChoiceWeight(scores[i], best, skill);
+		if (draw < 0) return i;
+	}
+	return -1;
+}
+
+static inline int NewBotAI_ChoiceCommitted(int now, int until, int sameEnemy,
+	int selected, const int *scores, int count, int skill)
+{
+	int i, best = 0;
+	if (!sameEnemy || now < 0 || until - now > 1000 || now >= until ||
+		selected < 0 || selected >= count)
+		return 0;
+	for (i = 0; i < count; i++)
+		if (scores[i] > best) best = scores[i];
+	return NewBotAI_CredibleChoiceWeight(scores[selected], best, skill) > 0;
+}
+
 #define NEWBOTAI_TUNING_ESCAPE_YAW_SPEED 333.0f
 
 static inline int BotCombat_ModeUsable(int owned, int ammo, int cost, int forcedMode, int alt)
@@ -805,6 +892,39 @@ static inline newbotai_saber_family_t NewBotAI_SelectSaberFamily(
 	if (!context.recentlyHurt && (context.enemyRecovering || context.enemyVulnerable) && roll % 10 == 0)
 		return NEWBOTAI_SABER_DIAGONAL_VERTICAL;
 	return NEWBOTAI_SABER_HORIZONTAL;
+}
+
+static inline newbotai_saber_family_t NewBotAI_WeightedSaberFamily(
+	newbotai_saber_tactic_context_t context, int fanBias, float aggression,
+	int learned, int roll)
+{
+	int scores[6] = { 60, 0, 0, 0, 0, 0 };
+	int selected;
+	if (fanBias <= 0 || NewBotAI_SaberNeedsSafetyExit(context))
+		return NEWBOTAI_SABER_BASIC;
+	scores[NEWBOTAI_SABER_HORIZONTAL] = NewBotAI_DiscretionaryWeight(65,
+		NewBotAI_PreferenceBonus(0, learned, fanBias, aggression, 0), fanBias, aggression, 0);
+	if (!context.recentlyHurt && (context.enemyRecovering || context.enemyVulnerable))
+		scores[NEWBOTAI_SABER_DIAGONAL_VERTICAL] = scores[NEWBOTAI_SABER_HORIZONTAL] - 8;
+	if (context.recentlyHurt && context.counterReady &&
+		(context.enemyRecovering || context.enemyVulnerable))
+		scores[NEWBOTAI_SABER_COUNTER_ENTRY] = NewBotAI_DiscretionaryWeight(95, 0,
+			fanBias, aggression, 1);
+	if (context.enemyTotalHealth <= 40 && (context.landedHit || context.enemyVulnerable))
+		scores[NEWBOTAI_SABER_FINISH] = NewBotAI_DiscretionaryWeight(100, 0,
+			fanBias, aggression, 0);
+	if (context.ourTotalHealth < context.enemyTotalHealth || context.enemyAttacking || aggression < 0.0f)
+		scores[NEWBOTAI_SABER_BURST] = NewBotAI_DiscretionaryWeight(80, 0,
+			fanBias, aggression, 1);
+	selected = NewBotAI_WeightedChoice(scores, 6, context.skill, roll);
+	return selected < 0 ? NEWBOTAI_SABER_BASIC : (newbotai_saber_family_t)selected;
+}
+
+static inline int NewBotAI_SaberDefensiveReset(newbotai_saber_tactic_context_t context,
+	float aggression)
+{
+	return aggression < -0.25f && context.chainLength >= 2 &&
+		!context.enemyVulnerable && !context.enemyRecovering && !context.landedHit;
 }
 
 static inline void NewBotAI_SaberSelectionInputs(newbotai_saber_family_t family,
@@ -2191,10 +2311,7 @@ static inline int NewBotAI_GetSaberThrowSituationBonus(int ourForce, float enemy
 	return bonus;
 }
 
-// Saber-throw hold (dueltracks2 1c34db989): human throw hit rate rises with alt hold
-// (<=100ms 41%, 500-1000ms ~80%, >1s 85-89%), the saber passes the target ~630ms in,
-// and holding past the pass landed 0.99 return-pass hits vs 0.11. Hold at least 600ms
-// and through the first pass while it still heads toward the target, up to 1.5s.
+// Conservative control budgets, not inferred human hold durations or spin counts.
 #define NEWBOTAI_THROW_MIN_HOLD_MS 600
 #define NEWBOTAI_THROW_MAX_PASS_HOLD_MS 1500
 #define NEWBOTAI_THROW_TRAIL_MIN_DEG 5.0f
@@ -2272,6 +2389,12 @@ static inline int NewBotAI_SaberThrowRecallDue(int throwLevel, int heldMs, int u
 	return unsafe || returning || !forceAllowed || heldMs < 0 || heldMs >= maximum;
 }
 
+static inline int NewBotAI_SaberThrowExtensionRecallDue(int throwLevel, int heldMs)
+{
+	const int maximum = throwLevel >= 3 ? 2800 : throwLevel == 2 ? 2400 : 750;
+	return heldMs < 0 || heldMs >= maximum;
+}
+
 static inline int NewBotAI_SaberThrowRoutingHold(int throwLevel, newbotai_throw_phase_t phase,
 	int heldMs)
 {
@@ -2345,6 +2468,63 @@ static inline int NewBotAI_SaberThrowWantsHold(int throwLevel, newbotai_throw_ph
 		NewBotAI_SaberThrowRoutingHold(throwLevel, phase, heldMs))
 		return 1;
 	return !softRecall || NewBotAI_SaberThrowLearnedHold(heldMs, learnedWeight, safeLearnedContext);
+}
+
+static inline int NewBotAI_SaberThrowCompletionMs(float range, int force, int knockedDown, int committed)
+{
+	if (force < 30 || range < 0.0f)
+		return 0;
+	return knockedDown ? 1400 : range <= 180.0f && committed ? 1200 : 0;
+}
+
+static inline int NewBotAI_SaberThrowContextHoldCommitted(int throwLevel, newbotai_throw_phase_t phase,
+	int heldMs, int passed, int heading, int safetyRecall, int softRecall,
+	float range, int force, int knockedDown, int committed, int learnedWeight, int completionMs)
+{
+	int completion, budget;
+	if (safetyRecall || phase == NEWBOTAI_THROW_RECALL ||
+		NewBotAI_SaberThrowExtensionRecallDue(throwLevel, heldMs))
+		return 0;
+	/* Optional completion/continuation may add protection, never shorten the
+	 * original first-pass, routing, or safe pressure budget. */
+	if (NewBotAI_SaberThrowWantsHold(throwLevel, phase, heldMs, passed, heading,
+		0, softRecall, 0, 0))
+		return 1;
+	if (throwLevel < 2)
+		return 0;
+	/* Completing a safe close punish must not depend on an aggressive personality. */
+	completion = NEWBOTAI_THROW_MIN_HOLD_MS;
+	if (force >= 30 && completionMs > completion)
+		completion = completionMs > 1400 ? 1400 : completionMs;
+	if (force >= 30 && range >= 0.0f)
+	{
+		if ((knockedDown || (range <= 180.0f && committed)) && completion < 1200)
+			completion = 1200;
+		if (!passed && heading)
+			completion = range > 240.0f ? 1700 : 1400;
+		if (knockedDown && completion < 1400)
+			completion = 1400;
+	}
+	budget = completion;
+	if (force >= 45 && range >= 0.0f &&
+		(heading || knockedDown || committed ||
+			phase == NEWBOTAI_THROW_BYPASS || phase == NEWBOTAI_THROW_REAR))
+		budget = (throwLevel >= 3 ? 2400 : 2100);
+	if (heldMs < completion)
+		return 1;
+	if (heldMs >= budget)
+		return 0;
+	if (phase == NEWBOTAI_THROW_BYPASS || phase == NEWBOTAI_THROW_REAR)
+		return 1;
+	return !softRecall || (learnedWeight >= 8 && (knockedDown || committed) && force >= 50);
+}
+
+static inline int NewBotAI_SaberThrowContextHold(int throwLevel, newbotai_throw_phase_t phase,
+	int heldMs, int passed, int heading, int safetyRecall, int softRecall,
+	float range, int force, int knockedDown, int committed, int learnedWeight)
+{
+	return NewBotAI_SaberThrowContextHoldCommitted(throwLevel, phase, heldMs, passed, heading,
+		safetyRecall, softRecall, range, force, knockedDown, committed, learnedWeight, 0);
 }
 
 // Yaw offset (degrees, positive toward the target's lateral motion) for a thrown saber:

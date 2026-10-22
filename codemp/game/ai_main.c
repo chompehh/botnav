@@ -17429,9 +17429,7 @@ static int BotGetAggressionWeightedBonus(bot_state_t *bs, float biasPercent, int
 	if (aggressiveOnly)
 	{
 		if (aggressionBias <= 0.0f)
-		{
 			return 0;
-		}
 		normalized = aggressionBias;
 	}
 	else
@@ -17743,7 +17741,7 @@ static int NewBotAI_GetAntiDrainWeight(bot_state_t *bs)
 		return 0;
 	}
 
-	weight = (int)((antiDrainBias / 100.0f) * 45.0f);
+	weight = 45;
 	if (enemyHealth <= 30)
 	{
 		weight += 20;
@@ -17766,7 +17764,9 @@ static int NewBotAI_GetAntiDrainWeight(bot_state_t *bs)
 		weight = 100;
 	}
 
-	return weight;
+	return Com_Clampi(0, 100,
+		(int)(NewBotAI_PreferenceBonus(weight, 0, 100, BotGetAggressionBias(bs), 1) *
+			antiDrainBias * 0.01f));
 }
 
 static float BotGetLightningMaxDistance(bot_state_t *bs)
@@ -18135,19 +18135,15 @@ static int NewBotAI_GetPTKWeight(bot_state_t *bs)
 
 	if (ourHealth > 70)
 	{
-		const float fanBias = BotGetChanceBiasPercent(bot_fanbias.value);
-
 		if (ourForce < hisForce)
 		{
-			//When the bot is healthy but behind in force, a fan-heavy approach keeps them
-			//pressuring the enemy without overcommitting to a drain or a desperate chase.
-			weight += (int)(fanBias * 0.7f) + 15;
+			weight += (int)(aggressionWeight * 0.7f) + 15;
 		}
 		else if (ourForce > hisForce)
 		{
 			//A healthy force edge is the ideal moment to commit to the pullkick follow-up
 			//instead of chancing a low-value exchange.
-			weight += (int)(fanBias * 0.4f) + 10;
+			weight += (int)(aggressionWeight * 0.4f) + 10;
 		}
 	}
 
@@ -18239,6 +18235,7 @@ static int NewBotAI_GetPTKWeight(bot_state_t *bs)
 		weight = 0;
 	}
 
+	weight = NewBotAI_DiscretionaryWeight(weight, 0, aggressionWeight, BotGetAggressionBias(bs), 0);
 	if (bs->currentEnemy->client->ps.saberInFlight &&
 		!NewBotAI_IsEnemySaberReturning(bs) &&
 		!freePullkickWindow &&
@@ -18723,10 +18720,13 @@ static void NewBotAI_PrepareHorizontalSwingStart(bot_state_t *bs)
 		{
 			//Learned outcomes of opening with a swing in this context nudge the fan entry
 			//chance up or down (capped by G_BotLearnBonus, 0 without enough data).
-			const int learnedEntry = G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy,
-				NewBotAI_GetEnemyStimulusToken(bs), BOTLEARN_TOK_SWING, BOTLEARN_TOK_NONE, bs->settings.skill);
+			const int learnedEntry = NewBotAI_PreferenceBonus(0,
+				G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy,
+					NewBotAI_GetEnemyStimulusToken(bs), BOTLEARN_TOK_SWING, BOTLEARN_TOK_NONE, bs->settings.skill),
+				fanBias, BotGetAggressionBias(bs), 0);
 
-			if (Q_irand(1, 100) <= (int)fanBias + learnedEntry)
+			if (Q_irand(1, 100) <= NewBotAI_PreferenceBonus((int)fanBias, 0,
+				100, BotGetAggressionBias(bs), 0) + learnedEntry)
 				startDir = NewBotAI_FanStartDirection(Q_irand(1, 100));
 		}
 
@@ -19006,7 +19006,7 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 	qboolean heading, passed;
 	int ourHealth, enemyHealth, safetyRecall, softRecall, learnedWeight = 0;
 	int drainlock, lethal, forceAllowed, returning, hold;
-	int safeLearnedContext;
+	int safeLearnedContext, knockedDown, committed, completion;
 	float aggression;
 	const char *reason;
 
@@ -19037,31 +19037,47 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 	softRecall = ourHealth < enemyHealth || aggression <= 0.0f ||
 		(enemyHealth > 30 && enemy->fd.forcePower >= ps->fd.forcePower + 50);
 	passed = NewBotAI_UpdateSaberThrowPass(bs, &heading);
+	knockedDown = BG_InKnockDown(enemy->legsAnim) ||
+		enemy->forceHandExtend == HANDEXTEND_KNOCKDOWN;
+	committed = knockedDown || BG_SaberInAttack(enemy->saberMove) ||
+		PM_SaberInStart(enemy->saberMove) || PM_SaberInTransition(enemy->saberMove) ||
+		(enemy->fd.forcePowersActive & ((1 << FP_GRIP) | (1 << FP_DRAIN) | (1 << FP_LIGHTNING))) ||
+		enemy->saberInFlight;
+	if (bs->saberThrowCompletionKey != bs->saberThrowStartTime)
+	{
+		bs->saberThrowCompletionKey = bs->saberThrowStartTime;
+		bs->saberThrowCompletionMs = 0;
+	}
+	completion = NewBotAI_SaberThrowCompletionMs(bs->frame_Enemy_Len, ps->fd.forcePower,
+		knockedDown, committed);
+	if (completion > bs->saberThrowCompletionMs)
+		bs->saberThrowCompletionMs = completion;
 	safeLearnedContext = bs->settings.skill > 2 && ourHealth >= 60 &&
 		ourHealth + ps->stats[STAT_ARMOR] >= enemyHealth + enemy->stats[STAT_ARMOR] &&
 		ps->fd.forcePower >= 50 && enemy->fd.forcePower < ps->fd.forcePower + 50 &&
 		aggression >= 0.0f && enemy->groundEntityNum != ENTITYNUM_NONE;
 	if (!safetyRecall && softRecall && safeLearnedContext &&
-		heldMs >= NEWBOTAI_THROW_MIN_HOLD_MS && heldMs < 900 &&
+		heldMs >= NEWBOTAI_THROW_MIN_HOLD_MS && heldMs < 2400 &&
 		!NewBotAI_SaberThrowHoldProtected(heldMs, passed, heading) &&
 		!NewBotAI_SaberThrowRoutingHold(ps->fd.forcePowerLevel[FP_SABERTHROW],
 			(newbotai_throw_phase_t)bs->saberThrowPhase, heldMs))
 	{
-		// The early controller and final input must share the same sampled
-		// learned weight on this frame, including the learner's skill noise.
-		if (learnedAt[bs->client] != level.time ||
+		// Keep the learner's skill noise stable throughout this throw.
+		if (learnedAt[bs->client] != bs->saberThrowStartTime ||
 			learnedForEnemy[bs->client] != bs->currentEnemy->s.number)
 		{
-			learnedAt[bs->client] = level.time;
+			learnedAt[bs->client] = bs->saberThrowStartTime;
 			learnedForEnemy[bs->client] = bs->currentEnemy->s.number;
 			learnedBonus[bs->client] = G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy,
 				NewBotAI_GetEnemyStimulusToken(bs), BOTLEARN_TOK_THROW, BOTLEARN_TOK_NONE, bs->settings.skill);
 		}
-		learnedWeight = learnedBonus[bs->client];
+		learnedWeight = NewBotAI_PreferenceBonus(0, learnedBonus[bs->client],
+			BotGetChanceBiasPercent(bot_saberthrowbias.value), aggression, 0);
 	}
-	hold = NewBotAI_SaberThrowWantsHold(ps->fd.forcePowerLevel[FP_SABERTHROW],
+	hold = NewBotAI_SaberThrowContextHoldCommitted(ps->fd.forcePowerLevel[FP_SABERTHROW],
 		(newbotai_throw_phase_t)bs->saberThrowPhase, heldMs, passed, heading,
-		safetyRecall, softRecall, learnedWeight, safeLearnedContext);
+		safetyRecall, softRecall, bs->frame_Enemy_Len, ps->fd.forcePower,
+		knockedDown, committed, learnedWeight, bs->saberThrowCompletionMs);
 	if (!hold)
 		reason = !forceAllowed ? "force" : returning ? "return" : drainlock ? "drain" :
 			lethal ? "lethal" : NewBotAI_SaberThrowRecallDue(ps->fd.forcePowerLevel[FP_SABERTHROW],
@@ -19071,7 +19087,7 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 			NewBotAI_SaberThrowRoutingHold(ps->fd.forcePowerLevel[FP_SABERTHROW],
 				(newbotai_throw_phase_t)bs->saberThrowPhase, heldMs) ? "lane" :
 			NewBotAI_SaberThrowHoldProtected(heldMs, passed, heading) ? "pass" :
-			softRecall ? "learn" : "press";
+			softRecall ? "complete" : "press";
 	NewBotAI_RecordSaberThrowDecision(bs, heldMs, hold ? qtrue : qfalse, reason);
 	return hold ? qtrue : qfalse;
 }
@@ -21191,17 +21207,11 @@ int NewBotAI_GetGrip(bot_state_t *bs) {
 	if (ourForce > 65 && ourHealth > 55 && hisHealth < 80)
 		return 45 + aggressionBonus;
 
-	//Item 5: outside all of the specific rules above, still let a high bot_gripkickbias
-	//show up more often as a purely random pick whenever we hold both a health and
-	//force advantage - the specific rules remain the strongest/most reliable triggers,
-	//this just gives bias itself real weight instead of only ever tacking on a small
-	//aggression bonus to those rules.
+	// The committed force selector supplies variation; do not reroll eligibility
+	// every frame while holding a healthy force advantage.
 	if (gripkickBias > 0.0f && ourHealth > hisHealth && ourForce > hisForce)
 	{
-		if (Q_irand(1, 100) <= (int)gripkickBias)
-		{
-			return (int)(gripkickBias * 0.6f) + aggressionBonus;
-		}
+		return (int)(gripkickBias * 0.6f) + aggressionBonus;
 	}
 
 	return 0;
@@ -21497,15 +21507,17 @@ int NewBotAI_GetSaberthrow(bot_state_t* bs) {
 			bs->currentEnemy->client->ps.fd.forcePowersActive != 0 ||
 			bs->currentEnemy->client->ps.saberInFlight) ? qtrue : qfalse;
 		const float skillScale = BotLearn_SkillScale(bs->settings.skill);
+		int prior, learned;
 
-		weight += (int)(NewBotAI_GetSaberThrowSituationBonus(ourForce, bs->frame_Enemy_Len,
+		prior = (int)(NewBotAI_GetSaberThrowSituationBonus(ourForce, bs->frame_Enemy_Len,
 			enemyAirborne ? 1 : 0, enemyKnockedDown ? 1 : 0, ownActionRecent ? 1 : 0,
 			enemyCommitted ? 1 : 0) * skillScale);
-		weight += (int)(NewBotAI_GetReactionBonus(stimulus, BOTLEARN_TOK_THROW) * skillScale);
-		weight += G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, stimulus,
+		prior += (int)(NewBotAI_GetReactionBonus(stimulus, BOTLEARN_TOK_THROW) * skillScale);
+		learned = G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, stimulus,
 			BOTLEARN_TOK_THROW, BOTLEARN_TOK_NONE, bs->settings.skill);
-		if (weight < 0)
-			weight = 0;
+		weight = NewBotAI_DiscretionaryWeight(weight,
+			NewBotAI_PreferenceBonus(prior, learned, saberthrowBias, BotGetAggressionBias(bs), 0),
+			saberthrowBias, BotGetAggressionBias(bs), 0);
 	}
 
 	return weight;
@@ -21522,6 +21534,14 @@ static int NewBotAI_GetEnemyStimulusToken(bot_state_t *bs)
 	return (token == BOTLEARN_TOK_NONE) ? BOTLEARN_TOK_IDLE : token;
 }
 
+static float NewBotAI_PushPreferenceBias(bot_state_t *bs)
+{
+	if ((bs->currentEnemy->client->ps.fd.forcePowersActive & (1 << FP_DRAIN)) ||
+		NewBotAI_GetEnemyStimulusToken(bs) == BOTLEARN_TOK_DRAIN)
+		return BotGetChanceBiasPercent(bot_antidrainbias.value);
+	return 0.0f;
+}
+
 // Additive weight for answering the current situation with `response`:
 //  - reaction table from the duel data (scaled down for lower skills),
 //  - force economy (pull while the enemy still has force, drain when they are low),
@@ -21533,9 +21553,23 @@ static int NewBotAI_GetForceDecisionBonus(bot_state_t *bs, int response)
 	const float skillScale = BotLearn_SkillScale(bs->settings.skill);
 	int bonus;
 	int ownDrainTime;
+	float category;
+	int defensive, index;
 
 	if (!bs->currentEnemy || !bs->currentEnemy->client)
 		return 0;
+	index = response == BOTLEARN_TOK_PULL ? 0 : response == BOTLEARN_TOK_PUSH ? 1 :
+		response == BOTLEARN_TOK_GRIP ? 2 : 3;
+	if (bs->forcePreferenceUntil <= level.time ||
+		bs->forcePreferenceUntil - level.time > 600 ||
+		bs->forcePreferenceEnemy != bs->currentEnemy->s.number)
+	{
+		bs->forcePreferenceUntil = level.time + 600;
+		bs->forcePreferenceEnemy = bs->currentEnemy->s.number;
+		bs->forcePreferenceValid = 0;
+	}
+	if (bs->forcePreferenceValid & (1 << index))
+		return bs->forcePreferenceBonus[index];
 
 	bonus = (int)(NewBotAI_GetReactionBonus(stimulus, response) * skillScale);
 	bonus += (int)(NewBotAI_GetForceEconomyBonus(response, bs->currentEnemy->client->ps.fd.forcePower) * skillScale);
@@ -21550,10 +21584,38 @@ static int NewBotAI_GetForceDecisionBonus(bot_state_t *bs, int response)
 	}
 
 	//A pull we can cash in with a kick is scored as the pull -> kick sequence.
-	bonus += G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, stimulus, response,
+	defensive = response == BOTLEARN_TOK_PUSH || response == BOTLEARN_TOK_DRAIN;
+	category = response == BOTLEARN_TOK_PULL ? bot_ptk_aggressionbias.value :
+		response == BOTLEARN_TOK_GRIP ? bot_gripkickbias.value :
+		response == BOTLEARN_TOK_DRAIN ? bot_drainbias.value : NewBotAI_PushPreferenceBias(bs);
+	bs->forcePreferenceBonus[index] = NewBotAI_PreferenceBonus(bonus,
+		G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, stimulus, response,
 		(response == BOTLEARN_TOK_PULL && NewBotAI_IsPullkickOpportunity(bs)) ? BOTLEARN_TOK_KICK : BOTLEARN_TOK_NONE,
-		bs->settings.skill);
-	return bonus;
+		bs->settings.skill), BotGetChanceBiasPercent(category), BotGetAggressionBias(bs), defensive);
+	bs->forcePreferenceValid |= 1 << index;
+	return bs->forcePreferenceBonus[index];
+}
+
+static int NewBotAI_ForceChoice(bot_state_t *bs, const int *scores, int count, int side)
+{
+	const int skill = Com_Clampi(1, 10, (int)bs->settings.skill);
+	if (bs->forceChoice == 5 && count > 5 && scores[5] > 0 &&
+		bs->forceChoiceEnemy == bs->currentEnemy->s.number && bs->forceChoiceSide == side &&
+		bs->cur_ps.weaponstate == WEAPON_CHARGING_ALT)
+	{
+		bs->forceChoiceUntil = level.time + 600;
+		return 5;
+	}
+	if (!NewBotAI_ChoiceCommitted(level.time, bs->forceChoiceUntil,
+		bs->forceChoiceEnemy == bs->currentEnemy->s.number && bs->forceChoiceSide == side,
+		bs->forceChoice, scores, count, skill))
+	{
+		bs->forceChoice = NewBotAI_WeightedChoice(scores, count, skill, Q_irand(0, 999999));
+		bs->forceChoiceUntil = level.time + 450 + skill * 15;
+		bs->forceChoiceEnemy = bs->currentEnemy->s.number;
+		bs->forceChoiceSide = side;
+	}
+	return bs->forceChoice;
 }
 
 void NewBotAI_GetDSForcepower(bot_state_t *bs)
@@ -21562,6 +21624,8 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	qboolean useTheForce = qfalse;
 	qboolean firedImmediatePull = qfalse;
 	int pushWeight, pullWeight, lightningWeight, drainWeight, gripWeight;//, doNothingWeight;
+	int scores[6], choice = -1, throwWeight = 0;
+	const float aggression = BotGetAggressionBias(bs);
 	int minWeight = 0;
 	qboolean longRangeLightningOnly = qfalse;
 	const qboolean drainlockAdvantage = NewBotAI_IsDrainlockAdvantage(bs);
@@ -21625,20 +21689,6 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	}
 	//doNothingWeight = NewBotAI_GetWait(bs);
 
-	//Counters/combos from the duel data plus the learned sequence weights. Only adjusts
-	//powers that are already available (weight > 0) so every existing gate still applies.
-	if (!longRangeLightningOnly)
-	{
-		if (pullWeight > 0)
-			pullWeight += NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PULL);
-		if (pushWeight > 0)
-			pushWeight += NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PUSH);
-		if (gripWeight > 0)
-			gripWeight += NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_GRIP);
-		if (drainWeight > 0)
-			drainWeight += NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_DRAIN);
-	}
-
 	//Gripkick against a speeding / force-jumping enemy outranks every other force choice,
 	//including the drainlock pull/drain package.
 	if (!longRangeLightningOnly && gripWeight >= NEWBOTAI_GRIPKICK_PRIORITY_WEIGHT)
@@ -21683,58 +21733,52 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 		}
 	}
 
-	if (!useTheForce && gripWeight > minWeight &&
-		gripWeight > pushWeight && gripWeight > drainWeight &&
-		gripWeight > pullWeight)
+	if (!useTheForce)
 	{
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_GRIP;
-		useTheForce = qtrue;
-	}
-	else if (!useTheForce && pushWeight > pullWeight && pushWeight > drainWeight && pushWeight > gripWeight && pushWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PUSH;
-		useTheForce = qtrue;
-
-		//trap->Print("Pushing -- Pull: %i, Push: %i, Drain: %i, Grip: %i\n", pullWeight, pushWeight, drainWeight, gripWeight);
-	}
-	else if (!useTheForce && pullWeight > pushWeight && pullWeight > drainWeight && pullWeight > gripWeight && pullWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PULL;
-		NewBotAI_ApplyPullMistake(bs);
-		useTheForce = qtrue;
-		//Always arm the pullkick follow-through after a pull so the pull itself can create the
-		//close-range window; only fire the immediate kick when the window already exists now.
-		NewBotAI_SchedulePullkickJump(bs);
-		if (NewBotAI_IsPullkickOpportunity(bs) &&
-			bs->frame_Enemy_Len <= NEWBOTAI_IMMEDIATE_FLIPKICK_RANGE &&
-			NewBotAI_IsFlipkickSetupReady(bs))
+		static const int powers[5] = { FP_PUSH, FP_PULL, FP_GRIP, FP_DRAIN, FP_LIGHTNING };
+		if (!longRangeLightningOnly && !drainlockAdvantage && !pullkickDrainWindow &&
+			!NewBotAI_ShouldPreferFlipkickOverThrow(bs))
+			throwWeight = NewBotAI_GetSaberthrow(bs);
+		scores[0] = NewBotAI_DiscretionaryWeight(pushWeight,
+			pushWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PUSH) : 0,
+			NewBotAI_PushPreferenceBias(bs), aggression, 1);
+		scores[1] = NewBotAI_DiscretionaryWeight(pullWeight,
+			pullWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PULL) : 0,
+			BotGetChanceBiasPercent(bot_ptk_aggressionbias.value), aggression, 0);
+		scores[2] = NewBotAI_DiscretionaryWeight(gripWeight,
+			gripWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_GRIP) : 0,
+			BotGetChanceBiasPercent(bot_gripkickbias.value), aggression, 0);
+		scores[3] = NewBotAI_DiscretionaryWeight(drainWeight,
+			drainWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_DRAIN) : 0,
+			BotGetChanceBiasPercent(bot_drainbias.value), aggression, 1);
+		scores[4] = lightningWeight;
+		scores[5] = throwWeight;
+		choice = NewBotAI_ForceChoice(bs, scores, 6, 0);
+		if (choice >= 0 && choice < 5)
 		{
-			trap->EA_ForcePower(bs->client);
-			firedImmediatePull = qtrue;
-			NewBotAI_Flipkick(bs);
+			level.clients[bs->client].ps.fd.forcePowerSelected = powers[choice];
+			useTheForce = qtrue;
+			if (choice == 1)
+			{
+				NewBotAI_ApplyPullMistake(bs);
+				NewBotAI_SchedulePullkickJump(bs);
+				if (NewBotAI_IsPullkickOpportunity(bs) &&
+					bs->frame_Enemy_Len <= NEWBOTAI_IMMEDIATE_FLIPKICK_RANGE &&
+					NewBotAI_IsFlipkickSetupReady(bs))
+				{
+					trap->EA_ForcePower(bs->client);
+					firedImmediatePull = qtrue;
+					NewBotAI_Flipkick(bs);
+				}
+			}
+			if (choice == 4)
+				NewBotAI_StartLightningBurst(bs);
 		}
-
-		//trap->Print("Pulling -- Pull: %i, Push: %i, Drain: %i, Grip: %i\n", pullWeight, pushWeight, drainWeight, gripWeight);
 	}
-	else if (!useTheForce && lightningWeight > pushWeight && lightningWeight > pullWeight && lightningWeight > drainWeight && lightningWeight > gripWeight && lightningWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_LIGHTNING;
-		NewBotAI_StartLightningBurst(bs);
-		useTheForce = qtrue;
-	}
-	//Explicit tie-break: when drain ties for best weight, prefer drain over grip/push/pull
-	//but not over lightning.
-	else if (!useTheForce && drainWeight > lightningWeight && drainWeight >= pushWeight && drainWeight >= pullWeight && drainWeight >= gripWeight && drainWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_DRAIN;
-		useTheForce = qtrue;
+	else
+		bs->forceChoiceUntil = 0;
 
-		//trap->Print("Draining -- Pull: %i, Push: %i, Drain: %i, Grip: %i\n", pullWeight, pushWeight, drainWeight, gripWeight);
-	}
-	else if (!useTheForce && gripWeight > pushWeight && gripWeight > pullWeight && gripWeight > drainWeight && gripWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_GRIP;
-		useTheForce = qtrue;
-
-		//trap->Print("Gripping -- Pull: %i, Push: %i, Drain: %i, Grip: %i\n", pullWeight, pushWeight, drainWeight, gripWeight);
-	}
-
-	if (!useTheForce && NewBotAI_GetSpeedAttackWeight(bs) > minWeight)
+	if (!useTheForce && choice != 5 && NewBotAI_GetSpeedAttackWeight(bs) > minWeight)
 	{
 		level.clients[bs->client].ps.fd.forcePowerSelected = FP_SPEED;
 		useTheForce = qtrue;
@@ -21742,7 +21786,7 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 
 	//Never rage - bots don't use force rage at all anymore.
 
-	if (!useTheForce && NewBotAI_GetTeamEnergize(bs) > minWeight) {
+	if (!useTheForce && choice != 5 && NewBotAI_GetTeamEnergize(bs) > minWeight) {
 		level.clients[bs->client].ps.fd.forcePowerSelected = FP_TEAM_FORCE;
 		useTheForce = qtrue;
 	}
@@ -21767,7 +21811,7 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	if (!longRangeLightningOnly &&
 		!NewBotAI_ShouldSuppressDrainlockSaberThrow(bs) &&
 		!drainlockAdvantage && !pullkickDrainWindow &&
-		NewBotAI_GetSaberthrow(bs) > minWeight && !NewBotAI_ShouldPreferFlipkickOverThrow(bs)) {
+		choice == 5 && throwWeight > minWeight && !NewBotAI_ShouldPreferFlipkickOverThrow(bs)) {
 		trap->EA_Alt_Attack(bs->client);
 		//Pre-select pull or push so it fires as the saber approaches the target. Pull when
 		//aggressive (PTK setup), push when defensive (break their guard). This runs after the
@@ -21895,6 +21939,8 @@ void NewBotAI_GetLSForcepower(bot_state_t *bs)
 	qboolean useTheForce = qfalse;
 	int pullWeight, pushWeight, absorbWeight, protectWeight, healWeight;
 	int minWeight = 0;
+	int scores[6], choice = -1, throwWeight = 0;
+	const float aggression = BotGetAggressionBias(bs);
 
 	//Disengaged in a bot_conservation window - hold off on spending any force so it regens.
 	if (bs->conserveUntil > level.time)
@@ -21914,51 +21960,52 @@ void NewBotAI_GetLSForcepower(bot_state_t *bs)
 	healWeight = NewBotAI_GetHeal(bs);
 	//get weights
 
-	if (pushWeight > pullWeight && pushWeight > absorbWeight && pushWeight > protectWeight && pushWeight > healWeight && pushWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PUSH;
-		useTheForce = qtrue;
-		//trap->Print("Push - Weights -- Pull: %i, Push: %i, Absorb: %i, Protect: %i, Heal %i\n", pullWeight, pushWeight, absorbWeight, protectWeight, healWeight);
-	}
-	else if (pullWeight > pushWeight && pullWeight > absorbWeight && pullWeight > protectWeight && pullWeight > healWeight && pullWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PULL;
-		NewBotAI_ApplyPullMistake(bs);
-		useTheForce = qtrue;
-		//Always arm the pullkick follow-through after a pull so the pull itself can create the
-		//close-range window; only fire the immediate kick when the window already exists now.
-		NewBotAI_SchedulePullkickJump(bs);
-		if (NewBotAI_IsPullkickOpportunity(bs) &&
-			bs->frame_Enemy_Len <= NEWBOTAI_IMMEDIATE_FLIPKICK_RANGE &&
-			NewBotAI_IsFlipkickSetupReady(bs))
-			NewBotAI_Flipkick(bs);
-		//trap->Print("Pull - Weights -- Pull: %i, Push: %i, Absorb: %i, Protect: %i, Heal %i\n", pullWeight, pushWeight, absorbWeight, protectWeight, healWeight);
-	}
-	else if (absorbWeight > pushWeight && absorbWeight > pullWeight && absorbWeight > protectWeight && absorbWeight > healWeight && absorbWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_ABSORB;
-		useTheForce = qtrue;
-		//trap->Print("Absorb - Weights -- Pull: %i, Push: %i, Absorb: %i, Protect: %i, Heal %i\n", pullWeight, pushWeight, absorbWeight, protectWeight, healWeight);
-	}
-	else if (protectWeight > pushWeight && protectWeight > pullWeight && protectWeight > absorbWeight && protectWeight > healWeight && protectWeight > minWeight) {
-		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PROTECT;
-		useTheForce = qtrue;
-		//trap->Print("Protect - Weights -- Pull: %i, Push: %i, Absorb: %i, Protect: %i, Heal %i\n", pullWeight, pushWeight, absorbWeight, protectWeight, healWeight);
-	}
-	//Explicit tie-break: only under health-bias threshold, prefer heal on ties.
-	else if (((healWeight > protectWeight && healWeight > pushWeight && healWeight > pullWeight && healWeight > absorbWeight) ||
-		(g_entities[bs->client].health <= BotGetHealthBiasThreshold() &&
-			healWeight >= protectWeight && healWeight >= pushWeight && healWeight >= pullWeight && healWeight >= absorbWeight)) &&
-		healWeight > minWeight) {
+	if (healWeight > 0 && g_entities[bs->client].health <= BotGetHealthBiasThreshold())
+	{
 		level.clients[bs->client].ps.fd.forcePowerSelected = FP_HEAL;
 		useTheForce = qtrue;
-		//trap->Print("Heal - Weights -- Pull: %i, Push: %i, Absorb: %i, Protect: %i, Heal %i\n", pullWeight, pushWeight, absorbWeight, protectWeight, healWeight);
+		bs->forceChoiceUntil = 0;
 	}
-	if (!useTheForce && NewBotAI_GetSpeedAttackWeight(bs) > minWeight)
+	else
+	{
+		static const int powers[5] = { FP_PUSH, FP_PULL, FP_ABSORB, FP_PROTECT, FP_HEAL };
+		if (!NewBotAI_ShouldPreferFlipkickOverThrow(bs))
+			throwWeight = NewBotAI_GetSaberthrow(bs);
+		scores[0] = NewBotAI_DiscretionaryWeight(pushWeight,
+			pushWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PUSH) : 0,
+			NewBotAI_PushPreferenceBias(bs), aggression, 1);
+		scores[1] = NewBotAI_DiscretionaryWeight(pullWeight,
+			pullWeight > 0 ? NewBotAI_GetForceDecisionBonus(bs, BOTLEARN_TOK_PULL) : 0,
+			BotGetChanceBiasPercent(bot_ptk_aggressionbias.value), aggression, 0);
+		scores[2] = NewBotAI_DiscretionaryWeight(absorbWeight, 0,
+			BotGetChanceBiasPercent(bot_absorbbias.value), aggression, 1);
+		scores[3] = NewBotAI_DiscretionaryWeight(protectWeight, 0, 0, aggression, 1);
+		scores[4] = NewBotAI_DiscretionaryWeight(healWeight, 0, 0, aggression, 1);
+		scores[5] = throwWeight;
+		choice = NewBotAI_ForceChoice(bs, scores, 6, 1);
+		if (choice >= 0 && choice < 5)
+		{
+			level.clients[bs->client].ps.fd.forcePowerSelected = powers[choice];
+			useTheForce = qtrue;
+			if (choice == 1)
+			{
+				NewBotAI_ApplyPullMistake(bs);
+				NewBotAI_SchedulePullkickJump(bs);
+				if (NewBotAI_IsPullkickOpportunity(bs) &&
+					bs->frame_Enemy_Len <= NEWBOTAI_IMMEDIATE_FLIPKICK_RANGE &&
+					NewBotAI_IsFlipkickSetupReady(bs))
+					NewBotAI_Flipkick(bs);
+			}
+		}
+	}
+	if (!useTheForce && choice != 5 && NewBotAI_GetSpeedAttackWeight(bs) > minWeight)
 	{
 		level.clients[bs->client].ps.fd.forcePowerSelected = FP_SPEED;
 		useTheForce = qtrue;
 	}
 	//Speed, team heal,
 
-	if (!useTheForce && NewBotAI_GetTeamHeal(bs) > minWeight) { //make this use the weight
+	if (!useTheForce && choice != 5 && NewBotAI_GetTeamHeal(bs) > minWeight) { //make this use the weight
 		level.clients[bs->client].ps.fd.forcePowerSelected = FP_TEAM_HEAL; //ideally loop through in range people and see if they need it
 		useTheForce = qtrue;
 	}
@@ -21969,7 +22016,7 @@ void NewBotAI_GetLSForcepower(bot_state_t *bs)
 	//Check if we should saberthrow I guess.
 	//A free flipkick always beats holding/charging a throw once the enemy has closed
 	//into kick range - otherwise the two bots just collide while we sit on the charge.
-	if (NewBotAI_GetSaberthrow(bs) > minWeight && !NewBotAI_ShouldPreferFlipkickOverThrow(bs)) {
+	if (choice == 5 && throwWeight > minWeight && !NewBotAI_ShouldPreferFlipkickOverThrow(bs)) {
 		trap->EA_Alt_Attack(bs->client);
 		//Pre-select pull or push so it fires as the saber approaches the target. Pull when
 		//aggressive (PTK setup), push when defensive (break their guard). This runs after the
@@ -22419,7 +22466,9 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 	newbotai_saber_tactic_context_t context, newbotai_saber_family_t family)
 {
 	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
-	int sequence, total = 0, roll;
+	int sequence, selected, prior, learned;
+	const float fanBias = BotGetChanceBiasPercent(bot_fanbias.value);
+	const float aggression = BotGetAggressionBias(bs);
 	playerState_t *ps = &g_entities[bs->client].client->ps;
 	const int directionalEligible = context.closingKnown && context.currentDistance < 128.0f &&
 		ps->groundEntityNum != ENTITYNUM_NONE && !context.selfBlocked &&
@@ -22432,20 +22481,18 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 		weights[sequence] = 0;
 		if (!NewBotAI_SaberSequenceAllowed(context, sequence))
 			continue;
-		weights[sequence] = BotLearn_SaberSequenceWeight(sequence,
-			G_BotLearnSaberBonus(&g_entities[bs->client], bs->currentEnemy, sequence, bs->settings.skill));
-		weights[sequence] += BotLearn_SaberSequenceDirectionalPrior(sequence,
+		learned = G_BotLearnSaberBonus(&g_entities[bs->client], bs->currentEnemy, sequence, bs->settings.skill);
+		prior = BotLearn_SaberSequenceDirectionalPrior(sequence,
 			G_BotLearnDuelMode(&g_entities[bs->client]), ps->fd.saberAnimLevel,
 			bs->currentEnemy->client->ps.fd.saberAnimLevel, directionalEligible);
-		total += weights[sequence];
+		weights[sequence] = NewBotAI_DiscretionaryWeight(BotLearn_SaberSequenceWeight(sequence, 0),
+			NewBotAI_PreferenceBonus(prior, learned, fanBias, aggression, 0),
+			fanBias, aggression, 0);
 	}
-	roll = Q_irand(1, total);
-	for (sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; sequence++)
-	{
-		roll -= weights[sequence];
-		if (roll <= 0)
-			return (newbotai_saber_family_t)(NEWBOTAI_SABER_SEQUENCE_FIRST + sequence);
-	}
+	selected = NewBotAI_WeightedChoice(weights, BOTLEARN_SABER_SEQUENCE_COUNT,
+		context.skill, Q_irand(0, 999999));
+	if (selected >= 0)
+		return (newbotai_saber_family_t)(NEWBOTAI_SABER_SEQUENCE_FIRST + selected);
 	return family;
 }
 
@@ -22643,22 +22690,28 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 		(bs->saberTechniqueFamilyUntil != bs->saberTechniqueAcceptedTime &&
 		NewBotAI_SaberSequenceBoundary(context.chainLength))))
 	{
+		int learnedPreference;
+
 		bs->saberLearnedStimulus = context.enemyAttacking || context.enemyRecovering ?
 			BOTLEARN_TOK_SWING : BOTLEARN_TOK_IDLE;
 		bs->saberLearnedFollow = context.chainLength ? BOTLEARN_TOK_SWING : BOTLEARN_TOK_NONE;
-		bs->saberLearnedPreference = NewBotAI_SaberNeedsSafetyExit(context) ? 0 : Com_Clampi(-15, 15,
+		learnedPreference = NewBotAI_SaberNeedsSafetyExit(context) ? 0 :
 			G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy,
 				bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
-				bs->settings.skill));
-		bs->saberTechniqueFamily = NewBotAI_SelectSaberFamily(context,
-			bot_fanbias.value > 0.0f ? Com_Clampi(0, 100,
-				(int)BotGetChanceBiasPercent(bot_fanbias.value) + bs->saberLearnedPreference) : 0,
-			Q_irand(1, 100));
+				bs->settings.skill);
+		bs->saberLearnedPreference = bot_fanbias.value <= 0.0f ? 0 :
+			Com_Clampi(-15, 15, NewBotAI_PreferenceBonus(0, learnedPreference,
+				BotGetChanceBiasPercent(bot_fanbias.value), BotGetAggressionBias(bs), 0));
+		bs->saberTechniqueFamily = NewBotAI_WeightedSaberFamily(context,
+			(int)BotGetChanceBiasPercent(bot_fanbias.value), BotGetAggressionBias(bs),
+			learnedPreference, Q_irand(0, 999999));
 		bs->saberTechniqueFamily = NewBotAI_SelectSaberSequence(bs, context,
 			(newbotai_saber_family_t)bs->saberTechniqueFamily);
 		bs->saberTechniqueFamilyUntil = bs->saberTechniqueAcceptedTime;
 	}
 	tactic = NewBotAI_GetCorrectSaberTactic(context);
+	if (NewBotAI_SaberDefensiveReset(context, BotGetAggressionBias(bs)))
+		tactic = NEWBOTAI_SABER_TACTIC_RESET;
 	if (!NewBotAI_SaberNeedsSafetyExit(context) && !context.enemyAttacking &&
 		context.enemyRecovering && context.counterReady && bs->saberLearnedPreference > 0 &&
 		context.enemyDistance <= NEWBOTAI_SABER_SWING_START_MAX_RANGE)
