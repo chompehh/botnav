@@ -2379,6 +2379,190 @@ BOOST_AUTO_TEST_CASE( saber_throw_learned_preference_is_context_gated_and_not_du
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 800, 1, 0, 0, 1, 30, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( contextual_throw_completes_close_knockdown_despite_soft_recall )
+{
+	for (int soft = 0; soft <= 1; ++soft)
+	{
+		BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+			1000, 1, 0, 0, soft, 100, 35, 1, 1, -30 ) );
+		BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+			1100, 1, 0, 0, soft, 120, 35, 0, 1, -30 ) );
+	}
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1400, 1, 0, 0, 1, 100, 35, 1, 1, 30 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1000, 1, 0, 0, 1, 100, 20, 1, 1, 30 ) );
+	const int completion = NewBotAI_SaberThrowCompletionMs( 100, 35, 1, 1 );
+	BOOST_CHECK_EQUAL( completion, 1400 );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1300, 1, 0, 0, 1, 100, 35, 0, 0, -30, completion ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1300, 1, 0, 1, 1, 100, 35, 0, 0, 30, completion ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1300, 1, 0, 0, 1, 100, 20, 0, 0, 30, completion ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1500, 1, 0, 0, 1, 100, 35, 0, 0, 30, 999999 ) );
+}
+
+BOOST_AUTO_TEST_CASE( contextual_throw_budgets_follow_range_progress_and_force )
+{
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1600, 0, 1, 0, 1, 320, 40, 0, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1600, 0, 1, 0, 1, 180, 40, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
+		2200, 0, 0, 0, 1, 300, 60, 0, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
+		2400, 0, 0, 0, 0, 300, 60, 0, 0, 30 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
+		2200, 0, 0, 0, 0, 300, 35, 0, 0, 30 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1800, 1, 0, 0, 1, 160, 60, 0, 1, 8 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1800, 1, 0, 0, 1, 160, 60, 0, 0, 30 ) );
+}
+
+BOOST_AUTO_TEST_CASE( contextual_throw_extensions_never_shorten_legacy_protection )
+{
+	for (int level = 1; level <= 3; ++level)
+		for (int phase = NEWBOTAI_THROW_LAUNCH; phase <= NEWBOTAI_THROW_RECALL; ++phase)
+			for (int elapsed = 0; elapsed <= 2800; elapsed += 149)
+				for (int passed = 0; passed <= 1; ++passed)
+					for (int heading = 0; heading <= 1; ++heading)
+						for (int soft = 0; soft <= 1; ++soft)
+						{
+							const newbotai_throw_phase_t p = (newbotai_throw_phase_t)phase;
+							if (NewBotAI_SaberThrowWantsHold( level, p, elapsed, passed, heading,
+								0, soft, 0, 0 ))
+								BOOST_CHECK( NewBotAI_SaberThrowContextHold( level, p, elapsed, passed,
+									heading, 0, soft, 800, 10, 0, 0, -30 ) );
+						}
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_LAUNCH,
+		1400, 0, 1, 0, 1, 800, 10, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_LAUNCH,
+		1000, 0, 1, 0, 1, 600, 10, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_BYPASS,
+		1000, 1, 0, 0, 1, 600, 10, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		1600, 0, 1, 0, 1, 600, 40, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
+		1799, 1, 0, 0, 1, 800, 10, 0, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
+		1800, 1, 0, 0, 1, 800, 10, 0, 0, 30 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
+		2200, 1, 0, 0, 1, 800, 60, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 1500, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 1500 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 3, 2800 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 2, 2400 ) );
+}
+
+BOOST_AUTO_TEST_CASE( contextual_throw_never_overrides_hard_recalls )
+{
+	for (int level = 1; level <= 3; ++level)
+		for (int phase = NEWBOTAI_THROW_LAUNCH; phase <= NEWBOTAI_THROW_RECALL; ++phase)
+		{
+			const newbotai_throw_phase_t p = (newbotai_throw_phase_t)phase;
+			BOOST_CHECK( !NewBotAI_SaberThrowContextHold( level, p,
+				50, 0, 1, 1, 0, 100, 100, 1, 1, 30 ) );
+			BOOST_CHECK( !NewBotAI_SaberThrowContextHold( level, p,
+				-1, 0, 1, 0, 0, 100, 100, 1, 1, 30 ) );
+			BOOST_CHECK( !NewBotAI_SaberThrowContextHold( level, p,
+				2800, 0, 1, 0, 0, 100, 100, 1, 1, 30 ) );
+		}
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_RECALL,
+		50, 0, 1, 0, 0, 100, 100, 1, 1, 30 ) );
+}
+
+BOOST_AUTO_TEST_CASE( category_preferences_bound_learning_preserve_basics_and_direct_aggression )
+{
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, 30, 0, 1, 0 ) > 0 );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, 30, 0, 1, 0 ) <
+		NewBotAI_PreferenceBonus( 20, 30, 100, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 0, 20, 0, 0, 0 ) > 0 );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, 0, 0, 0, 0 ) > 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 20, 3000, 100, 0, 0 ),
+		NewBotAI_PreferenceBonus( 20, BOTLEARN_BONUS_CAP, 100, 0, 0 ) );
+	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, -3000, 100, 0, 0 ), -BOTLEARN_BONUS_CAP );
+	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, 3000, 100, 1, 0 ), BOTLEARN_BONUS_CAP );
+	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, -3000, 100, -1, 1 ), -BOTLEARN_BONUS_CAP );
+	BOOST_CHECK_EQUAL( NewBotAI_DiscretionaryWeight( 0, 100, 100, 1, 0 ), 0 );
+	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 0, -1, 0 ) > 0 );
+	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 100, 0, 0 ) >
+		NewBotAI_DiscretionaryWeight( 50, 0, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 100, -1, 0 ) <
+		NewBotAI_DiscretionaryWeight( 50, 0, 100, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 100, -1, 1 ) >
+		NewBotAI_DiscretionaryWeight( 50, 0, 100, 1, 1 ) );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, 20, 100, -1, 1 ) >
+		NewBotAI_PreferenceBonus( 20, 20, 100, -1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( credible_choices_favor_best_but_vary_even_at_ten_without_mistakes )
+{
+	const int scores[] = { 100, 90, 20, 0, -10 };
+	for (int skill = 1; skill <= 10; ++skill)
+	{
+		int counts[5] = { 0, 0, 0, 0, 0 };
+		for (int roll = 0; roll < 1000000; roll += 100)
+		{
+			const int selected = NewBotAI_WeightedChoice( scores, 5, skill, roll );
+			BOOST_REQUIRE( selected >= 0 && selected < 5 );
+			counts[selected]++;
+		}
+		BOOST_CHECK( counts[0] > counts[1] );
+		BOOST_CHECK( counts[1] > 0 );
+		BOOST_CHECK_EQUAL( counts[2] + counts[3] + counts[4], 0 );
+		if (skill >= 7)
+			BOOST_CHECK( counts[0] > 8500 );
+	}
+	const int none[] = { 0, -10 };
+	BOOST_CHECK_EQUAL( NewBotAI_WeightedChoice( none, 2, 10, 999999 ), -1 );
+	const int ties[] = { 100, 100 };
+	BOOST_CHECK_EQUAL( NewBotAI_WeightedChoice( ties, 2, 10, 0 ), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_WeightedChoice( ties, 2, 10, 999999 ), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( force_commitment_reuses_choice_but_invalidates_illegal_or_uncredible_actions )
+{
+	int scores[] = { 100, 90, 0 };
+	BOOST_CHECK( NewBotAI_ChoiceCommitted( 200, 750, 1, 1, scores, 3, 10 ) );
+	BOOST_CHECK( NewBotAI_ChoiceCommitted( 749, 750, 1, 1, scores, 3, 10 ) );
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 750, 750, 1, 1, scores, 3, 10 ) );
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 200, 750, 0, 1, scores, 3, 10 ) );
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 200, 750, 1, -1, scores, 3, 10 ) );
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 200, 750, 1, 2, scores, 3, 10 ) );
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 100, 1750, 1, 1, scores, 3, 10 ) );
+	scores[1] = 10;
+	BOOST_CHECK( !NewBotAI_ChoiceCommitted( 200, 750, 1, 1, scores, 3, 10 ) );
+}
+
+BOOST_AUTO_TEST_CASE( saber_family_variation_preserves_safety_and_zero_bias_basic )
+{
+	newbotai_saber_tactic_context_t context = {};
+	context.skill = 10;
+	context.saberCombat = 1;
+	context.ourTotalHealth = context.enemyTotalHealth = 100;
+	int horizontal = 0, basic = 0;
+	for (int roll = 0; roll < 1000000; roll += 100)
+	{
+		BOOST_CHECK_EQUAL( NewBotAI_WeightedSaberFamily( context, 0, 1, 30, roll ), NEWBOTAI_SABER_BASIC );
+		const int family = NewBotAI_WeightedSaberFamily( context, 50, 0, 0, roll );
+		horizontal += family == NEWBOTAI_SABER_HORIZONTAL;
+		basic += family == NEWBOTAI_SABER_BASIC;
+	}
+	BOOST_CHECK( horizontal > basic );
+	BOOST_CHECK( basic > 0 );
+	context.chainLength = 2;
+	BOOST_CHECK( NewBotAI_SaberDefensiveReset( context, -1 ) );
+	BOOST_CHECK( !NewBotAI_SaberDefensiveReset( context, 1 ) );
+	context.enemyVulnerable = 1;
+	BOOST_CHECK( !NewBotAI_SaberDefensiveReset( context, -1 ) );
+	context.enemyVulnerable = 0;
+	context.selfBlocked = 1;
+	BOOST_CHECK_EQUAL( NewBotAI_WeightedSaberFamily( context, 100, 1, 30, 999999 ), NEWBOTAI_SABER_BASIC );
+}
+
 BOOST_AUTO_TEST_CASE( saber_throw_detours_do_not_count_as_target_passes )
 {
 	BOOST_CHECK( !NewBotAI_SaberThrowMayMarkPass( NEWBOTAI_THROW_LAUNCH, 149, 149, 0 ) );
