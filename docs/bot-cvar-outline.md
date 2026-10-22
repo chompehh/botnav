@@ -133,7 +133,8 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafe_wallmargin` | `32` | Endpoint setback from walls for direct enemy corridors, units, clamped 0–128. Lower values allow closer approaches without shrinking the collision hull or disabling wall-slide prediction. |
 | `bot_strafe_tolerance` | `80` | Horizontal waypoint/recorded-node acceptance and landing-corridor tolerance, units, clamped 16–256. Nodes mark progress rather than requiring exact touchdown; grounded height and lateral checks prevent unrelated nodes being skipped. |
 | `bot_strafe_loosen` | `1` | `1` relaxes non-hazard strafe-jump checks so bots commit to chains: waypoint lookahead allows 64-unit rises per link and 96 units overall, a 96-unit minimum grounded corridor, a temporarily hidden current waypoint, step-ups onto stairs/ramps in the arc simulation, takeoff from and landing on solid brush entities, bumping players, and pauses (instead of aborting) a running chain during a roll. Navigation crouch is held off while a chain owns input and for 300 ms after strafe input at speed, so it cannot turn into a roll. Hazard, `trigger_hurt`, lava, slime, no-drop, fall-damage and route-endpoint checks are unchanged. `0` restores the strict limits (32/64-unit rises, 160-unit corridor, world-only contacts, roll aborts). Compare with `strafeJumpStats`. |
-| `bot_strafe_backward` | `50` | Percent of retreat strafe jumps (outside saber-only play) done backwards: the view faces back toward the enemy and the keys are mirrored (back plus the other strafe key), so the wish direction and speed are unchanged. Retreating bots in full-force/FFA play may also flee along recorded routes that end at least 128 units farther from the enemy. `0` disables it. |
+| `bot_strafes_backwards` | `1` | Boolean master switch for backwards strafe jumps during suitable combat retreats outside saber-only play. `0` disables them; `1` enables the existing retreat selection. The legacy percentage below still controls how often an eligible retreat uses backwards input, preserving existing configurations. |
+| `bot_strafe_backward` | `50` | Legacy percentage of eligible retreat strafe jumps done backwards when `bot_strafes_backwards` is enabled. The view faces back along the escape route and the keys are mirrored, preserving the wish direction; it does not independently lock aim onto the enemy. `0` disables backwards selection, `100` selects it for every eligible retreat. Retreating bots in full-force/FFA play may also flee along recorded routes that end at least 128 units farther from the enemy. |
 | `bot_footing` | `1` | Final movement smoother. When separate subsystems queue opposite forward/back or left/right moves within 150–250 ms (shorter for higher skill), the reversal becomes a stop until the hold has passed, and crouch/walk cannot be re-pressed within the same hold after release. Stopping is always immediate. Strafe-jump chains, flipkicks, gripkick, pullkick jumps, rolls, knockdowns and swing dodges are exempt. The drain/retreat lateral step now holds one trace-checked side for 1.2–2.4 s instead of flipping every 1.5 s. `0` disables. |
 | `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
@@ -171,6 +172,62 @@ The same query on the release attachment `strafetrack_inputs.1.csv` returns
 52,986 frames, 43,198 airborne, and 34,086 airborne releases. These are overlapping
 snapshots, not additive sample counts.
 
+The checked-in snapshots now include `strafetrack_inputs (1).csv` and
+`strafetrack_inputs (2).csv`. They contain 52,986 and 71,210 frames respectively;
+the base file is entirely contained in `(1)`, and `(1)` entirely in `(2)`.
+The newest snapshot contains 326 routes, 58,661 airborne frames and 46,401
+airborne jump releases. `strafetrack_routes (1).csv` and `(2).csv` are identical;
+do not combine their counts. Reproduce the overlap and movement examples with:
+
+```python
+import csv
+from pathlib import Path
+root = Path("/absolute/path/to/botnav")
+def load(name):
+    with (root / name).open(newline="") as source:
+        return list(csv.DictReader(source))
+names = ["strafetrack_inputs.csv", "strafetrack_inputs (1).csv",
+         "strafetrack_inputs (2).csv"]
+snapshots = [load(name) for name in names]
+sets = [{tuple(row.values()) for row in rows} for rows in snapshots]
+for name, rows in zip(names, snapshots):
+    air = [r for r in rows if r["grounded"] == "0"]
+    print(name, len(rows), len({r["route_id"] for r in rows}),
+          len(air), sum(int(r["upmove"]) < 10 for r in air))
+print("overlap:", len(sets[0] & sets[1]), len(sets[0] & sets[2]),
+      len(sets[1] & sets[2]))  # 20664, 20664, 52986
+print("same routes:", load("strafetrack_routes (1).csv") ==
+      load("strafetrack_routes (2).csv"))
+for route, frame in [("50", 129), ("124", 84), ("96", 53)]:
+    rows = [r for r in snapshots[-1] if r["route_id"] == route]
+    i = next(i for i, r in enumerate(rows) if int(r["frame"]) == frame)
+    r = rows[i]
+    future = [float(q["speed"]) for q in rows[i + 1:]
+              if 0 < int(q["time_ms"]) - int(r["time_ms"]) <= 1000]
+    print(route, frame, r["time_ms"], r["grounded"], r["yaw_delta"],
+          rows[i - 1]["speed"], r["speed"], rows[i + 1]["speed"],
+          max(future, default=0))
+nodes = load("strafetrack_nodes (1).csv")
+print("air_ms > 3000:", sum(int(n["air_ms"]) > 3000 for n in nodes),
+      "of", len(nodes))  # 153 of 1351
+print([(n["air_ms"], n["speed"]) for n in nodes
+       if n["route_id"] == "37" and n["node_index"] == "0"])
+```
+
+Examples from the newest input snapshot:
+- Route 50, frame 129 (4290 ms): airborne view yaw changes 62.13 degrees at
+  505.36 u/s; the next frame retains 501.64 u/s. View rotation is not travel
+  direction: this is evidence against treating every large view turn as an
+  unsafe route turn, not permission to remove landing safety.
+- Route 124, frame 84 (2805 ms): speed falls from 449.69 to 196.12 u/s, then
+  reaches 605.47 u/s within one second. Route 96, frame 53 (1782 ms) falls
+  from 425.07 to 48.17 u/s and recovers to 452.52 u/s within one second.
+  These support a recovery window rather than immediate slowdown failure.
+  The CSV has no collision normals/entities, so neither event proves a wall hit.
+- Route 37, node 0 records 8811 ms between start and landing at 547.00 u/s.
+  Long recorded intervals need human-timing-aware timeouts rather than a fixed
+  three-second limit. These intervals alone do not prove uninterrupted free flight.
+
 This supports releasing jump during flight rather than always spending a
 grounded command on release. It does not by itself show why a particular bot
 aborted. Compare `strafeJumpStats reset` / `strafeJumpStats` and fresh recordings
@@ -181,13 +238,24 @@ walls, lethal volumes, low ceilings, moving blockers, and required interactions.
 Walls: the takeoff arc uses the real 15-unit player hull and removes speed into
 walls while continuing bounded wall-slide simulation (up to 64 contact slices).
 Brief speed losses near ground speed no longer immediately discard an established
-chain; a substantial slowdown releases it to ordinary navigation. Predicted
-wall stops still require useful flight and a safe landing. Lava, slime, no-drop
-and `trigger_hurt`/kill checks are unchanged.
+chain: slowdown must persist for one second before recovery or release. Loosened
+recorded routes may rebuild speed after a safe landing while node progress remains
+within its timeout. Recoverable predicted contacts continue acceleration and
+wall-slide simulation rather than requiring a collision-free hop. A safe landing
+is still required; lava, slime, no-drop and `trigger_hurt`/kill checks are unchanged.
 
 Initiation ignores queued navigation jump/delayed-jump/walk requests (the controller supplies its own jump timing once it owns input).
 
 `strafeJumpStats [reset]` (server console) prints how often bots started, took off, followed recorded routes, aborted and were released by a wall/slow-down, plus the most frequent rejection reasons since the last reset. Rejection reasons are only tallied after the command has been run once (or while `bot_strafejumps_debug` is on), so run `strafeJumpStats reset`, play, then `strafeJumpStats` to compare wall rejections before and after tuning.
+
+It also reports recorded completions, stalls, interruptions, blocked takeoffs,
+and circle approaches started/reached. Compare these with takeoffs per route
+start and retained speed, rather than treating every rejected frame as a failed
+route. Live map acceptance still requires an in-game run: approach a human start
+past a nearer jump/duck waypoint, complete and chain routes, bump an ordinary wall,
+then repeat near lethal terrain and required doors/lifts. Confirm ordinary
+navigation resumes when no reachable start or continuation exists, and compare
+retreat view/input with `bot_strafes_backwards` set to `0` and `1`.
 
 Movement references: [OpenJK](https://github.com/JACoders/OpenJK) maintains the
 Jedi Academy engine, derived from the Quake III/id Tech 3 family.
@@ -249,7 +317,22 @@ strafejump_route
 }
 ```
 
-A grounded bot picks up a recorded route when it is within 96 units horizontally and 64 vertically of `start_pos`, the first landing is ahead of its movement, and the last landing is closer to its current goal than it is. Recorded routes take precedence over single-jump hints and the waypoint corridor; waypoints stay the fallback. While on a route, each landing node is the bot's movement goal, the recorded strafe key chooses its strafe side, and the strafe frequency wait is skipped. Every takeoff still passes the arc, landing and hazard checks. The bot leaves the route and goes back to waypoints when the route is finished, a landing is not reached within 3 s, a jump is aborted or slowed to ground speed, or a visible enemy is within close-combat range (~384 units, unless carrying a flag).
+A grounded bot searches for human circle-jump starts within 768 horizontal units
+and 64 vertical units, independently of its legacy waypoint heading or the
+distance to the current waypoint. The approach must pass swept clearance,
+footing and hazard checks; a recording is not permission to walk across a gap.
+The bot walks to within 48 units of the chosen start before beginning its jump
+sequence. A blocked approach or one lasting over five seconds falls back to
+ordinary navigation. Nearby mid-route pickups remain available as described below.
+
+Recorded routes take precedence over single-jump hints and waypoint corridors.
+During approach and chaining, incidental waypoint jump/duck flags and navigation
+input cannot redirect the bot; nearby required mover interactions, deliberate
+use, combat and hard engine-forced states still take priority. While on a route,
+each landing node is the movement goal and the strafe frequency wait is skipped.
+Every takeoff still passes landing and hazard checks. Finishing without a
+continuation, a sustained stall, a node timeout, or an overriding interaction
+returns control to ordinary navigation.
 
 With `bot_strafe_loosen 1` (default) recorded routes allow for frame-rate differences between the human and the bot:
 - a landing counts as reached within 30% of the hop length (at least 80 and at least `bot_strafe_tolerance`, at most 256 units), or once the bot passes the landing's perpendicular plane within that width;
@@ -262,7 +345,19 @@ The route endpoint stays strict: a landing may never pass the last recorded land
 
 Route choice and chaining:
 - When several routes can be joined, the bot takes the highest score: remaining route length x average recorded speed (0.5-2.5 x 400 u/s) x bot success x nearness of the entry. Bot success is `0.25 + 1.5 x (completions + 1) / (attempts + 2)`, so an untried route counts as 50% and routes bots keep failing sink below it. Long, fast routes that bots have finished win over short ones.
-- Bot attempts and completions per route are kept in `botroutes/<map>.botroute_stats` (one line per route: start x y z, last landing x y z, attempts, completions), matched by start and last landing, so re-exports keep the history. Joining mid-route or chaining in counts as an attempt too. The file is written when routes are reloaded and at map end/shutdown.
+- Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by start
+  and last landing so re-exports retain history. The versioned format begins with
+  `botroute_stats 2`; each route stores start x/y/z, last landing x/y/z,
+  attempts, completions, stalls, interruptions, measured distance, duration in
+  milliseconds, speed integral and reference-speed integral. Legacy eight-field
+  rows remain readable. Joining mid-route or chaining in counts as an attempt.
+  Interrupted attempts are excluded from the completion-rate denominator.
+  Approach walking is excluded from the measured distance, duration and speed
+  integrals; measurement begins at the circle start.
+  Measured travel speed and retention relative to recorded speed influence
+  selection; unmeasured history stays neutral. Occasional exploration favors
+  less-tried routes, and an unsuccessful route has a five-second per-bot retry
+  delay. The file is written when routes are reloaded and at map end/shutdown.
 - When a route ends, the bot immediately joins another route whose entry is within 256 units of its landing, heads the same way as the last hop and ends closer to its goal. Short routes therefore link into longer runs. Only when none fits does it return to waypoints.
 
 ### Waypoint navigation

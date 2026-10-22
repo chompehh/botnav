@@ -5,6 +5,12 @@
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
+#define BOT_SFJ_TRACK_APPROACH_RADIUS 768.0f
+#define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
+#define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 5000
+#define BOT_SFJ_TRACK_RETRY_MS 5000
+#define BOT_SFJ_MAX_TRACK_ROUTES 128
+#define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
 #define BOT_SFJ_PURSUIT_STOP_DISTANCE 384.0f
 #define BOT_SFJ_PURSUIT_START_RATE 80.0f
@@ -24,6 +30,103 @@ static inline float BotSFJ_ClampSetting(float value, float minimum, float maximu
 static inline int BotSFJ_HeightAllows(float delta, float maxRise, float maxDrop)
 {
 	return isfinite(delta) && delta <= maxRise && delta >= -maxDrop;
+}
+
+static inline int BotSFJ_TrackEntryAllows(float distance, float height,
+	int circleStart, float pickupRadius)
+{
+	return isfinite(distance) && distance >= 0.0f && isfinite(height) &&
+		fabsf(height) <= (circleStart ? 64.0f : 96.0f) &&
+		distance <= (circleStart ? BOT_SFJ_TRACK_APPROACH_RADIUS : pickupRadius);
+}
+
+static inline int BotSFJ_TrackIgnoresNavigation(int route, int requiredInteraction)
+{
+	return route > 0 && !requiredInteraction;
+}
+
+static inline const char *BotSFJ_SkipStatsRecordWhitespace(const char *text)
+{
+	while (text && *text && (unsigned char)*text <= ' ')
+		text++;
+	return text;
+}
+
+static inline void BotSFJ_ClearTrackRetries(int *retryUntil)
+{
+	int i;
+
+	for (i = 0; i < BOT_SFJ_MAX_TRACK_ROUTES; i++)
+		retryUntil[i] = 0;
+}
+
+static inline void BotSFJ_DelayTrackRetry(int route, int *retryUntil, int now)
+{
+	if (route >= 0 && route < BOT_SFJ_MAX_TRACK_ROUTES)
+		retryUntil[route] = now + BOT_SFJ_TRACK_RETRY_MS;
+}
+
+static inline int BotSFJ_TrackRetryAllows(int route, const int *retryUntil, int now)
+{
+	return route >= 0 && route < BOT_SFJ_MAX_TRACK_ROUTES && now >= retryUntil[route];
+}
+
+static inline int BotSFJ_TrackRecoveryAllows(int loosen, int route, int grounded,
+	int nodeElapsedMs, int nodeTimeoutMs)
+{
+	return loosen && route > 0 && grounded &&
+		nodeElapsedMs >= 0 && nodeElapsedMs < nodeTimeoutMs;
+}
+
+static inline int BotSFJ_TrackSampleAllows(int elapsedMs, float distance, float speed)
+{
+	return elapsedMs > 0 && elapsedMs <= 1000 && isfinite(distance) &&
+		distance >= 0.0f && isfinite(speed) && speed >= 0.0f &&
+		distance <= (speed + 400.0f) * (float)elapsedMs / 1000.0f + 64.0f;
+}
+
+static inline int BotSFJ_TrackMeasuredDuration(int approaching, int started, int now)
+{
+	return !approaching && now > started ? now - started : 0;
+}
+
+static inline int BotSFJ_TrackBlockedFailure(int arcSafe, int traceBlocked)
+{
+	return !arcSafe && traceBlocked;
+}
+
+static inline int BotSFJ_RollPauseAllows(int loosen, int rolling, int running,
+	int hardConflict, int elapsedMs)
+{
+	return loosen && rolling && running && !hardConflict &&
+		elapsedMs >= 0 && elapsedMs <= BOT_SFJ_ROLL_PAUSE_MAX_MS;
+}
+
+static inline int BotSFJ_TrackResolvedAttempts(int attempts, int completions, int interrupted)
+{
+	if (interrupted > 0)
+		attempts -= interrupted;
+	return attempts > completions ? attempts : completions;
+}
+
+/* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
+static inline float BotSFJ_TrackPerformance(float distance, float durationMs,
+	float speedIntegral, float referenceIntegral)
+{
+	float speed, retention;
+
+	if (!(distance > 0.0f) || !(durationMs > 0.0f) ||
+		!isfinite(distance) || !isfinite(durationMs))
+		return 1.0f;
+	speed = BotSFJ_ClampSetting(distance * 1000.0f / durationMs / 400.0f, 0.25f, 2.5f);
+	retention = referenceIntegral > 0.0f ?
+		BotSFJ_ClampSetting(speedIntegral / referenceIntegral, 0.25f, 1.5f) : 1.0f;
+	return sqrtf(speed * retention);
+}
+
+static inline int BotSFJ_BackwardPercent(int enabled, int legacyPercent)
+{
+	return enabled ? (int)BotSFJ_ClampSetting((float)legacyPercent, 0.0f, 100.0f) : 0;
 }
 
 /* A landing node is a progress marker, not an exact touchdown requirement. */
@@ -76,9 +179,21 @@ static inline int BotSFJ_TrackNodeTimeout(int configuredMs, int recordedAirMs, i
 {
 	int t = configuredMs;
 
-	if (loosen && recordedAirMs > 0 && recordedAirMs * 2 + 1500 > t)
-		t = recordedAirMs * 2 + 1500;
+	if (loosen && recordedAirMs > 0)
+	{
+		const int recordedTimeout = recordedAirMs >= 6750 ? 15000 : recordedAirMs * 2 + 1500;
+		if (recordedTimeout > t)
+			t = recordedTimeout;
+	}
 	return t > 15000 ? 15000 : t;
+}
+
+static inline int BotSFJ_TrackAirTimeout(int route, int configuredMs, int recordedAirMs, int loosen)
+{
+	const int timeout = route && loosen ?
+		BotSFJ_TrackNodeTimeout(configuredMs, recordedAirMs, loosen) : 1500;
+
+	return timeout < 1500 ? 1500 : timeout;
 }
 
 /* Horizontal distance squared from origin to node. */
@@ -695,10 +810,10 @@ static inline int BotSFJ_ChainLandingAllows(int chainRunning, int strictAllows,
 }
 
 /*
- * A brief wall scrape drops speed below ground speed for a frame or two. Keep the
- * chain for a short grace period and only release once it stays slowed out.
+ * Give recoverable speed losses a full second before releasing ownership.
+ * Speed telemetry alone does not establish that the loss came from a wall.
  */
-#define BOT_SFJ_WALL_SCRAPE_GRACE_MS 200
+#define BOT_SFJ_WALL_SCRAPE_GRACE_MS 1000
 
 static inline int BotSFJ_SlowedOutShouldRelease(int slowedOut, int slowedSince, int now)
 {
@@ -734,6 +849,12 @@ static inline int BotSFJ_GroundCrouchAllowed(int grounded, float horizontalSpeed
 #define BOT_SFJ_MAX_WALL_CONTACTS 64
 /* A jump a wall slows out sooner than this is not worth starting. */
 #define BOT_SFJ_MIN_USEFUL_FLIGHT_S 0.3f
+
+/* Called only after hazard, lethal-fall, walkable-landing and endpoint checks. */
+static inline int BotSFJ_WallSlowdownLandingAllows(int loosen, float slowedAt)
+{
+	return loosen || slowedAt >= BOT_SFJ_MIN_USEFUL_FLIGHT_S;
+}
 
 static inline int BotSFJ_WallContactKeepsStrafe(float speedAfterContact, float groundSpeed)
 {
