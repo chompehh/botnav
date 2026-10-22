@@ -262,7 +262,7 @@ The route endpoint stays strict: a landing may never pass the last recorded land
 
 Route choice and chaining:
 - When several routes can be joined, the bot takes the highest score: remaining route length x average recorded speed (0.5-2.5 x 400 u/s) x bot success x nearness of the entry. Bot success is `0.25 + 1.5 x (completions + 1) / (attempts + 2)`, so an untried route counts as 50% and routes bots keep failing sink below it. Long, fast routes that bots have finished win over short ones.
-- Bot attempts and completions per route are kept in `botroutes/<map>.botroute_stats` (one line per route: start x y z, last landing x y z, attempts, completions), matched by start and last landing, so re-exports keep the history. The file is written when routes are reloaded and at map end/shutdown.
+- Bot attempts and completions per route are kept in `botroutes/<map>.botroute_stats` (one line per route: start x y z, last landing x y z, attempts, completions), matched by start and last landing, so re-exports keep the history. Joining mid-route or chaining in counts as an attempt too. The file is written when routes are reloaded and at map end/shutdown.
 - When a route ends, the bot immediately joins another route whose entry is within 256 units of its landing, heads the same way as the last hop and ends closer to its goal. Short routes therefore link into longer runs. Only when none fits does it return to waypoints.
 
 ### Waypoint navigation
@@ -491,9 +491,8 @@ server game module. Clients that ship their own UI module and menus (for example
 the base Android client) never load these menus, so the Profile button can be
 missing there. As a fallback, `/ui_openprofile` (TaystJK UI) or
 `/ui_openmenu ingame_player` opens the profile menu directly, and players in
-Arcade, JvM and JoM are told about it when they join. A
-A
-server-only update cannot replace menus on an independently installed Android
+Arcade, JvM and JoM are told about it when they join.
+A server-only update cannot replace menus on an independently installed Android
 client. The refresh guards against stale state; it does not prove that stale
 state, rather than an overriding client asset, caused a particular screenshot.
 
