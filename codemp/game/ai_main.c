@@ -3089,7 +3089,9 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 		BOT_SFJ_HARD("jump level restricted");
 	if (ps->pm_flags & (PMF_TIME_WATERJUMP | PMF_STUCK_TO_WALL | PMF_RESPAWNED))
 		BOT_SFJ_HARD("waterjump/wall-stuck/respawn flags");
-	if (BG_InKnockDown(ps->legsAnim) || BG_InRoll(ps, ps->legsAnim))
+	if (BG_InKnockDown(ps->legsAnim))
+		BOT_SFJ_HARD("knockdown");
+	if (BG_InRoll(ps, ps->legsAnim) && !bot_strafe_loosen.integer)
 		BOT_SFJ_HARD("knockdown or roll");
 	if (BG_InSpecialJump(ps->legsAnim) || BG_InReboundJump(ps->legsAnim))
 		BOT_SFJ_HARD("special/rebound jump anim");
@@ -3123,6 +3125,9 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 		client->pers.cmd.buttons & BUTTON_USE, bs->sfjLastRandomUse))
 		BOT_SFJ_HARD("queued use");
 
+	/* A roll (usually from a navigation crouch) pauses a running chain instead of ending it. */
+	if (BG_InRoll(ps, ps->legsAnim))
+		BOT_SFJ_SOFT("roll in progress (pausing strafe)");
 	if (bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK))
 		BOT_SFJ_SOFT("queued attack");
 	if (bi->actionflags & (softActions & ~(ACTION_ATTACK | ACTION_ALT_ATTACK)))
@@ -3444,9 +3449,11 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	int count;
 	int pointCount = 1;
 
+	/* Loosened: a momentarily hidden waypoint is fine, the segment sweep still has to clear. */
 	if (!bs || !bs->wpCurrent || bs->doingFallback ||
 		bs->wpCurrent->index < 0 || bs->wpCurrent->index >= gWPNum ||
-		(!bs->frame_Waypoint_Vis && !(bs->wpCurrent->flags & WPFLAG_NOVIS)))
+		(!bs->frame_Waypoint_Vis && !(bs->wpCurrent->flags & WPFLAG_NOVIS) &&
+			!bot_strafe_loosen.integer))
 		return qfalse;
 	step = bs->wpDirection ? -1 : 1;
 	if (bs->wpDestination &&
@@ -3481,10 +3488,11 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 		{
 			if (!BotSFJ_WaypointsLinked(previous, index) ||
 				!BotSFJ_HeightAllows(wp->origin[2] - previous->origin[2],
-					32.0f, BotSFJ_MaxDrop()))
+					BotSFJ_CorridorLinkRise(bot_strafe_loosen.integer), BotSFJ_MaxDrop()))
 				break;
 		}
-		if (!BotSFJ_HeightAllows(wp->origin[2] - baseZ, 64.0f, BotSFJ_MaxDrop()))
+		if (!BotSFJ_HeightAllows(wp->origin[2] - baseZ,
+				BotSFJ_CorridorBaseRise(bot_strafe_loosen.integer), BotSFJ_MaxDrop()))
 			break;
 		if (!previous && bs->sfjCorridorForwardGoal && bs->sfjOwnsInput &&
 			BotSFJ_IntentIsFresh(level.time, bs->sfjIntentTime) &&
@@ -3555,7 +3563,7 @@ static qboolean BotSFJ_GetOpenCorridor(bot_state_t *bs, vec3_t direction, vec3_t
 	if (!reachedEnd && count == waypointBudget)
 		BotSFJ_DebugReject(bs, "corridor density budget exhausted (bot_strafejumpwaypoints)");
 	if (!previous || !haveDirection ||
-		total < (grounded ? BOT_SFJ_CORRIDOR_MIN_LENGTH : 64.0f))
+		total < BotSFJ_CorridorMinLength(bot_strafe_loosen.integer, grounded))
 		return qfalse;
 	if (!haveSteer)
 		VectorCopy(lastPoint, steerPoint);
@@ -4330,6 +4338,49 @@ static qboolean BotSFJ_GetCommandTiming(const playerState_t *ps, int commandTime
 	return qtrue;
 }
 
+static qboolean BotSFJ_ArcEntityOk(int entityNum, qboolean landing)
+{
+	return BotSFJ_ArcEntityAllows(entityNum == ENTITYNUM_WORLD,
+		entityNum >= 0 && entityNum < MAX_CLIENTS, landing,
+		bot_strafe_loosen.integer && entityNum >= 0 && entityNum < ENTITYNUM_MAX_NORMAL) ?
+		qtrue : qfalse;
+}
+
+/*
+ * Stairs and ramp lips stop a straight hull sweep. Like PM_StepSlideMove, try
+ * the blocked move one STEPSIZE higher and settle onto walkable floor. Only a
+ * hazard-free, walkable landing is returned.
+ */
+static qboolean BotSFJ_ArcStepUp(bot_state_t *bs, const vec3_t from, const vec3_t to,
+	const vec3_t mins, const vec3_t maxs, int mask, trace_t *out)
+{
+	vec3_t up, ahead, down;
+	trace_t trace;
+	const int hazards = CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP;
+
+	VectorCopy(from, up);
+	up[2] += STEPSIZE;
+	JP_Trace(&trace, (float *)from, (float *)mins, (float *)maxs, up, bs->client, mask, qfalse, 0, 0);
+	if (trace.startsolid || trace.allsolid || trace.fraction < 1.0f)
+		return qfalse;
+	VectorCopy(to, ahead);
+	ahead[2] = up[2] + (to[2] > from[2] ? to[2] - from[2] : 0.0f);
+	JP_Trace(&trace, up, (float *)mins, (float *)maxs, ahead, bs->client, mask, qfalse, 0, 0);
+	if (trace.startsolid || trace.allsolid || trace.fraction < 1.0f ||
+		BotSFJ_TriggerAlongSegment(bs, up, ahead))
+		return qfalse;
+	VectorCopy(ahead, down);
+	down[2] -= STEPSIZE * 2.0f;
+	JP_Trace(&trace, ahead, (float *)mins, (float *)maxs, down, bs->client, mask, qfalse, 0, 0);
+	if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f ||
+		trace.plane.normal[2] < 0.7f || (trace.contents & hazards) ||
+		(trap->PointContents(trace.endpos, bs->client) & hazards) ||
+		!BotSFJ_ArcEntityOk(trace.entityNum, qtrue))
+		return qfalse;
+	*out = trace;
+	return qtrue;
+}
+
 static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	const vec3_t routeDirection, const vec3_t routeDestination,
 	int commandMsec, int sliceMsec)
@@ -4375,14 +4426,14 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	{
 		vec3_t groundEnd;
 
-		if (ps->groundEntityNum != ENTITYNUM_WORLD)
+		if (!BotSFJ_ArcEntityOk(ps->groundEntityNum, qtrue))
 			return qfalse;
 		VectorCopy(position, groundEnd);
 		groundEnd[2] -= 4.0f;
 		JP_Trace(&trace, position, playerMins, playerMaxs, groundEnd,
 			bs->client, traceMask, qfalse, 0, 0);
 		if (trace.startsolid || trace.allsolid || trace.fraction >= 1.0f ||
-			trace.entityNum != ENTITYNUM_WORLD || trace.plane.normal[2] < 0.7f)
+			!BotSFJ_ArcEntityOk(trace.entityNum, qtrue) || trace.plane.normal[2] < 0.7f)
 			return qfalse;
 		velocity[2] = BOT_SFJ_JUMP_VELOCITY;
 		forceEligible = ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 &&
@@ -4487,7 +4538,7 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 				(!launched || elapsed + stepSeconds >= 0.25f) &&
 				trace.plane.normal[2] >= 0.7f &&
 				!(trace.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)) &&
-				trace.entityNum == ENTITYNUM_WORLD)
+				BotSFJ_ArcEntityOk(trace.entityNum, qtrue))
 			{
 				const float impactSpeed = BotNav_ImpactSpeed(previousVertical,
 					gravity, position[2] - trace.endpos[2]);
@@ -4502,8 +4553,34 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 				predictedLanding = qtrue;
 				break;
 			}
+			if (bot_strafe_loosen.integer && velocity[2] <= 0.0f &&
+				(!launched || elapsed + stepSeconds >= 0.25f) &&
+				trace.plane.normal[2] < 0.7f &&
+				!(trace.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)))
+			{
+				trace_t stepTrace;
+
+				if (BotSFJ_ArcStepUp(bs, position, next, playerMins, playerMaxs,
+					traceMask, &stepTrace))
+				{
+					/* Stepping onto a stair or ramp lip: a short rise, so no fall damage beyond the arc's. */
+					const float drop = position[2] - stepTrace.endpos[2];
+					const int damage = BotNav_LandingDamage(bs, ps, &stepTrace,
+						BotNav_ImpactSpeed(previousVertical, gravity, drop > 0.0f ? drop : 0.0f),
+						launched ? launchStartZ : ps->fd.forceJumpZStart);
+
+					if (stepTrace.endpos[2] - launchStartZ > 256.0f ||
+						!BotNav_LandingAllows(1, 0, stepTrace.plane.normal[2], 0, damage,
+							g_entities[bs->client].health))
+						return qfalse;
+					trace = stepTrace;
+					VectorCopy(trace.endpos, position);
+					predictedLanding = qtrue;
+					break;
+				}
+			}
 			if (wallContacts < BOT_SFJ_MAX_WALL_CONTACTS &&
-				trace.entityNum == ENTITYNUM_WORLD &&
+				BotSFJ_ArcEntityOk(trace.entityNum, qfalse) &&
 				!(trace.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)) &&
 				trace.plane.normal[2] < 0.7f && trace.plane.normal[2] >= -0.1f)
 			{
@@ -4539,7 +4616,7 @@ static qboolean BotSFJ_ArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 			}
 			return qfalse;
 		}
-		if (trace.entityNum != ENTITYNUM_NONE && trace.entityNum != ENTITYNUM_WORLD)
+		if (trace.entityNum != ENTITYNUM_NONE && !BotSFJ_ArcEntityOk(trace.entityNum, qfalse))
 			return qfalse;
 		contents = trap->PointContents(next, bs->client);
 		if (contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP))
@@ -4662,10 +4739,17 @@ static qboolean BotSFJ_CirclePreparationIsSafe(bot_state_t *bs,
 static qboolean BotNav_GroundCrouchAllowed(bot_state_t *bs)
 {
 	const playerState_t *ps = &bs->cur_ps;
+	const float speed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
 
+	/* Crouching mid-chain (or landing ducked at speed) turns into a roll and ends the strafe. */
+	if (BotSFJ_PhaseInProgress(bs->sfjPhase) ||
+		(bs->sfjOwnsInput && bs->sfjSafetyUntil >= level.time) ||
+		(bs->sfjPhaseTime > 0 && level.time - bs->sfjPhaseTime < BOT_SFJ_POST_LAND_NO_CROUCH_MS &&
+			speed > (float)ps->speed * 0.9f) ||
+		(ps->groundEntityNum == ENTITYNUM_NONE && speed > (float)ps->speed * 0.9f))
+		return qfalse;
 	return BotSFJ_GroundCrouchAllowed(ps->groundEntityNum != ENTITYNUM_NONE,
-		sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]),
-		(float)ps->speed, 0) ? qtrue : qfalse;
+		speed, (float)ps->speed, 0) ? qtrue : qfalse;
 }
 
 /* A previous hop's intent is not proof that walking input may cross this gap. */

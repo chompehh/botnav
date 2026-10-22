@@ -369,6 +369,7 @@ XCVAR_DEF( bot_strafetrack,			"1",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( bot_strafe_minledge, "200", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_wallmargin, "32", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_tolerance, "80", NULL, CVAR_ARCHIVE, qtrue )
+XCVAR_DEF( bot_strafe_loosen, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_nodetimeout, "5000", NULL, CVAR_ARCHIVE, qtrue )
 // 1: print why strafe-jump attempts are rejected (rate limited per bot).
 XCVAR_DEF( bot_strafejumps_debug,		"0",			NULL,				0,												qfalse )

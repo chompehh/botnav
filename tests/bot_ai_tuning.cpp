@@ -2660,6 +2660,30 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( strafe_loosen_limits )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorLinkRise( 0 ), 32.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorLinkRise( 1 ), 64.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorBaseRise( 0 ), 64.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorBaseRise( 1 ), 96.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorMinLength( 0, 1 ), 160.0f );
+	BOOST_CHECK_LT( BotSFJ_CorridorMinLength( 1, 1 ), 160.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CorridorMinLength( 1, 0 ), BotSFJ_CorridorMinLength( 0, 0 ) );
+
+	// world is always acceptable
+	BOOST_CHECK( BotSFJ_ArcEntityAllows( 1, 0, 1, 0 ) );
+	// legacy: any non-world contact fails
+	BOOST_CHECK( !BotSFJ_ArcEntityAllows( 0, 0, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_ArcEntityAllows( 0, 1, 0, 0 ) );
+	// loosened: brush entities can be landed on, players only bumped
+	BOOST_CHECK( BotSFJ_ArcEntityAllows( 0, 0, 1, 1 ) );
+	BOOST_CHECK( !BotSFJ_ArcEntityAllows( 0, 1, 1, 1 ) );
+	BOOST_CHECK( BotSFJ_ArcEntityAllows( 0, 1, 0, 1 ) );
+
+	// endpoint stays strict even when loosened
+	BOOST_CHECK( !BotSFJ_EndpointAllows( 0, 0, 100, 0, 130, 0, 0 ) );
+}
+
 BOOST_AUTO_TEST_CASE( waypoint_skip_goal_helpers )
 {
 	BOOST_CHECK_EQUAL( BotNav_WaypointSkipCap( -3 ), 0 );

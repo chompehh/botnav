@@ -381,6 +381,39 @@ static inline int BotSFJ_AdvanceCurveLinkAllows(int requiredFlags, int linked,
 		alignment >= 0.5f && endpointProgress >= 0.0f;
 }
 
+/*
+ * bot_strafe_loosen relaxes obstruction checks that rejected most strafe jumps
+ * on stairs, ramps, dense waypoint triangles and brush entities.  Hazard,
+ * fall-damage and route-endpoint checks are never relaxed.
+ */
+static inline float BotSFJ_CorridorLinkRise(int loosen)
+{
+	return loosen ? 64.0f : 32.0f;
+}
+
+static inline float BotSFJ_CorridorBaseRise(int loosen)
+{
+	return loosen ? 96.0f : 64.0f;
+}
+
+static inline float BotSFJ_CorridorMinLength(int loosen, int grounded)
+{
+	if (!grounded)
+		return 64.0f;
+	return loosen ? 96.0f : 160.0f;
+}
+
+/* Whether an arc contact with an entity may count as a landing or a wall slide. */
+static inline int BotSFJ_ArcEntityAllows(int isWorld, int isClient, int landing, int loosen)
+{
+	if (isWorld)
+		return 1;
+	if (!loosen)
+		return 0;
+	/* Brush entities can be landed on; players are only bumped into. */
+	return landing ? !isClient : 1;
+}
+
 static inline int BotSFJ_EndpointAllows(float startX, float startY,
 	float endX, float endY, float landingX, float landingY, float endTolerance)
 {
@@ -614,6 +647,9 @@ static inline int BotSFJ_SlowedOutShouldRelease(int slowedOut, int slowedSince, 
  * combat-hop crouches are skipped while grounded above ground speed; deliberate
  * roll escapes pass allowRoll.
  */
+/* Navigation crouch is held off this long after strafe input while still fast. */
+#define BOT_SFJ_POST_LAND_NO_CROUCH_MS 300
+
 static inline int BotSFJ_GroundCrouchAllowed(int grounded, float horizontalSpeed,
 	float groundSpeed, int allowRoll)
 {
