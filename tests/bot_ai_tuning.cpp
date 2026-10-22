@@ -2660,6 +2660,38 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( footing_smoother )
+{
+	int sign = 0, since = 0, active = 0, rev = 0;
+	int held = 0, released = 0;
+
+	BOOST_CHECK_EQUAL( BotFooting_HoldMs( 1 ), BOT_FOOTING_HOLD_MAX_MS );
+	BOOST_CHECK_EQUAL( BotFooting_HoldMs( 5 ), BOT_FOOTING_HOLD_MIN_MS );
+	BOOST_CHECK_EQUAL( BotFooting_HoldMs( 99 ), BOT_FOOTING_HOLD_MIN_MS );
+
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( 127, &sign, &since, &active, 1000, 200, &rev ), 127 );
+	BOOST_CHECK( !rev );
+	// quick reversal becomes a stop
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( -127, &sign, &since, &active, 1050, 200, &rev ), 0 );
+	BOOST_CHECK( rev );
+	// reversal through a zero frame is still deferred
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( 0, &sign, &since, &active, 1080, 200, &rev ), 0 );
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( -127, &sign, &since, &active, 1100, 200, &rev ), 0 );
+	// same direction keeps going
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( 100, &sign, &since, &active, 1120, 200, &rev ), 100 );
+	// after the hold, reversal is allowed
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( -127, &sign, &since, &active, 1210, 200, &rev ), -127 );
+	BOOST_CHECK( !rev );
+	// long idle forgets the direction
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( 0, &sign, &since, &active, 1500, 200, &rev ), 0 );
+	BOOST_CHECK_EQUAL( BotFooting_FilterAxis( 127, &sign, &since, &active, 1510, 200, &rev ), 127 );
+
+	BOOST_CHECK( BotFooting_FilterButton( 1, &held, &released, 0, 200 ) );
+	BOOST_CHECK( !BotFooting_FilterButton( 0, &held, &released, 50, 200 ) );
+	BOOST_CHECK( !BotFooting_FilterButton( 1, &held, &released, 100, 200 ) );
+	BOOST_CHECK( BotFooting_FilterButton( 1, &held, &released, 260, 200 ) );
+}
+
 BOOST_AUTO_TEST_CASE( strafe_loosen_limits )
 {
 	BOOST_CHECK_EQUAL( BotSFJ_CorridorLinkRise( 0 ), 32.0f );

@@ -966,6 +966,72 @@ qboolean BotInputToUserCommand(bot_input_t *bi, usercmd_t *ucmd, int delta_angle
 
 /*
 ==============
+BotFooting_Apply
+
+Final movement smoothing: several subsystems can queue opposite moves within a few
+frames, which reads as leg twitching. Defer axis reversals and button re-presses for a
+short skill-scaled hold. Frame-accurate techniques are exempt.
+==============
+*/
+static void BotFooting_Apply(bot_state_t *bs, usercmd_t *ucmd, int time)
+{
+	const playerState_t *ps = &bs->cur_ps;
+	const int holdMs = BotFooting_HoldMs((int)bs->settings.skill);
+	int reversedF = 0, reversedR = 0;
+	int crouch, walk;
+	qboolean exempt;
+
+	exempt = (!bot_footing.integer || bs->sfjOwnsInput || bs->flipkickInputTime > time ||
+		bs->gripkickActive || bs->pullKickJumpTime != 0 ||
+		BG_InRoll((playerState_t *)ps, ps->legsAnim) || BG_InKnockDown(ps->legsAnim) ||
+		(bs->enemySwingActive && bs->swingDodgeDir && bs->swingDodgeRolledFor == bs->enemySwingStartTime) ||
+		ps->stats[STAT_HEALTH] <= 0) ? qtrue : qfalse;
+
+	if (exempt)
+	{
+		/* Track state so the smoother resumes from the real command. */
+		bs->footFwdSign = ucmd->forwardmove > 0 ? 1 : (ucmd->forwardmove < 0 ? -1 : 0);
+		bs->footSideSign = ucmd->rightmove > 0 ? 1 : (ucmd->rightmove < 0 ? -1 : 0);
+		bs->footFwdSince = bs->footSideSince = time;
+		bs->footFwdActive = bs->footSideActive = time;
+		bs->footCrouchHeld = ucmd->upmove < 0 ? 1 : 0;
+		bs->footWalkHeld = (ucmd->buttons & BUTTON_WALKING) ? 1 : 0;
+		return;
+	}
+
+	ucmd->forwardmove = (signed char)BotFooting_FilterAxis(ucmd->forwardmove, &bs->footFwdSign,
+		&bs->footFwdSince, &bs->footFwdActive, time, holdMs, &reversedF);
+	ucmd->rightmove = (signed char)BotFooting_FilterAxis(ucmd->rightmove, &bs->footSideSign,
+		&bs->footSideSince, &bs->footSideActive, time, holdMs, &reversedR);
+	if (ucmd->upmove <= 0)
+	{
+		crouch = BotFooting_FilterButton(ucmd->upmove < 0, &bs->footCrouchHeld,
+			&bs->footCrouchReleased, time, holdMs);
+		if (!crouch && ucmd->upmove < 0)
+			ucmd->upmove = 0;
+	}
+	walk = BotFooting_FilterButton((ucmd->buttons & BUTTON_WALKING) ? 1 : 0, &bs->footWalkHeld,
+		&bs->footWalkReleased, time, holdMs);
+	if (!walk)
+		ucmd->buttons &= ~BUTTON_WALKING;
+
+	if (bot_footing_debug.integer)
+	{
+		bs->footDebugDeferred += reversedF + reversedR;
+		if (time - bs->footDebugTime >= 1000)
+		{
+			if (bs->footDebugDeferred)
+				Com_Printf("[footing] %s: %d deferred reversals/s\n",
+					g_entities[bs->client].client ? g_entities[bs->client].client->pers.netname : "bot",
+					bs->footDebugDeferred);
+			bs->footDebugDeferred = 0;
+			bs->footDebugTime = time;
+		}
+	}
+}
+
+/*
+==============
 BotUpdateInput
 ==============
 */
@@ -1050,6 +1116,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bs->sfjLastRandomUse = BotInputToUserCommand(&bi, &bs->lastucmd,
 		bs->cur_ps.delta_angles, time,
 		bs->noUseTime, bs->sfjOwnsInput ? qfalse : qtrue);
+	BotFooting_Apply(bs, &bs->lastucmd, time);
 	if (bs->sfjOwnsInput)
 	{
 		if (bs->lastucmd.upmove >= 10)
@@ -15453,7 +15520,16 @@ void NewBotAI_GetMovement(bot_state_t *bs)
 					}
 				}
 			}
-			if (level.time % 3000 > 1500 && !wallRun)  {
+			if (!wallRun && bs->lateralSideUntil <= level.time) {
+				/* Hold one side for a while instead of flipping on a wall clock. */
+				const int awayDir = NewBotAI_GetWallStrafeAwayDir(bs);
+				if (awayDir)
+					bs->lateralSideLeft = awayDir < 0 ? 1 : 0;
+				else
+					bs->lateralSideLeft = Q_irand(0, 1);
+				bs->lateralSideUntil = level.time + Q_irand(1200, 2400);
+			}
+			if (bs->lateralSideLeft && !wallRun)  {
 				if (bs->frame_Enemy_Len < 140)
 					trap->EA_MoveForward(bs->client);//Always move forward i guess	
 				else if (bs->frame_Enemy_Len < MAX_DRAIN_DISTANCE - 100)

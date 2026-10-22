@@ -2363,4 +2363,66 @@ static inline float NewBotAI_GetSaberThrowAimOffset(int lateralMotionSide, int p
 		(NEWBOTAI_THROW_TRAIL_MAX_DEG - NEWBOTAI_THROW_TRAIL_MIN_DEG) * t);
 }
 
+
+// Footing smoother. Opposite movement commands from separate subsystems within a few
+// frames make the legs twitch. A sign reversal on one axis is replaced with a stop until
+// the current direction has been held for holdMs; stopping is always allowed at once.
+#define BOT_FOOTING_HOLD_MIN_MS 150
+#define BOT_FOOTING_HOLD_MAX_MS 250
+
+static inline int BotFooting_HoldMs(int skill)
+{
+	if (skill < 1)
+		skill = 1;
+	else if (skill > 5)
+		skill = 5;
+	return BOT_FOOTING_HOLD_MAX_MS - (BOT_FOOTING_HOLD_MAX_MS - BOT_FOOTING_HOLD_MIN_MS) * (skill - 1) / 4;
+}
+
+// Returns the axis value to emit. *sign/*since/*lastActive hold the axis state;
+// *reversed is set when a reversal was deferred.
+static inline int BotFooting_FilterAxis(int desired, int *sign, int *since, int *lastActive,
+	int now, int holdMs, int *reversed)
+{
+	const int d = desired > 0 ? 1 : (desired < 0 ? -1 : 0);
+
+	*reversed = 0;
+	if (!d)
+	{
+		if (*sign && now - *lastActive >= holdMs)
+			*sign = 0;
+		return 0;
+	}
+	if (*sign && d != *sign && now - *since < holdMs)
+	{
+		*reversed = 1;
+		return 0;
+	}
+	if (d != *sign)
+	{
+		*sign = d;
+		*since = now;
+	}
+	*lastActive = now;
+	return desired;
+}
+
+// A held button (crouch/walk) may not be pressed again within holdMs of release.
+static inline int BotFooting_FilterButton(int desired, int *held, int *releasedAt, int now, int holdMs)
+{
+	if (desired)
+	{
+		if (!*held && *releasedAt && now - *releasedAt < holdMs)
+			return 0;
+		*held = 1;
+		return 1;
+	}
+	if (*held)
+	{
+		*held = 0;
+		*releasedAt = now;
+	}
+	return 0;
+}
+
 #endif

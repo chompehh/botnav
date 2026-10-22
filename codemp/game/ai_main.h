@@ -595,6 +595,12 @@ typedef struct bot_state_s
 	wpobject_t			*wpSkipGoal;		// bot_waypointskip goal several trail points ahead (NULL = none)
 	int					wpSkipGoalDir;		// wpDirection the goal was picked for
 	int					wpSkipFailSince;	// level.time the bot first failed to advance toward wpSkipGoal (0 = advancing)
+	int					footFwdSign, footFwdSince, footFwdActive;	// footing smoother: forward axis
+	int					footSideSign, footSideSince, footSideActive;	// footing smoother: side axis
+	int					footCrouchHeld, footCrouchReleased;	// footing smoother: crouch button
+	int					footWalkHeld, footWalkReleased;	// footing smoother: walk button
+	int					footDebugDeferred, footDebugTime;	// bot_footing_debug counters
+	int					lateralSideLeft, lateralSideUntil;	// held side for drain/retreat lateral movement
 	float				navProgressBest;	// best distance to the current waypoint goal
 	int					navProgressTime;	// level.time navProgressBest last improved
 	int					navProgressGoal;	// waypoint index + 1 navProgressBest refers to (0 = none)
