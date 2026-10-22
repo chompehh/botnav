@@ -592,6 +592,9 @@ typedef struct bot_state_s
 	int					sfjRouteTime;		// level.time the route was last advanced
 	int					wpRecent[BOT_NAV_RECENT_WAYPOINTS];		// recently reached waypoint indices + 1 (0 = empty slot)
 	int					wpRecentHead;
+	wpobject_t			*wpSkipGoal;		// bot_waypointskip goal several trail points ahead (NULL = none)
+	int					wpSkipGoalDir;		// wpDirection the goal was picked for
+	int					wpSkipFailSince;	// level.time the bot first failed to advance toward wpSkipGoal (0 = advancing)
 	float				navProgressBest;	// best distance to the current waypoint goal
 	int					navProgressTime;	// level.time navProgressBest last improved
 	int					navProgressGoal;	// waypoint index + 1 navProgressBest refers to (0 = none)

@@ -3233,6 +3233,171 @@ static qboolean BotWaypointSkipPathSafe(bot_state_t *bs, const vec3_t destinatio
 	return qtrue;
 }
 
+static qboolean BotNav_TrailStepUsable(bot_state_t *bs, const wpobject_t *from, int index)
+{
+	const wpobject_t *wp;
+
+	if (index < 0 || index >= gWPNum || !gWPArray[index] || !gWPArray[index]->inuse ||
+		!PassWayCheck(bs, index))
+		return qfalse;
+	wp = gWPArray[index];
+	/* Consecutive indices are a trail even without an explicit link, unless far apart. */
+	return (BotSFJ_WaypointsLinked(from, index) ||
+		DistanceSquared(from->origin, wp->origin) < 512.0f * 512.0f) ? qtrue : qfalse;
+}
+
+/*
+ * Pick a goal up to bot_waypointskip trail points ahead of wpCurrent.  The goal
+ * stops at the waypoint destination and at flagged points (jump, duck, use...),
+ * which must be visited; the next goal then continues from there.
+ */
+static void BotNav_PickSkipGoal(bot_state_t *bs)
+{
+	const int maxSkip = BotNav_WaypointSkipCap(bot_waypointskip.integer);
+	const int step = bs->wpDirection ? -1 : 1;
+	wpobject_t *last;
+	int index;
+	int count;
+
+	bs->wpSkipGoal = NULL;
+	bs->wpSkipFailSince = 0;
+	if (!bs->wpCurrent || maxSkip <= 0)
+		return;
+	last = bs->wpCurrent;
+	index = last->index;
+	for (count = 0; count < maxSkip; count++)
+	{
+		const int next = index + step;
+
+		if (!BotNav_TrailStepUsable(bs, last, next))
+			break;
+		index = next;
+		last = gWPArray[index];
+		if (last == bs->wpDestination || last->flags || last->forceJumpTo)
+			break;
+	}
+	if (last != bs->wpCurrent)
+	{
+		bs->wpSkipGoal = last;
+		bs->wpSkipGoalDir = bs->wpDirection;
+	}
+}
+
+/*
+ * Next point to follow toward wpSkipGoal: the farthest trail point the bot can
+ * reach directly (never skipping a flagged one), else the next trail point,
+ * else a linked neighbour that heads toward and gets closer to the goal.
+ */
+static int BotNav_NextTowardSkipGoal(bot_state_t *bs)
+{
+	const int step = bs->wpDirection ? -1 : 1;
+	const wpobject_t *current = bs->wpCurrent;
+	const wpobject_t *goal = bs->wpSkipGoal;
+	int remaining;
+	int reachable[BOT_NAV_SKIP_SHORTCUT_STEPS + 1];
+	int reachableCount = 0;
+	int best = -1;
+	int k;
+
+	if (!current || !goal || !goal->inuse)
+		return -1;
+	remaining = BotNav_StepsToGoal(current->index, goal->index, step);
+	if (remaining <= 0)
+		return -1;
+	if (remaining > BOT_NAV_SKIP_SHORTCUT_STEPS)
+		remaining = BOT_NAV_SKIP_SHORTCUT_STEPS;
+	{
+		const wpobject_t *from = current;
+
+		for (k = 1; k <= remaining; k++)
+		{
+			const int index = current->index + step * k;
+
+			if (!BotNav_TrailStepUsable(bs, from, index))
+				break;
+			reachable[reachableCount++] = index;
+			from = gWPArray[index];
+			if (from->flags || from->forceJumpTo)
+				break;
+		}
+	}
+	/* Farthest directly reachable point first; the first trail point needs no shortcut test. */
+	for (k = reachableCount - 1; k >= 1; k--)
+	{
+		if (BotWaypointSkipPathSafe(bs, gWPArray[reachable[k]]->origin, 640.0f))
+			return reachable[k];
+	}
+	if (reachableCount > 0)
+		return reachable[0];
+	{
+		float bestScore = -1.0f;
+		const float before = Distance(current->origin, goal->origin);
+		int n;
+
+		for (n = 0; n < current->neighbornum; n++)
+		{
+			const int index = current->neighbors[n].num;
+			vec3_t toNeighbor, toGoal;
+			float score;
+
+			if (index < 0 || index >= gWPNum || !gWPArray[index] || !gWPArray[index]->inuse ||
+				index == current->index || !PassWayCheck(bs, index))
+				continue;
+			VectorSubtract(gWPArray[index]->origin, current->origin, toNeighbor);
+			VectorSubtract(goal->origin, current->origin, toGoal);
+			toNeighbor[2] = toGoal[2] = 0.0f;
+			if (VectorNormalize(toNeighbor) <= 0.0f || VectorNormalize(toGoal) <= 0.0f)
+				continue;
+			score = BotNav_GoalNeighborScore(before,
+				Distance(gWPArray[index]->origin, goal->origin),
+				DotProduct(toNeighbor, toGoal),
+				BotNav_RecentContains(bs->wpRecent, BOT_NAV_RECENT_WAYPOINTS, index));
+			if (score > bestScore)
+			{
+				bestScore = score;
+				best = index;
+			}
+		}
+	}
+	return best;
+}
+
+/* Visible, unvisited waypoint that gets the bot closer to its skip goal. */
+static int BotNav_GoalwardVisibleWP(bot_state_t *bs)
+{
+	vec3_t mins, maxs;
+	const wpobject_t *goal = bs->wpSkipGoal;
+	float myDistance;
+	float bestScore = 1e9f;
+	int best = -1;
+	int i;
+
+	if (!goal || !goal->inuse)
+		return -1;
+	VectorSet(mins, -15, -15, -1);
+	VectorSet(maxs, 15, 15, 1);
+	myDistance = Distance(bs->origin, goal->origin);
+	for (i = 0; i < gWPNum; i++)
+	{
+		float toWP, toGoal, score;
+
+		if (!gWPArray[i] || !gWPArray[i]->inuse || !PassWayCheck(bs, i) ||
+			BotNav_RecentContains(bs->wpRecent, BOT_NAV_RECENT_WAYPOINTS, i))
+			continue;
+		toWP = Distance(bs->origin, gWPArray[i]->origin);
+		toGoal = Distance(gWPArray[i]->origin, goal->origin);
+		if (toWP > 800.0f || toGoal > myDistance - 32.0f)
+			continue;
+		score = toWP + toGoal;
+		if (score >= bestScore || !BotPVSCheck(bs->origin, gWPArray[i]->origin) ||
+			!OrgVisibleBox(bs->origin, mins, maxs, gWPArray[i]->origin, bs->client))
+			continue;
+		bestScore = score;
+		best = i;
+	}
+	return best;
+}
+
 /*
  * Walk forward along the bot's waypoint trail and return a gently curving
  * corridor up to BOT_SFJ_CORRIDOR_LOOKAHEAD units long.  The steering direction
@@ -23480,6 +23645,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 	if (gDeactivated)
 	{
 		bs->wpCurrent = NULL;
+		bs->wpSkipGoal = NULL;
 		bs->currentEnemy = NULL;
 		bs->wpDestination = NULL;
 		bs->wpDirection = 0;
@@ -23558,6 +23724,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 	if (bot_forgimmick.integer)
 	{
 		bs->wpCurrent = NULL;
+		bs->wpSkipGoal = NULL;
 		bs->currentEnemy = NULL;
 		bs->wpDestination = NULL;
 		bs->wpDirection = 0;
@@ -23650,6 +23817,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		}
 
 		bs->wpCurrent = NULL;
+		bs->wpSkipGoal = NULL;
 		bs->currentEnemy = NULL;
 		bs->wpDestination = NULL;
 		bs->wpCamping = NULL;
@@ -24040,9 +24208,24 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 
 	if (!bs->wpCurrent)
 	{
-		wp = BotNav_NearestVisibleFreshWP(bs);
+		/* With a skip goal, re-acquire ahead toward it rather than the nearest point (often behind). */
+		wp = (bs->wpSkipGoal && !(bs->currentEnemy && bs->frame_Enemy_Vis)) ?
+			BotNav_GoalwardVisibleWP(bs) : -1;
+		if (wp == -1)
+		{
+			bs->wpSkipGoal = NULL;
+			wp = BotNav_NearestVisibleFreshWP(bs);
+		}
 
-		if (wp != -1)
+		if (wp != -1 && bs->wpSkipGoal)
+		{
+			bs->wpCurrent = gWPArray[wp];
+			bs->wpSeenTime = level.time + 1500;
+			bs->wpTravelTime = level.time + 10000;
+			bs->lastWPIndex = bs->wpCurrent->index;
+			bs->lastWPDir = bs->wpDirection;
+		}
+		else if (wp != -1)
 		{
 			//If we have a live objective or enemy, keep waypoint direction ordered toward
 			//that target so we don't bounce between a local triangle of nearby points.
@@ -24316,142 +24499,106 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 			}
 		}
 
+		if (bs->wpSkipGoal && (!bs->wpSkipGoal->inuse || bs->wpSkipGoalDir != bs->wpDirection ||
+			(bs->currentEnemy && bs->frame_Enemy_Vis) ||
+			BotNav_WaypointSkipCap(bot_waypointskip.integer) <= 0))
+		{
+			/* Combat or a re-route drops the goal; it is re-picked from the next touched point. */
+			bs->wpSkipGoal = NULL;
+			bs->wpSkipFailSince = 0;
+		}
+
 		if (!bs->sfjCorridorForwardGoal &&
 			(bs->frame_Waypoint_Len < wpTouchDist ||
 				(RMG.integer && bs->frame_Waypoint_Len < wpTouchDist*2)))
 		{
 			const qboolean activeCombatLock = (bs->currentEnemy && bs->frame_Enemy_Vis) ? qtrue : qfalse;
-			const qboolean canSkipAhead = !activeCombatLock;
-			const int maxWaypointSkip = Com_Clampi(0, 16, bot_waypointskip.integer);
-			int skipStep;
+			const int maxWaypointSkip = BotNav_WaypointSkipCap(bot_waypointskip.integer);
+			int goalNext = -1;
+
 			if (activeCombatLock && maxWaypointSkip > 0)
 				BotSFJ_DebugReject(bs, "waypoint skip: visible enemy combat lock");
 			WPTouchRoutine(bs);
 
-			if (!bs->wpDirection)
+			if (!activeCombatLock && maxWaypointSkip > 0 && bs->wpCurrent)
 			{
-				desiredIndex = bs->wpCurrent->index+1;
+				/* Arrived (or no goal yet): chain the next goal in the same direction. */
+				if (!bs->wpSkipGoal || bs->wpSkipGoal == bs->wpCurrent ||
+					BotNav_StepsToGoal(bs->wpCurrent->index, bs->wpSkipGoal->index,
+						bs->wpDirection ? -1 : 1) <= 0)
+					BotNav_PickSkipGoal(bs);
+				if (bs->wpSkipGoal)
+					goalNext = BotNav_NextTowardSkipGoal(bs);
 			}
-			else
+
+			if (goalNext != -1)
 			{
-				desiredIndex = bs->wpCurrent->index-1;
-			}
-
-			if (desiredIndex >= 0 && desiredIndex < gWPNum &&
-				gWPArray[desiredIndex] &&
-				gWPArray[desiredIndex]->inuse &&
-				PassWayCheck(bs, desiredIndex))
-			{
-				if (canSkipAhead && maxWaypointSkip > 0)
-				{
-					int prevIndex = bs->wpCurrent->index;
-					for (skipStep = 0; skipStep < maxWaypointSkip; skipStep++)
-					{
-						wpobject_t *currentWP = gWPArray[desiredIndex];
-						int nextIndex = -1;
-						int n;
-						float bestScore = 0.0f;
-						vec3_t preferredDir;
-						float preferredLen;
-
-						if (!currentWP)
-						{
-							break;
-						}
-						if (currentWP->flags || currentWP == bs->wpDestination ||
-							bs->wpCurrent->flags)
-						{
-							BotSFJ_DebugReject(bs, "waypoint skip: required waypoint or destination");
-							break;
-						}
-						if (prevIndex < 0 || prevIndex >= gWPNum || !gWPArray[prevIndex])
-						{
-							break;
-						}
-
-						VectorSubtract(currentWP->origin, gWPArray[prevIndex]->origin, preferredDir);
-						preferredDir[2] = 0.0f;
-						preferredLen = VectorNormalize(preferredDir);
-						if (preferredLen <= 0.0f)
-						{
-							break;
-						}
-
-						for (n = 0; n < (currentWP->neighbornum > 0 ? currentWP->neighbornum : 1); n++)
-						{
-							const int neighborIndex = currentWP->neighbornum > 0 ?
-								currentWP->neighbors[n].num : desiredIndex + (bs->wpDirection ? -1 : 1);
-							vec3_t neighborDir;
-							float score;
-
-							if (neighborIndex < 0 || neighborIndex >= gWPNum ||
-								!gWPArray[neighborIndex] || !gWPArray[neighborIndex]->inuse ||
-								neighborIndex == prevIndex ||
-								!PassWayCheck(bs, neighborIndex))
-							{
-								continue;
-							}
-
-							VectorSubtract(gWPArray[neighborIndex]->origin, currentWP->origin, neighborDir);
-							neighborDir[2] = 0.0f;
-							if (VectorNormalize(neighborDir) <= 0.0f)
-							{
-								continue;
-							}
-							score = DotProduct(preferredDir, neighborDir);
-							if (!BotSFJ_WaypointSkipAllows(gWPArray[neighborIndex]->flags,
-								gWPArray[neighborIndex]->origin[2] - currentWP->origin[2],
-								score, 1))
-							{
-								continue;
-							}
-
-							if (nextIndex == -1 || score > bestScore)
-							{
-								nextIndex = neighborIndex;
-								bestScore = score;
-							}
-						}
-
-						if (nextIndex == -1)
-						{
-							BotSFJ_DebugReject(bs, "waypoint skip: no straight eligible link");
-							break;
-						}
-						if (!BotWaypointSkipPathSafe(bs, gWPArray[nextIndex]->origin, 640.0f))
-						{
-							BotSFJ_DebugReject(bs, "waypoint skip: blocked path or unsafe floor");
-							break;
-						}
-
-						prevIndex = desiredIndex;
-						desiredIndex = nextIndex;
-					}
-				}
+				bs->wpSkipFailSince = 0;
 				bs->lastWPIndex = bs->wpCurrent->index;
 				bs->lastWPDir = bs->wpDirection;
-				bs->wpCurrent = gWPArray[desiredIndex];
+				bs->wpCurrent = gWPArray[goalNext];
 			}
 			else
 			{
-				if (bs->wpDestination)
+				if (!bs->wpDirection)
 				{
-					bs->wpDestination = NULL;
-					bs->destinationGrabTime = level.time + 10000;
-				}
-
-				bs->lastWPIndex = bs->wpCurrent->index;
-
-				if (bs->wpDirection)
-				{
-					bs->wpDirection = 0;
+					desiredIndex = bs->wpCurrent->index+1;
 				}
 				else
 				{
-					bs->wpDirection = 1;
+					desiredIndex = bs->wpCurrent->index-1;
 				}
 
-				bs->lastWPDir = bs->wpDirection;
+				if (desiredIndex >= 0 && desiredIndex < gWPNum &&
+					gWPArray[desiredIndex] &&
+					gWPArray[desiredIndex]->inuse &&
+					PassWayCheck(bs, desiredIndex))
+				{
+					bs->wpSkipFailSince = 0;
+					bs->lastWPIndex = bs->wpCurrent->index;
+					bs->lastWPDir = bs->wpDirection;
+					bs->wpCurrent = gWPArray[desiredIndex];
+				}
+				else if (bs->wpSkipGoal && !BotNav_SkipShouldFlip(bs->wpSkipFailSince, level.time))
+				{
+					/* One failed step is not a reason to walk back: look for a goalward point first. */
+					const int goalward = BotNav_GoalwardVisibleWP(bs);
+
+					if (!bs->wpSkipFailSince)
+						bs->wpSkipFailSince = level.time;
+					if (goalward != -1)
+					{
+						bs->lastWPIndex = bs->wpCurrent->index;
+						bs->lastWPDir = bs->wpDirection;
+						bs->wpCurrent = gWPArray[goalward];
+						bs->wpSeenTime = level.time + 1500;
+					}
+					else
+						BotSFJ_DebugReject(bs, "waypoint skip: holding direction, no goalward point yet");
+				}
+				else
+				{
+					bs->wpSkipGoal = NULL;
+					bs->wpSkipFailSince = 0;
+					if (bs->wpDestination)
+					{
+						bs->wpDestination = NULL;
+						bs->destinationGrabTime = level.time + 10000;
+					}
+
+					bs->lastWPIndex = bs->wpCurrent->index;
+
+					if (bs->wpDirection)
+					{
+						bs->wpDirection = 0;
+					}
+					else
+					{
+						bs->wpDirection = 1;
+					}
+
+					bs->lastWPDir = bs->wpDirection;
+				}
 			}
 		}
 	}

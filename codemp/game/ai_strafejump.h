@@ -785,6 +785,51 @@ static inline int BotNav_RecentContains(const int *ring, int count, int index)
 	return 0;
 }
 
+/*
+ * Waypoint skip goals.  bot_waypointskip picks a goal that many trail points
+ * ahead; the bot follows the points in between and chains a new goal when it
+ * arrives.  A single failed step must not reverse the bot along its trail.
+ */
+#define BOT_NAV_MAX_WAYPOINT_SKIP 256
+#define BOT_NAV_SKIP_SHORTCUT_STEPS 8
+#define BOT_NAV_SKIP_FLIP_DELAY_MS 750
+#define BOT_NAV_SKIP_MIN_PROGRESS 16.0f
+
+static inline int BotNav_WaypointSkipCap(int skip)
+{
+	return skip < 0 ? 0 : (skip > BOT_NAV_MAX_WAYPOINT_SKIP ? BOT_NAV_MAX_WAYPOINT_SKIP : skip);
+}
+
+/* Trail steps still separating index from goal when walking with step (+1/-1); -1 when goal is behind. */
+static inline int BotNav_StepsToGoal(int index, int goal, int step)
+{
+	const int steps = (goal - index) * (step < 0 ? -1 : 1);
+
+	return steps < 0 ? -1 : steps;
+}
+
+/*
+ * Score for an off-trail linked neighbour.  It must not be a point the bot just
+ * left, must head roughly toward the goal and must get meaningfully closer.
+ * Returns a negative value when the neighbour is not acceptable.
+ */
+static inline float BotNav_GoalNeighborScore(float distanceBefore, float distanceAfter,
+	float alignment, int recent)
+{
+	const float gain = distanceBefore - distanceAfter;
+
+	if (recent || !isfinite(gain) || !isfinite(alignment) || alignment < 0.5f ||
+		gain < BOT_NAV_SKIP_MIN_PROGRESS)
+		return -1.0f;
+	return gain + alignment * 32.0f;
+}
+
+/* Reverse the trail direction only after failing to advance for a while. */
+static inline int BotNav_SkipShouldFlip(int failSince, int now)
+{
+	return failSince > 0 && now - failSince >= BOT_NAV_SKIP_FLIP_DELAY_MS;
+}
+
 /* Adds index to the ring (no duplicates); returns the new head. */
 static inline int BotNav_RecentPush(int *ring, int count, int head, int index)
 {

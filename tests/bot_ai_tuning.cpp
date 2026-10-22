@@ -2660,6 +2660,31 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( waypoint_skip_goal_helpers )
+{
+	BOOST_CHECK_EQUAL( BotNav_WaypointSkipCap( -3 ), 0 );
+	BOOST_CHECK_EQUAL( BotNav_WaypointSkipCap( 100 ), 100 );
+	BOOST_CHECK_EQUAL( BotNav_WaypointSkipCap( 9999 ), BOT_NAV_MAX_WAYPOINT_SKIP );
+
+	BOOST_CHECK_EQUAL( BotNav_StepsToGoal( 10, 110, 1 ), 100 );
+	BOOST_CHECK_EQUAL( BotNav_StepsToGoal( 110, 10, -1 ), 100 );
+	BOOST_CHECK_EQUAL( BotNav_StepsToGoal( 10, 5, 1 ), -1 );
+	BOOST_CHECK_EQUAL( BotNav_StepsToGoal( 7, 7, 1 ), 0 );
+
+	/* Recently left points, sideways points and points with no real gain are refused. */
+	BOOST_CHECK( BotNav_GoalNeighborScore( 500.0f, 400.0f, 0.9f, 0 ) > 0.0f );
+	BOOST_CHECK( BotNav_GoalNeighborScore( 500.0f, 400.0f, 0.9f, 1 ) < 0.0f );
+	BOOST_CHECK( BotNav_GoalNeighborScore( 500.0f, 400.0f, 0.2f, 0 ) < 0.0f );
+	BOOST_CHECK( BotNav_GoalNeighborScore( 500.0f, 495.0f, 1.0f, 0 ) < 0.0f );
+	BOOST_CHECK( BotNav_GoalNeighborScore( 500.0f, 300.0f, 0.6f, 0 ) >
+		BotNav_GoalNeighborScore( 500.0f, 450.0f, 1.0f, 0 ) );
+
+	/* A single failed step does not reverse the trail direction. */
+	BOOST_CHECK( !BotNav_SkipShouldFlip( 0, 5000 ) );
+	BOOST_CHECK( !BotNav_SkipShouldFlip( 5000, 5000 + BOT_NAV_SKIP_FLIP_DELAY_MS - 1 ) );
+	BOOST_CHECK( BotNav_SkipShouldFlip( 5000, 5000 + BOT_NAV_SKIP_FLIP_DELAY_MS ) );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_SUITE( bot_strafejump )
