@@ -449,9 +449,56 @@ static inline float BotSFJ_SteerYaw(float previousYaw, float targetYaw, float ma
 }
 
 /*
- * PM_AirMove uses PM_Accelerate(wishdir, ps->speed, pm_airaccelerate). For
- * the world wish direction, aim at that acceleration boundary and clamp toward
- * the route. Command axes get their own view-yaw compensation below.
+ * Human airborne wish-to-velocity angle by speed: median over WA/WD airborne
+ * frames of strafetrack_inputs (2).csv (326 routes), where the wish yaw is
+ * yaw + atan2(-rightmove, forwardmove) and the velocity heading comes from the
+ * position change between frames.  See docs/bot-cvar-outline.md.
+ */
+static inline float BotSFJ_HumanWishOffset(float speed)
+{
+	static const float speeds[] = { 200.0f, 300.0f, 400.0f, 500.0f, 600.0f, 700.0f };
+	static const float offsets[] = { 36.0f, 52.0f, 63.5f, 69.0f, 72.0f, 72.0f };
+	int i;
+
+	if (!(speed > speeds[0]))
+		return offsets[0];
+	for (i = 1; i < 6; i++)
+	{
+		if (speed <= speeds[i])
+			return offsets[i - 1] + (offsets[i] - offsets[i - 1]) *
+				(speed - speeds[i - 1]) / (speeds[i] - speeds[i - 1]);
+	}
+	return offsets[5];
+}
+
+/* PM_Accelerate's maximum-gain angle between velocity and wish direction. */
+static inline float BotSFJ_OptimalWishOffset(float speed, float wishSpeed,
+	float airAccelerate, float commandSeconds)
+{
+	float cosine;
+
+	if (!(speed > 0.0f))
+		return 0.0f;
+	cosine = (wishSpeed - airAccelerate * commandSeconds * wishSpeed) / speed;
+	if (cosine < -1.0f)
+		cosine = -1.0f;
+	else if (cosine > 1.0f)
+		cosine = 1.0f;
+	return acosf(cosine) * 57.29577951308232f;
+}
+
+#define BOT_SFJ_HUMAN_EXTRA_MAX 12.0f
+#define BOT_SFJ_WISH_OFFSET_MAX 74.0f
+#define BOT_SFJ_ROUTE_CLAMP 74.0f
+/* Frame time of the strafetrack sample the human offsets were measured at. */
+#define BOT_SFJ_HUMAN_SAMPLE_SECONDS 0.033f
+
+/*
+ * PM_AirMove uses PM_Accelerate(wishdir, ps->speed, pm_airaccelerate). Aim the
+ * world wish direction at that acceleration boundary, widened by the margin
+ * humans keep beyond it at this speed (they trade a little gain for turning),
+ * and clamp toward the route. side > 0 turns left (wish left of velocity).
+ * Command axes get their own view-yaw compensation below.
  */
 static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float velocityY,
 	float wishSpeed, float airAccelerate, float commandSeconds, int side)
@@ -459,9 +506,8 @@ static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float vel
 	const float radiansToDegrees = 57.29577951308232f;
 	float speed = sqrtf(velocityX * velocityX + velocityY * velocityY);
 	float velocityYaw;
-	float accelSpeed;
-	float cosine;
 	float offset;
+	float extra;
 	float yaw;
 
 	if (speed < 32.0f || wishSpeed <= 0.0f)
@@ -470,21 +516,21 @@ static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float vel
 		commandSeconds = 0.001f;
 	else if (commandSeconds > 0.1f)
 		commandSeconds = 0.1f;
-	accelSpeed = airAccelerate * commandSeconds * wishSpeed;
-	cosine = (wishSpeed - accelSpeed) / speed;
-	if (cosine < -1.0f)
-		cosine = -1.0f;
-	else if (cosine > 1.0f)
-		cosine = 1.0f;
-	offset = acosf(cosine) * radiansToDegrees;
-	if (offset > 70.0f)
-		offset = 70.0f;
+	offset = BotSFJ_OptimalWishOffset(speed, wishSpeed, airAccelerate, commandSeconds);
+	extra = BotSFJ_HumanWishOffset(speed) - BotSFJ_OptimalWishOffset(speed, wishSpeed,
+		airAccelerate, BOT_SFJ_HUMAN_SAMPLE_SECONDS);
+	if (extra > BOT_SFJ_HUMAN_EXTRA_MAX)
+		extra = BOT_SFJ_HUMAN_EXTRA_MAX;
+	if (extra > 0.0f)
+		offset += extra;
+	if (offset > BOT_SFJ_WISH_OFFSET_MAX)
+		offset = BOT_SFJ_WISH_OFFSET_MAX;
 	velocityYaw = atan2f(velocityY, velocityX) * radiansToDegrees;
 	yaw = velocityYaw + (side < 0 ? -offset : offset);
-	if (BotSFJ_AngleDelta(yaw, routeYaw) > 70.0f)
-		yaw = routeYaw + 70.0f;
-	else if (BotSFJ_AngleDelta(yaw, routeYaw) < -70.0f)
-		yaw = routeYaw - 70.0f;
+	if (BotSFJ_AngleDelta(yaw, routeYaw) > BOT_SFJ_ROUTE_CLAMP)
+		yaw = routeYaw + BOT_SFJ_ROUTE_CLAMP;
+	else if (BotSFJ_AngleDelta(yaw, routeYaw) < -BOT_SFJ_ROUTE_CLAMP)
+		yaw = routeYaw - BOT_SFJ_ROUTE_CLAMP;
 	return yaw;
 }
 
@@ -529,20 +575,293 @@ static inline bot_sfj_phase_t BotSFJ_ReleasedNextPhase(bot_sfj_phase_t phase,
 }
 
 /*
- * Half-beat alternates W+side with opposite-side-only on successive hops.
- * Positive rightmove points clockwise in JKA; compensate view yaw so the
- * resulting world wish direction is identical to the predictor's.
+ * Strafe keys for a turn side (side > 0 turns left, as in BotSFJ_CommandYaw):
+ * a left turn holds A (W+A full beat, A alone side-only), a right turn D, as
+ * humans do. With the wish direction at velocity +/- offset this keeps the view
+ * within about 25 degrees of the velocity. Positive rightmove points clockwise
+ * in JKA; BotSFJ_ViewYawForAxes compensates view yaw so the resulting world wish
+ * direction is identical to the predictor's.
  */
 static inline void BotSFJ_HalfBeatAxes(int side, int strafeOnly,
 	int *forward, int *right)
 {
 	*forward = strafeOnly ? 0 : 127;
-	*right = (side < 0 ? -127 : 127) * (strafeOnly ? -1 : 1);
+	*right = side < 0 ? 127 : -127;
+}
+
+static inline float BotSFJ_AxesYaw(int forward, int right)
+{
+	if (!forward && !right)
+		return 0.0f;
+	return atan2f((float)right, (float)forward) * 57.29577951308232f;
 }
 
 static inline float BotSFJ_ViewYawForAxes(float wishYaw, int forward, int right)
 {
-	return wishYaw + atan2f((float)right, (float)forward) * 57.29577951308232f;
+	return wishYaw + BotSFJ_AxesYaw(forward, right);
+}
+
+/*
+ * With a rate-limited view, pick the keys whose world wish direction is closest
+ * to the wanted one: the hop's style, the other style on the same side, or the
+ * forward key alone (the W-only frames humans pass through during a side
+ * switch). Backward strafes mirror every candidate. Returns the remaining error.
+ */
+static inline float BotSFJ_PickAxesForView(float viewYaw, float wishYaw, int side,
+	int strafeOnly, int backward, int *forward, int *right)
+{
+	int candidateForward[3], candidateRight[3];
+	float best = 1000.0f;
+	int i;
+
+	BotSFJ_HalfBeatAxes(side, strafeOnly, &candidateForward[0], &candidateRight[0]);
+	BotSFJ_HalfBeatAxes(side, !strafeOnly, &candidateForward[1], &candidateRight[1]);
+	candidateForward[2] = 127;
+	candidateRight[2] = 0;
+	for (i = 0; i < 3; i++)
+	{
+		float error;
+
+		if (backward)
+		{
+			candidateForward[i] = -candidateForward[i];
+			candidateRight[i] = -candidateRight[i];
+		}
+		error = fabsf(BotSFJ_AngleDelta(viewYaw - BotSFJ_AxesYaw(candidateForward[i],
+			candidateRight[i]), wishYaw));
+		if (error < best - 0.01f)
+		{
+			best = error;
+			*forward = candidateForward[i];
+			*right = candidateRight[i];
+		}
+	}
+	return best;
+}
+
+/*
+ * Human-shaped strafe aim. On the ground (circle-jump preparation and the
+ * takeoff command) the view flicks to the target. Early in the air it settles
+ * quickly, later it tracks slowly: the humans' takeoff yaw rate has a median of
+ * 80 and a 90th percentile of 200 deg/s, steady flight 40-60 and 100-120 deg/s.
+ * Recorded per-hop rates raise the bot's limit; lower skill turns slower.
+ * Returns the maximum yaw rate in deg/s, 0 for no limit.
+ */
+#define BOT_SFJ_TAKEOFF_SETTLE_MS 150
+
+static inline float BotSFJ_ViewYawRate(float skill, int grounded, int airMs,
+	float recordedTakeoffRate, float recordedAirRate)
+{
+	float rate;
+
+	if (grounded)
+		return 0.0f;
+	if (!(skill >= 1.0f))
+		skill = 1.0f;
+	else if (skill > 10.0f)
+		skill = 10.0f;
+	if (airMs < BOT_SFJ_TAKEOFF_SETTLE_MS)
+	{
+		if (skill >= 10.0f)
+			return 0.0f;
+		rate = 200.0f + 20.0f * skill;
+		if (recordedTakeoffRate > 0.0f && isfinite(recordedTakeoffRate))
+		{
+			const float recorded = BotSFJ_ClampSetting(recordedTakeoffRate * 1.25f, 0.0f, 720.0f);
+
+			if (recorded > rate)
+				rate = recorded;
+		}
+		return rate;
+	}
+	rate = 60.0f + 6.0f * skill;
+	if (recordedAirRate > 0.0f && isfinite(recordedAirRate))
+	{
+		const float recorded = BotSFJ_ClampSetting(recordedAirRate * 2.0f, 0.0f, 240.0f);
+
+		if (recorded > rate)
+			rate = recorded;
+	}
+	return rate;
+}
+
+/*
+ * Per-hop human style copied from a recorded route node (node_style in the
+ * .botroute): side-only share of the airborne frames (-1 unknown), when the
+ * strafe side switched as a percentage of the air time (0 none), the first
+ * strafe key side (+1 D, -1 A, 0 unknown), and the takeoff/flight yaw rates.
+ */
+typedef struct
+{
+	int sideOnlyPct;
+	int switchPct;
+	int firstSide;
+	float takeoffRate;
+	float airRate;
+	int airMs;
+} bot_sfj_hop_style_t;
+
+static inline void BotSFJ_HopStyleClear(bot_sfj_hop_style_t *style)
+{
+	style->sideOnlyPct = -1;
+	style->switchPct = 0;
+	style->firstSide = 0;
+	style->takeoffRate = 0.0f;
+	style->airRate = 0.0f;
+	style->airMs = 0;
+}
+
+/* Full beat (W+side) below 400 u/s, where humans rarely let go of forward;
+ * above it a half beat alternates with side-only hops on the same side. */
+#define BOT_SFJ_SIDE_ONLY_SPEED 400.0f
+
+static inline int BotSFJ_HopStrafeOnly(float speed, int previousStrafeOnly, int recordedSideOnlyPct)
+{
+	if (recordedSideOnlyPct >= 0)
+		return recordedSideOnlyPct >= 50 && speed >= 300.0f;
+	if (speed < BOT_SFJ_SIDE_ONLY_SPEED)
+		return 0;
+	return !previousStrafeOnly;
+}
+
+/*
+ * Turn side for the next hop: keep turning toward the route, which keeps the
+ * side across landings unless the route bends the other way (humans kept it on
+ * 85% of hops). Within 20 degrees the recorded human key side decides.
+ */
+#define BOT_SFJ_HOP_SIDE_ROUTE_DEG 20.0f
+
+static inline int BotSFJ_HopSide(float routeYaw, float velocityX, float velocityY,
+	int previousSide, int recordedFirstKeySide)
+{
+	const float speed = sqrtf(velocityX * velocityX + velocityY * velocityY);
+
+	if (recordedFirstKeySide && (speed < 32.0f ||
+		fabsf(BotSFJ_AngleDelta(routeYaw, atan2f(velocityY, velocityX) * 57.29577951308232f)) <=
+			BOT_SFJ_HOP_SIDE_ROUTE_DEG))
+		return recordedFirstKeySide > 0 ? -1 : 1;
+	return BotSFJ_SelectSide(routeYaw, velocityX, velocityY, previousSide);
+}
+
+/*
+ * Mid-air side switch: at the recorded point of the hop (once), or when the
+ * route has drifted more than 10 degrees to the other side of the velocity.
+ */
+#define BOT_SFJ_AIR_SWITCH_DEG 10.0f
+
+static inline int BotSFJ_AirSideSwitch(int side, float routeYaw, float velocityX, float velocityY,
+	int airMs, int recordedAirMs, int switchPct, int *switched)
+{
+	const float speed = sqrtf(velocityX * velocityX + velocityY * velocityY);
+	float delta;
+
+	if (speed < 32.0f)
+		return side;
+	if (!*switched && switchPct > 0 && switchPct < 100 && recordedAirMs > 0 &&
+		airMs * 100 >= recordedAirMs * switchPct)
+	{
+		*switched = 1;
+		side = -side;
+	}
+	delta = BotSFJ_AngleDelta(routeYaw, atan2f(velocityY, velocityX) * 57.29577951308232f);
+	if (side > 0 && delta < -BOT_SFJ_AIR_SWITCH_DEG)
+		return -1;
+	if (side < 0 && delta > BOT_SFJ_AIR_SWITCH_DEG)
+		return 1;
+	return side;
+}
+
+/*
+ * Escape strafes face along the escape route. Unless the bot strafes backwards
+ * (view toward the enemy), it must not turn its back on a visible enemy inside
+ * max(bot_minstrafe, 384) units.
+ */
+#define BOT_SFJ_ESCAPE_FACING_GUARD 384.0f
+
+static inline int BotSFJ_EscapeFacingAllows(int backward, int enemyVisible,
+	float enemyDistance, float minStrafe)
+{
+	const float guard = minStrafe > BOT_SFJ_ESCAPE_FACING_GUARD ? minStrafe : BOT_SFJ_ESCAPE_FACING_GUARD;
+
+	return backward || !enemyVisible || enemyDistance >= guard;
+}
+
+/*
+ * Incremental per-hop style measurement shared by the live recorder (one call
+ * per usercmd) and the export backfill of older routes (one call per stored
+ * input row). Feed airborne commands only; reset at liftoff.
+ */
+typedef struct
+{
+	int airMs;
+	int keyed;
+	int sideOnly;
+	int firstSide;
+	int lastSide;
+	int switchMs;
+	float takeoffRate;
+	float airYawSum;
+	int airYawMs;
+} bot_sfj_style_accum_t;
+
+static inline void BotSFJ_StyleAccumReset(bot_sfj_style_accum_t *acc)
+{
+	acc->airMs = 0;
+	acc->keyed = 0;
+	acc->sideOnly = 0;
+	acc->firstSide = 0;
+	acc->lastSide = 0;
+	acc->switchMs = -1;
+	acc->takeoffRate = 0.0f;
+	acc->airYawSum = 0.0f;
+	acc->airYawMs = 0;
+}
+
+static inline void BotSFJ_StyleAccumAdd(bot_sfj_style_accum_t *acc, int msec,
+	int forwardmove, int rightmove, float yawDelta)
+{
+	const int side = rightmove > 0 ? 1 : (rightmove < 0 ? -1 : 0);
+
+	if (msec <= 0 || msec > 200 || !isfinite(yawDelta))
+		return;
+	if (forwardmove || rightmove)
+		acc->keyed++;
+	if (!forwardmove && rightmove)
+		acc->sideOnly++;
+	if (side)
+	{
+		if (!acc->firstSide)
+			acc->firstSide = side;
+		else if (acc->switchMs < 0 && side != acc->firstSide)
+			acc->switchMs = acc->airMs;
+		acc->lastSide = side;
+	}
+	if (acc->airMs < BOT_SFJ_TAKEOFF_SETTLE_MS)
+	{
+		const float rate = fabsf(yawDelta) * 1000.0f / (float)msec;
+
+		if (rate > acc->takeoffRate)
+			acc->takeoffRate = rate;
+	}
+	else
+	{
+		acc->airYawSum += fabsf(yawDelta);
+		acc->airYawMs += msec;
+	}
+	acc->airMs += msec;
+}
+
+static inline void BotSFJ_StyleAccumFinish(const bot_sfj_style_accum_t *acc, bot_sfj_hop_style_t *style)
+{
+	BotSFJ_HopStyleClear(style);
+	if (acc->airMs <= 0)
+		return;
+	style->airMs = acc->airMs;
+	style->sideOnlyPct = acc->keyed ? acc->sideOnly * 100 / acc->keyed : -1;
+	style->switchPct = acc->switchMs > 0 ? acc->switchMs * 100 / acc->airMs : 0;
+	style->firstSide = acc->firstSide;
+	style->takeoffRate = acc->takeoffRate;
+	style->airRate = acc->airYawMs > 0 ? acc->airYawSum * 1000.0f / (float)acc->airYawMs : 0.0f;
 }
 
 /* Reject hairpins, but allow a gently curving, linked trail to be considered. */
@@ -1135,6 +1454,20 @@ static inline float BotSFJ_TrackRouteSuccess(int attempts, int completions)
 	return ((float)completions + 1.0f) / ((float)attempts + 2.0f);
 }
 
+/* After a few attempts with no completion a route's score halves every two
+ * further failures, so the bots fall back to routes they actually finish. */
+#define BOT_SFJ_TRACK_FAIL_GRACE 4
+
+static inline float BotSFJ_TrackFailureDecay(int attempts, int completions)
+{
+	float decay;
+
+	if (completions > 0 || attempts < BOT_SFJ_TRACK_FAIL_GRACE)
+		return 1.0f;
+	decay = powf(0.5f, (float)(attempts - BOT_SFJ_TRACK_FAIL_GRACE + 1) * 0.5f);
+	return decay < 0.05f ? 0.05f : decay;
+}
+
 static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageSpeed,
 	int attempts, int completions, float entryDistance, float pickupRadius)
 {
@@ -1153,7 +1486,27 @@ static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageS
 	if (nearFactor > 1.0f)
 		nearFactor = 1.0f;
 	return remainingLength * speedFactor *
-		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor;
+		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor *
+		BotSFJ_TrackFailureDecay(attempts, completions);
+}
+
+/*
+ * Export ranking multiplier applied to the human value (length x speed) of a
+ * recorded route: neutral until the bots have tried it a few times, then the
+ * bots' success rate and measured speed retention, with routes that never get
+ * completed dropping first.
+ */
+static inline float BotSFJ_TrackExportFactor(int attempts, int completions, float performance)
+{
+	float factor;
+
+	if (attempts < BOT_SFJ_TRACK_FAIL_GRACE)
+		return 1.0f;
+	if (!(performance > 0.0f) || !isfinite(performance))
+		performance = 1.0f;
+	factor = (0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * performance *
+		BotSFJ_TrackFailureDecay(attempts, completions);
+	return BotSFJ_ClampSetting(factor, 0.05f, 3.0f);
 }
 
 /*
