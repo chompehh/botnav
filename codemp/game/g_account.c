@@ -11866,10 +11866,10 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		G_StrafeTrackAppend(&text, "\n");
 
 	G_StrafeTrackAppend(&text, STRAFETRACK_BEGIN_MARKER "\n");
-	//Fastest routes first (average speed, then length); the per-map limit is then spread
-	//over distinct start areas so slower routes elsewhere on the map are not dropped.
+	//Long, fast routes first (length x average speed); the per-map limit is then spread
+	//over distinct start areas so other routes elsewhere on the map are not dropped.
 	if (sqlite3_prepare_v2(db, "SELECT id, start_x, start_y, start_z, start_speed FROM LocalStrafeRoute "
-		"WHERE lower(mapname) = ? AND node_count >= ? ORDER BY (distance * 1000.0 / MAX(duration_ms, 1)) DESC, "
+		"WHERE lower(mapname) = ? AND node_count >= ? ORDER BY (distance * distance / MAX(duration_ms, 1)) DESC, "
 		"distance DESC LIMIT ?", -1, &routes, NULL) == SQLITE_OK &&
 		sqlite3_prepare_v2(db, "SELECT x, y, z, speed, side, air_ms FROM LocalStrafeRouteNode "
 		"WHERE route_id = ? ORDER BY node_index", -1, &nodes, NULL) == SQLITE_OK)

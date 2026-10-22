@@ -998,4 +998,61 @@ static inline int BotNav_ProgressStalled(int lastImproveTime, int now)
 	return lastImproveTime > 0 && now - lastImproveTime >= BOT_NAV_PROGRESS_STALL_MS;
 }
 
+/*
+ * Recorded-route preference.  Long, fast routes the bots have finished before
+ * win over short or failing ones; nearer entries win ties.  Untried routes
+ * score as an even success rate, so new recordings still get attempts.
+ */
+static inline float BotSFJ_TrackRouteSuccess(int attempts, int completions)
+{
+	if (attempts < 0)
+		attempts = 0;
+	if (completions < 0)
+		completions = 0;
+	if (completions > attempts)
+		completions = attempts;
+	return ((float)completions + 1.0f) / ((float)attempts + 2.0f);
+}
+
+static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageSpeed,
+	int attempts, int completions, float entryDistance, float pickupRadius)
+{
+	float speedFactor, nearFactor;
+
+	if (!(remainingLength > 0.0f))
+		return 0.0f;
+	speedFactor = averageSpeed / 400.0f;
+	if (!(speedFactor >= 0.5f))
+		speedFactor = 0.5f;
+	if (speedFactor > 2.5f)
+		speedFactor = 2.5f;
+	nearFactor = pickupRadius > 0.0f ? 1.0f - 0.5f * entryDistance / pickupRadius : 1.0f;
+	if (nearFactor < 0.5f)
+		nearFactor = 0.5f;
+	if (nearFactor > 1.0f)
+		nearFactor = 1.0f;
+	return remainingLength * speedFactor *
+		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor;
+}
+
+/*
+ * Backward strafe jumping: the view faces back along the route and the keys are
+ * mirrored (back instead of forward, the other strafe key).  The wish direction,
+ * and therefore the air acceleration, is unchanged.
+ */
+static inline int BotSFJ_UseBackwardStrafe(int retreatIntent, int saberOnly, int percent, int roll)
+{
+	if (!retreatIntent || saberOnly || percent <= 0)
+		return 0;
+	if (percent >= 100)
+		return 1;
+	return roll >= 0 && (roll % 100) < percent;
+}
+
+static inline void BotSFJ_BackwardAxes(int *forward, int *right)
+{
+	*forward = -*forward;
+	*right = -*right;
+}
+
 #endif

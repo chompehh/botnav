@@ -393,6 +393,10 @@ static inline newbotai_saber_grade_t NewBotAI_GetSaberChoiceGrade(int skill, int
 
 static inline int NewBotAI_SaberNeedsSafetyExit(newbotai_saber_tactic_context_t context)
 {
+	// Saber-only: health does not change play; exit only from a live enemy chain.
+	if (context.saberOnlyDuel)
+		return context.selfBlocked || (!context.enemyVulnerable && context.enemyAttacking &&
+			context.chainLength >= 2);
 	return context.selfBlocked || (!context.enemyVulnerable &&
 		((context.ourTotalHealth <= NEWBOTAI_SABER_CRITICAL_TOTAL_HEALTH &&
 		  context.enemyTotalHealth > context.ourTotalHealth &&
@@ -1203,8 +1207,8 @@ static inline float NewBotAI_ScaleSaberDuelFanBias(float fanBias, int healthDelt
 
 	if (fanBias <= 0.0f)
 		return 0.0f;
-	if (scale < 0.35f)
-		scale = 0.35f;
+	if (scale < 0.75f)
+		scale = 0.75f;
 	else if (scale > 1.25f)
 		scale = 1.25f;
 	fanBias *= scale;
@@ -2559,6 +2563,98 @@ static inline int NewBotAI_StallBreakDue(int now, int *stillSince, float speed2D
 		return 1;
 	}
 	return 0;
+}
+
+// Sweep chains (dueltrack (2) saber-only sessions): humans linked 70% of swings into
+// another, bots 7.5%. Yellow chains ran 2-4 swings (1:52 2:54 3:46 4:11), staff chains
+// averaged 2.75 with 45 of 3+; links alternate L2R/R2L ~300ms start to start. Chained
+// swings landed at least once in 46% (yellow) / 37% (staff) of chains vs 25% / 14% for
+// isolated swings, at 65-110u. Stance ids follow saberAnimLevel (SS_MEDIUM 2, SS_STAFF 7).
+#define NEWBOTAI_STANCE_MEDIUM 2
+#define NEWBOTAI_STANCE_STAFF 7
+#define NEWBOTAI_SWEEP_CHAIN_MAX_RANGE 120.0f
+#define NEWBOTAI_SWEEP_STANCE_FAN_SCALE 1.4f
+
+static inline int NewBotAI_IsSweepStance(int stance)
+{
+	return stance == NEWBOTAI_STANCE_MEDIUM || stance == NEWBOTAI_STANCE_STAFF;
+}
+
+// Planned chain length rolled when a chain opens (roll 1-100); 0 = no planned length.
+static inline int NewBotAI_SweepChainTarget(int stance, int roll)
+{
+	if (stance == NEWBOTAI_STANCE_MEDIUM)
+		return roll <= 50 ? 2 : (roll <= 90 ? 3 : 4);
+	if (stance == NEWBOTAI_STANCE_STAFF)
+		return roll <= 35 ? 3 : (roll <= 70 ? 4 : (roll <= 90 ? 5 : 6));
+	return 0;
+}
+
+// Link without the random link roll while short of the planned length and still in reach.
+static inline int NewBotAI_SweepChainForceLink(int swingsDone, int target, float enemyDistance2D)
+{
+	return target > 0 && swingsDone < target && enemyDistance2D <= NEWBOTAI_SWEEP_CHAIN_MAX_RANGE;
+}
+
+static inline float NewBotAI_SweepStanceFanBias(float fanBias, int stance)
+{
+	if (fanBias <= 0.0f || !NewBotAI_IsSweepStance(stance))
+		return fanBias;
+	fanBias *= NEWBOTAI_SWEEP_STANCE_FAN_SCALE;
+	return fanBias > 100.0f ? 100.0f : fanBias;
+}
+
+// Saber-only answer to an enemy swing starting within 120u (same sessions, bot movement
+// over the next 250ms): from 90-120u backing off was hit 2% (holding 24%); from 60-90u
+// stepping in was hit 4% vs retreating 24%; under 60u retreating was hit 51%. Counter-
+// swinging into the live swing was the worst answer (38.5%), so it waits for the gap.
+#define NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE 120.0f
+#define NEWBOTAI_SWEEP_BACKOFF_MIN_RANGE 90.0f
+#define NEWBOTAI_SWEEP_STEPIN_MIN_RANGE 60.0f
+#define NEWBOTAI_SWEEP_PUNISH_WINDOW_MS 300
+#define NEWBOTAI_SWEEP_PUNISH_RANGE 110.0f
+// An enemy linking swings within this gap is sweep-chaining; don't charge in from outside reach.
+#define NEWBOTAI_SWEEP_CHAIN_LINK_MS 400
+#define NEWBOTAI_SWEEP_NO_CHARGE_RANGE 170.0f
+
+static inline newbotai_swing_dodge_t NewBotAI_GetSaberOnlySweepResponse(float enemyDistance2D,
+	int mistakeChance, int mistakeRoll, int styleRoll)
+{
+	if (enemyDistance2D > NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE)
+		return NEWBOTAI_SWING_DODGE_NONE;
+	if (mistakeChance > 0 && mistakeRoll > 0 && mistakeRoll <= mistakeChance)
+		return NEWBOTAI_SWING_DODGE_BACKPEDAL;
+	if (enemyDistance2D >= NEWBOTAI_SWEEP_BACKOFF_MIN_RANGE)
+		return NEWBOTAI_SWING_DODGE_LATERAL;
+	if (enemyDistance2D >= NEWBOTAI_SWEEP_STEPIN_MIN_RANGE)
+		return styleRoll <= 60 ? NEWBOTAI_SWING_DODGE_ADVANCE : NEWBOTAI_SWING_DODGE_NONE;
+	return styleRoll <= 70 ? NEWBOTAI_SWING_DODGE_ADVANCE : NEWBOTAI_SWING_DODGE_NONE;
+}
+
+static inline int NewBotAI_SweepPunishReady(int msSinceEnemySwingEnd, float range2D, int alreadyPunished)
+{
+	return !alreadyPunished && msSinceEnemySwingEnd >= 0 &&
+		msSinceEnemySwingEnd <= NEWBOTAI_SWEEP_PUNISH_WINDOW_MS && range2D <= NEWBOTAI_SWEEP_PUNISH_RANGE;
+}
+
+static inline int NewBotAI_EnemySweepChainCount(int previousCount, int msSincePreviousEnd)
+{
+	return (msSincePreviousEnd >= 0 && msSincePreviousEnd <= NEWBOTAI_SWEEP_CHAIN_LINK_MS) ?
+		previousCount + 1 : 1;
+}
+
+// Hold position (no forward) while an enemy sweep-chains just outside reach.
+static inline int NewBotAI_ShouldHoldOffSweeper(int enemyChain, int enemySwinging, float enemyDistance2D)
+{
+	return enemySwinging && enemyChain >= 2 && enemyDistance2D > NEWBOTAI_SWEEP_BACKOFF_MAX_RANGE &&
+		enemyDistance2D <= NEWBOTAI_SWEEP_NO_CHARGE_RANGE;
+}
+
+// Saber-only play cannot heal, so low health does not change it (the low-HP escape styles
+// and health-based retreats apply to full-force play only).
+static inline int NewBotAI_EscapeHealthFor(int ourTotalHealth, int saberOnly)
+{
+	return saberOnly ? 100 : ourTotalHealth;
 }
 
 #endif

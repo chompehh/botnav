@@ -947,6 +947,13 @@ BOOST_AUTO_TEST_CASE( saber_tactic_counters_recovery_not_every_incoming_swing )
 	context.enemyDistance = 80.0f;
 	context.recentlyHurt = 1;
 	context.ourTotalHealth = 25;
+	// Saber-only cannot heal: low health alone does not send the bot away.
+	BOOST_CHECK( NewBotAI_SelectSaberTactic( context ) != NEWBOTAI_SABER_TACTIC_RESET );
+	context.chainLength = 2;
+	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_RESET );
+	context.chainLength = 0;
+	context.saberOnlyDuel = 0;
+	context.saberCombat = 1;
 	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_RESET );
 }
 
@@ -1033,8 +1040,8 @@ BOOST_AUTO_TEST_CASE( fan_footwork_follows_human_spacing )
 
 	BOOST_CHECK_EQUAL( NewBotAI_ScaleSaberDuelFanBias( 0.0f, 50 ), 0.0f );
 	BOOST_CHECK_CLOSE( NewBotAI_ScaleSaberDuelFanBias( 60.0f, 0 ), 60.0f, 0.001f );
-	BOOST_CHECK_CLOSE( NewBotAI_ScaleSaberDuelFanBias( 60.0f, -40 ), 36.0f, 0.001f );
-	BOOST_CHECK_CLOSE( NewBotAI_ScaleSaberDuelFanBias( 60.0f, -200 ), 21.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_ScaleSaberDuelFanBias( 60.0f, -40 ), 45.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_ScaleSaberDuelFanBias( 60.0f, -200 ), 45.0f, 0.001f );
 	BOOST_CHECK( NewBotAI_ScaleSaberDuelFanBias( 60.0f, -60 ) > 0.0f );
 }
 
@@ -1531,10 +1538,17 @@ BOOST_AUTO_TEST_CASE( saber_airborne_footwork_and_bounded_escape_have_deliberate
 	BOOST_CHECK_EQUAL( airborneReentry.forward, 1 );
 	BOOST_CHECK_EQUAL( airborneReentry.attack, 0 );
 	context.recentlyHurt = 1;
+	// Saber-only: low health does not make re-entry unsafe.
+	BOOST_CHECK( NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_RESET,
+		NEWBOTAI_SABER_BASIC, 0, 1, 1, 1, 1, 1 ).forward != -1 );
+	context.saberOnlyDuel = 0;
+	context.saberCombat = 1;
 	const newbotai_saber_command_t unsafeReentry = NewBotAI_PlanSaberCommand( context,
 		NEWBOTAI_SABER_TACTIC_RESET, NEWBOTAI_SABER_BASIC, 0, 1, 1, 1, 1, 1 );
 	BOOST_CHECK_EQUAL( unsafeReentry.forward, -1 );
 	BOOST_CHECK_EQUAL( unsafeReentry.attack, 0 );
+	context.saberOnlyDuel = 1;
+	context.saberCombat = 0;
 	BOOST_CHECK( NewBotAI_SaberCanEscapeJump( 1, 1, 1, 1, 1, 1 ) );
 	for ( int guard = 0; guard < 6; guard++ )
 	{
@@ -2855,6 +2869,106 @@ BOOST_AUTO_TEST_CASE( waypoint_skip_goal_helpers )
 	BOOST_CHECK( !BotNav_SkipShouldFlip( 0, 5000 ) );
 	BOOST_CHECK( !BotNav_SkipShouldFlip( 5000, 5000 + BOT_NAV_SKIP_FLIP_DELAY_MS - 1 ) );
 	BOOST_CHECK( BotNav_SkipShouldFlip( 5000, 5000 + BOT_NAV_SKIP_FLIP_DELAY_MS ) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
+{
+	/* Longer and faster routes outrank short or slow ones. */
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 3000.0f, 600.0f, 0, 0, 0.0f, 192.0f ) >
+		BotSFJ_TrackRouteScore( 800.0f, 600.0f, 0, 0, 0.0f, 192.0f ) );
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 2000.0f, 800.0f, 0, 0, 0.0f, 192.0f ) >
+		BotSFJ_TrackRouteScore( 2000.0f, 400.0f, 0, 0, 0.0f, 192.0f ) );
+	/* Bot successes count; failures sink a route below an untried one of equal shape. */
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 2000.0f, 600.0f, 10, 9, 0.0f, 192.0f ) >
+		BotSFJ_TrackRouteScore( 2000.0f, 600.0f, 0, 0, 0.0f, 192.0f ) );
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 2000.0f, 600.0f, 10, 0, 0.0f, 192.0f ) <
+		BotSFJ_TrackRouteScore( 2000.0f, 600.0f, 0, 0, 0.0f, 192.0f ) );
+	/* A proven long route still beats a nearer short one. */
+	BOOST_CHECK( BotSFJ_TrackRouteScore( 3000.0f, 600.0f, 4, 3, 180.0f, 192.0f ) >
+		BotSFJ_TrackRouteScore( 600.0f, 600.0f, 0, 0, 0.0f, 192.0f ) );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackRouteScore( 0.0f, 600.0f, 0, 0, 0.0f, 192.0f ), 0.0f );
+	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 0, 0 ), 0.5f, 0.001f );
+	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 2, 5 ), 0.75f, 0.001f );
+
+	/* Backward strafing only on full-force retreats, at the configured rate. */
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 0, 0, 100, 0 ) );
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 1, 100, 0 ) );
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, 100, 99 ) );
+	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, 50, 49 ) );
+	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, 50, 50 ) );
+
+	/* Mirrored keys with the view turned around keep the same wish direction. */
+	for ( int side = -1; side <= 1; side += 2 )
+	{
+		for ( int strafeOnly = 0; strafeOnly <= 1; strafeOnly++ )
+		{
+			int forward, right, backForward, backRight;
+			BotSFJ_HalfBeatAxes( side, strafeOnly, &forward, &right );
+			backForward = forward;
+			backRight = right;
+			BotSFJ_BackwardAxes( &backForward, &backRight );
+			const float wishYaw = 30.0f;
+			const float yaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right ) * 0.017453292f;
+			const float backYaw = BotSFJ_ViewYawForAxes( wishYaw, backForward, backRight ) * 0.017453292f;
+			/* forward axis (cos, sin), right axis (sin, -cos) in Quake yaw */
+			const float wx = cosf( yaw ) * forward + sinf( yaw ) * right;
+			const float wy = sinf( yaw ) * forward - cosf( yaw ) * right;
+			const float bx = cosf( backYaw ) * backForward + sinf( backYaw ) * backRight;
+			const float by = sinf( backYaw ) * backForward - cosf( backYaw ) * backRight;
+			BOOST_CHECK_SMALL( wx - bx, 0.01f );
+			BOOST_CHECK_SMALL( wy - by, 0.01f );
+			BOOST_CHECK( backForward <= 0 );
+		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE( saber_only_sweeps_and_low_health )
+{
+	/* Yellow 2-4 and staff 3-6 planned sweeps; other stances keep the link roll. */
+	BOOST_CHECK_EQUAL( NewBotAI_SweepChainTarget( NEWBOTAI_STANCE_MEDIUM, 1 ), 2 );
+	BOOST_CHECK_EQUAL( NewBotAI_SweepChainTarget( NEWBOTAI_STANCE_MEDIUM, 100 ), 4 );
+	BOOST_CHECK_EQUAL( NewBotAI_SweepChainTarget( NEWBOTAI_STANCE_STAFF, 1 ), 3 );
+	BOOST_CHECK_EQUAL( NewBotAI_SweepChainTarget( NEWBOTAI_STANCE_STAFF, 100 ), 6 );
+	BOOST_CHECK_EQUAL( NewBotAI_SweepChainTarget( 3, 50 ), 0 );
+	BOOST_CHECK( NewBotAI_SweepChainForceLink( 1, 3, 90.0f ) );
+	BOOST_CHECK( !NewBotAI_SweepChainForceLink( 3, 3, 90.0f ) );
+	BOOST_CHECK( !NewBotAI_SweepChainForceLink( 1, 3, 130.0f ) );
+	BOOST_CHECK( !NewBotAI_SweepChainForceLink( 1, 0, 90.0f ) );
+	BOOST_CHECK_CLOSE( NewBotAI_SweepStanceFanBias( 50.0f, NEWBOTAI_STANCE_STAFF ), 70.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SweepStanceFanBias( 90.0f, NEWBOTAI_STANCE_MEDIUM ), 100.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SweepStanceFanBias( 50.0f, 3 ), 50.0f, 0.001f );
+	BOOST_CHECK_EQUAL( NewBotAI_SweepStanceFanBias( 0.0f, NEWBOTAI_STANCE_STAFF ), 0.0f );
+
+	/* Back off only from 90-120u; closer, step in or hold; never retreat beyond reach. */
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 130.0f, 0, 0, 1 ), NEWBOTAI_SWING_DODGE_NONE );
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 100.0f, 0, 0, 1 ), NEWBOTAI_SWING_DODGE_LATERAL );
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 75.0f, 0, 0, 1 ), NEWBOTAI_SWING_DODGE_ADVANCE );
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 75.0f, 0, 0, 100 ), NEWBOTAI_SWING_DODGE_NONE );
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 40.0f, 0, 0, 70 ), NEWBOTAI_SWING_DODGE_ADVANCE );
+	BOOST_CHECK_EQUAL( NewBotAI_GetSaberOnlySweepResponse( 40.0f, 20, 5, 1 ), NEWBOTAI_SWING_DODGE_BACKPEDAL );
+	for ( int roll = 1; roll <= 100; roll++ )
+		BOOST_CHECK( NewBotAI_GetSaberOnlySweepResponse( 80.0f, 0, 0, roll ) != NEWBOTAI_SWING_DODGE_BACKPEDAL );
+
+	/* Punish in the gap after the swing, once. */
+	BOOST_CHECK( NewBotAI_SweepPunishReady( 100, 90.0f, 0 ) );
+	BOOST_CHECK( !NewBotAI_SweepPunishReady( 100, 90.0f, 1 ) );
+	BOOST_CHECK( !NewBotAI_SweepPunishReady( 400, 90.0f, 0 ) );
+	BOOST_CHECK( !NewBotAI_SweepPunishReady( 100, 140.0f, 0 ) );
+
+	/* Enemy chain tracking and holding off a sweeper just outside reach. */
+	BOOST_CHECK_EQUAL( NewBotAI_EnemySweepChainCount( 1, 100 ), 2 );
+	BOOST_CHECK_EQUAL( NewBotAI_EnemySweepChainCount( 3, 900 ), 1 );
+	BOOST_CHECK_EQUAL( NewBotAI_EnemySweepChainCount( 3, -1 ), 1 );
+	BOOST_CHECK( NewBotAI_ShouldHoldOffSweeper( 2, 1, 150.0f ) );
+	BOOST_CHECK( !NewBotAI_ShouldHoldOffSweeper( 1, 1, 150.0f ) );
+	BOOST_CHECK( !NewBotAI_ShouldHoldOffSweeper( 2, 1, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_ShouldHoldOffSweeper( 2, 0, 150.0f ) );
+
+	/* Low health changes escape style only outside saber-only play. */
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( NewBotAI_EscapeHealthFor( 20, 1 ), 1, 1, 0, 10 ),
+		NEWBOTAI_ESCAPE_BACKPEDAL );
+	BOOST_CHECK_EQUAL( NewBotAI_EscapeHealthFor( 20, 0 ), 20 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

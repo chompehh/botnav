@@ -3041,6 +3041,7 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjNextStartTime = 0;
 	bs->sfjStartFrequency = 0;
 	bs->sfjStrafeOnly = qfalse;
+	bs->sfjBackward = qfalse;
 	bs->sfjJumpReleaseTime = 0;
 	bs->sfjNavPauseUntil = 0;
 	bs->sfjNavPauseForJump = qfalse;
@@ -3878,10 +3879,36 @@ typedef struct
 	float nodeSpeed[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeSide[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeAirMs[BOT_SFJ_TRACK_MAX_NODES];
+	int stat; /* index into g_botSfjRouteStats, -1 if none */
 } bot_sfj_track_route_t;
 
 static bot_sfj_track_route_t g_botSfjTrackRoutes[BOT_SFJ_MAX_TRACK_ROUTES];
 static int g_botSfjTrackRouteCount;
+
+/*
+ * Bot results per recorded route (attempts and completions), kept across map
+ * loads in botroutes/<map>.botroute_stats.  Routes are matched by their start
+ * and last landing, so re-exporting the .botroute keeps the history.
+ */
+#define BOT_SFJ_MAX_ROUTE_STATS 512
+#define BOT_SFJ_ROUTE_STAT_MATCH 8.0f
+/* A bot finishing one route may join another this far from its last landing. */
+#define BOT_SFJ_TRACK_CHAIN_RADIUS 256.0f
+/* A fleeing bot only takes routes that end at least this much farther from the enemy. */
+#define BOT_SFJ_TRACK_FLEE_GAIN 128.0f
+
+typedef struct
+{
+	vec3_t start;
+	vec3_t end;
+	int attempts;
+	int completions;
+} bot_sfj_route_stat_t;
+
+static bot_sfj_route_stat_t g_botSfjRouteStats[BOT_SFJ_MAX_ROUTE_STATS];
+static int g_botSfjRouteStatCount;
+static qboolean g_botSfjRouteStatsDirty;
+static char g_botSfjRouteStatsMap[MAX_QPATH];
 
 typedef struct
 {
@@ -4063,7 +4090,7 @@ static void BotSFJ_ParseRouteHints(const char *buffer, const char *path)
 	}
 }
 
-static void BotSFJ_LoadRouteHints(void)
+static void BotSFJ_ReadRouteFiles(void)
 {
 	static const char *folders[] = { "botroutes", "routes" };
 	char mapname[MAX_QPATH];
@@ -4118,11 +4145,142 @@ static void BotSFJ_LoadRouteHints(void)
 	}
 }
 
+static int BotSFJ_FindRouteStat(const vec3_t start, const vec3_t end, qboolean create)
+{
+	int i;
+
+	for (i = 0; i < g_botSfjRouteStatCount; i++)
+	{
+		if (Distance(g_botSfjRouteStats[i].start, start) <= BOT_SFJ_ROUTE_STAT_MATCH &&
+			Distance(g_botSfjRouteStats[i].end, end) <= BOT_SFJ_ROUTE_STAT_MATCH)
+			return i;
+	}
+	if (!create || g_botSfjRouteStatCount >= BOT_SFJ_MAX_ROUTE_STATS)
+		return -1;
+	memset(&g_botSfjRouteStats[i], 0, sizeof(g_botSfjRouteStats[i]));
+	VectorCopy(start, g_botSfjRouteStats[i].start);
+	VectorCopy(end, g_botSfjRouteStats[i].end);
+	return g_botSfjRouteStatCount++;
+}
+
+static void BotSFJ_LoadRouteStats(const char *lowerMap)
+{
+	char path[MAX_QPATH];
+	fileHandle_t f;
+	char *buffer;
+	const char *text;
+	int len;
+
+	g_botSfjRouteStatCount = 0;
+	g_botSfjRouteStatsDirty = qfalse;
+	Q_strncpyz(g_botSfjRouteStatsMap, lowerMap, sizeof(g_botSfjRouteStatsMap));
+	if (!lowerMap[0])
+		return;
+	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute_stats", lowerMap);
+	len = trap->FS_Open(path, &f, FS_READ);
+	if (!f)
+		return;
+	if (len <= 0 || len >= BOT_SFJ_ROUTE_FILE_MAX)
+	{
+		trap->FS_Close(f);
+		return;
+	}
+	buffer = (char *)malloc(len + 1);
+	if (!buffer)
+	{
+		trap->FS_Close(f);
+		return;
+	}
+	trap->FS_Read(buffer, len, f);
+	trap->FS_Close(f);
+	buffer[len] = '\0';
+	text = buffer;
+	COM_BeginParseSession(path);
+	while (g_botSfjRouteStatCount < BOT_SFJ_MAX_ROUTE_STATS)
+	{
+		bot_sfj_route_stat_t stat;
+		int k;
+
+		memset(&stat, 0, sizeof(stat));
+		if (!BotSFJ_ParseRouteVector(&text, stat.start) || !BotSFJ_ParseRouteVector(&text, stat.end))
+			break;
+		if (COM_ParseInt(&text, &stat.attempts) || COM_ParseInt(&text, &stat.completions))
+			break;
+		k = BotSFJ_FindRouteStat(stat.start, stat.end, qtrue);
+		if (k < 0)
+			break;
+		g_botSfjRouteStats[k].attempts = stat.attempts < 0 ? 0 : stat.attempts;
+		g_botSfjRouteStats[k].completions = stat.completions < 0 ? 0 : stat.completions;
+	}
+	free(buffer);
+}
+
+/* Write bot route results; called on route reloads and at shutdown. */
+void BotSFJ_SaveRouteStats(void)
+{
+	char path[MAX_QPATH];
+	fileHandle_t f;
+	int i;
+
+	if (!g_botSfjRouteStatsDirty || !g_botSfjRouteStatsMap[0])
+		return;
+	g_botSfjRouteStatsDirty = qfalse;
+	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute_stats", g_botSfjRouteStatsMap);
+	trap->FS_Open(path, &f, FS_WRITE);
+	if (!f)
+		return;
+	for (i = 0; i < g_botSfjRouteStatCount; i++)
+	{
+		const bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[i];
+		const char *line = va("%.1f %.1f %.1f %.1f %.1f %.1f %i %i\n",
+			stat->start[0], stat->start[1], stat->start[2],
+			stat->end[0], stat->end[1], stat->end[2], stat->attempts, stat->completions);
+
+		trap->FS_Write(line, strlen(line), f);
+	}
+	trap->FS_Close(f);
+}
+
+static void BotSFJ_LoadRouteHints(void)
+{
+	char mapname[MAX_QPATH];
+	int i;
+
+	if (g_botSfjRouteHintsLoaded)
+		return;
+	BotSFJ_ReadRouteFiles();
+	trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
+	Q_strlwr(mapname);
+	BotSFJ_LoadRouteStats(mapname);
+	for (i = 0; i < g_botSfjTrackRouteCount; i++)
+	{
+		bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[i];
+
+		route->stat = BotSFJ_FindRouteStat(route->start, route->node[route->nodeCount - 1], qtrue);
+	}
+}
+
+static void BotSFJ_NoteRouteResult(int routeIndex, qboolean completed)
+{
+	bot_sfj_route_stat_t *stat;
+
+	if (routeIndex < 0 || routeIndex >= g_botSfjTrackRouteCount ||
+		g_botSfjTrackRoutes[routeIndex].stat < 0)
+		return;
+	stat = &g_botSfjRouteStats[g_botSfjTrackRoutes[routeIndex].stat];
+	if (completed)
+		stat->completions++;
+	else
+		stat->attempts++;
+	g_botSfjRouteStatsDirty = qtrue;
+}
+
 /* exportStrafeTrack rewrites the route file; pick it up on the next bot frame. */
 void BotSFJ_ReloadRouteHints(void)
 {
 	int i;
 
+	BotSFJ_SaveRouteStats();
 	g_botSfjRouteHintsLoaded = qfalse;
 	for (i = 0; i < MAX_CLIENTS; i++)
 	{
@@ -4159,19 +4317,108 @@ static void BotSFJ_EndTrackRoute(bot_state_t *bs, const char *reason)
 }
 
 /*
+ * Best recorded route to join from here: an entry (the start, or for loosened
+ * bots a landing) within pickupRadius, heading the way the bot moves and ending
+ * closer to its goal (or, when fleeing, farther from the enemy).  Among those,
+ * long, fast routes that bots have finished before win (BotSFJ_TrackRouteScore).
+ */
+static int BotSFJ_PickTrackRoute(const bot_state_t *bs, const playerState_t *ps,
+	const vec3_t moveDirection, float pickupRadius, int exclude, const float *fleeFrom,
+	int *entryOut)
+{
+	const int loosen = bot_strafe_loosen.integer ? 1 : 0;
+	const float heightTolerance = loosen ? BOT_SFJ_TRACK_LOOSE_HEIGHT : BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE;
+	const float myGoalDistance = Distance(bs->origin, bs->goalPosition);
+	const float myFleeDistance = fleeFrom ? Distance(ps->origin, fleeFrom) : 0.0f;
+	float bestScore = 0.0f;
+	int best = -1;
+	int i;
+
+	*entryOut = 0;
+	for (i = 0; i < g_botSfjTrackRouteCount; i++)
+	{
+		const bot_sfj_track_route_t *candidate = &g_botSfjTrackRoutes[i];
+		const float *last = candidate->node[candidate->nodeCount - 1];
+		int entry;
+
+		if (i == exclude)
+			continue;
+		if (fleeFrom ? Distance(last, fleeFrom) < myFleeDistance + BOT_SFJ_TRACK_FLEE_GAIN :
+			Distance(last, bs->goalPosition) >= myGoalDistance)
+			continue;
+		/* Entry 0 is the circle-jump start; loosened bots may also join at a landing. */
+		for (entry = 0; entry < (loosen ? candidate->nodeCount - 1 : 1); entry++)
+		{
+			const float *entryPos = entry ? candidate->node[entry - 1] : candidate->start;
+			vec3_t delta, toNode;
+			float startDistance, remaining, speedSum, score;
+			int k, attempts = 0, completions = 0;
+
+			VectorSubtract(entryPos, ps->origin, delta);
+			if (fabsf(delta[2]) > heightTolerance)
+				continue;
+			delta[2] = 0.0f;
+			startDistance = VectorLength(delta);
+			if (startDistance > pickupRadius)
+				continue;
+			VectorSubtract(candidate->node[entry], ps->origin, toNode);
+			toNode[2] = 0.0f;
+			if (VectorNormalize(toNode) <= 0.0f || DotProduct(toNode, moveDirection) < BOT_SFJ_TRACK_ROUTE_MIN_ALIGNMENT)
+				continue;
+			remaining = 0.0f;
+			speedSum = 0.0f;
+			for (k = entry; k < candidate->nodeCount; k++)
+			{
+				remaining += sqrtf(BotSFJ_Dist2DSq(k ? candidate->node[k - 1] : candidate->start,
+					candidate->node[k]));
+				speedSum += candidate->nodeSpeed[k];
+			}
+			if (candidate->stat >= 0)
+			{
+				attempts = g_botSfjRouteStats[candidate->stat].attempts;
+				completions = g_botSfjRouteStats[candidate->stat].completions;
+			}
+			score = BotSFJ_TrackRouteScore(remaining, speedSum / (float)(candidate->nodeCount - entry),
+				attempts, completions, startDistance, pickupRadius);
+			if (score > bestScore)
+			{
+				best = i;
+				*entryOut = entry;
+				bestScore = score;
+			}
+		}
+	}
+	return best;
+}
+
+static void BotSFJ_StartTrackRoute(bot_state_t *bs, int routeIndex, int entry, const char *how)
+{
+	bs->sfjRoute = routeIndex + 1;
+	bs->sfjRouteNode = entry;
+	bs->sfjRouteTime = level.time;
+	g_botSfjStats.routeStarts++;
+	BotSFJ_NoteRouteResult(routeIndex, qfalse);
+	if (bot_strafejumps_debug.integer > 1)
+		BotSFJ_DebugReject(bs, va("%s recorded route %i (%i landings)", how, routeIndex,
+			g_botSfjTrackRoutes[routeIndex].nodeCount - entry));
+}
+
+/*
  * Corridor from a recorded human route: the next landing node is the bot's
- * next goal.  A bot picks up a route standing at its start when the route
- * heads the way it is moving and ends closer to its goal.
+ * next goal.  A bot picks up a route standing at (or near) one of its entries
+ * when the route heads the way it is moving and ends closer to its goal, and
+ * on finishing it carries on along another route that continues forward.
+ * fleeFrom (the enemy's origin) is set while retreating.
  */
 static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_t *ps,
-	const vec3_t moveDirection, vec3_t direction, vec3_t destination)
+	const vec3_t moveDirection, const float *fleeFrom, vec3_t direction, vec3_t destination)
 {
 	const qboolean grounded = ps->groundEntityNum != ENTITYNUM_NONE;
 	const int loosen = bot_strafe_loosen.integer ? 1 : 0;
 	const float heightTolerance = loosen ? BOT_SFJ_TRACK_LOOSE_HEIGHT : BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE;
+	const float pickupRadius = loosen ? BOT_SFJ_TRACK_LOOSE_PICKUP_RADIUS : BOT_SFJ_TRACK_ROUTE_START_RADIUS;
 	const bot_sfj_track_route_t *route;
 	vec3_t toNode;
-	int i;
 
 	BotSFJ_LoadRouteHints();
 	if (!g_botSfjTrackRouteCount)
@@ -4180,55 +4427,15 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		bs->sfjRoute = 0;
 	if (!bs->sfjRoute)
 	{
-		float myGoalDistance;
-		int best = -1, bestEntry = 0;
-		const float pickupRadius = loosen ? BOT_SFJ_TRACK_LOOSE_PICKUP_RADIUS : BOT_SFJ_TRACK_ROUTE_START_RADIUS;
-		float bestStartDistance = pickupRadius + 1.0f;
+		int entry;
+		int best;
 
 		if (!grounded)
 			return qfalse;
-		myGoalDistance = Distance(bs->origin, bs->goalPosition);
-		for (i = 0; i < g_botSfjTrackRouteCount; i++)
-		{
-			const bot_sfj_track_route_t *candidate = &g_botSfjTrackRoutes[i];
-			int entry;
-
-			/* Entry 0 is the circle-jump start; loosened bots may also join at a landing. */
-			for (entry = 0; entry < (loosen ? candidate->nodeCount - 1 : 1); entry++)
-			{
-				const float *entryPos = entry ? candidate->node[entry - 1] : candidate->start;
-				vec3_t delta;
-				float startDistance;
-
-				VectorSubtract(entryPos, ps->origin, delta);
-				if (fabsf(delta[2]) > heightTolerance)
-					continue;
-				delta[2] = 0.0f;
-				startDistance = VectorLength(delta);
-				if (startDistance > pickupRadius || startDistance >= bestStartDistance)
-					continue;
-				VectorSubtract(candidate->node[entry], ps->origin, toNode);
-				toNode[2] = 0.0f;
-				if (VectorNormalize(toNode) <= 0.0f || DotProduct(toNode, moveDirection) < BOT_SFJ_TRACK_ROUTE_MIN_ALIGNMENT)
-					continue;
-				/* The route must take the bot closer to where it is going. */
-				if (Distance(candidate->node[candidate->nodeCount - 1], bs->goalPosition) >=
-					myGoalDistance)
-					continue;
-				best = i;
-				bestEntry = entry;
-				bestStartDistance = startDistance;
-			}
-		}
+		best = BotSFJ_PickTrackRoute(bs, ps, moveDirection, pickupRadius, -1, fleeFrom, &entry);
 		if (best < 0)
 			return qfalse;
-		bs->sfjRoute = best + 1;
-		bs->sfjRouteNode = bestEntry;
-		bs->sfjRouteTime = level.time;
-		g_botSfjStats.routeStarts++;
-		if (bot_strafejumps_debug.integer > 1)
-			BotSFJ_DebugReject(bs, va("start recorded route %i (%i landings)", best,
-				g_botSfjTrackRoutes[best].nodeCount));
+		BotSFJ_StartTrackRoute(bs, best, entry, "start");
 	}
 	route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
 	/* Advance past landings already reached (or passed along the segment). */
@@ -4266,8 +4473,27 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 	}
 	if (bs->sfjRouteNode >= route->nodeCount)
 	{
-		BotSFJ_EndTrackRoute(bs, "recorded route complete, back to waypoints");
-		return qfalse;
+		const int finished = bs->sfjRoute - 1;
+		vec3_t heading;
+		int entry;
+		int next = -1;
+
+		BotSFJ_NoteRouteResult(finished, qtrue);
+		/* Keep going forward along another route that continues from here. */
+		VectorSubtract(route->node[route->nodeCount - 1],
+			route->nodeCount > 1 ? route->node[route->nodeCount - 2] : route->start, heading);
+		heading[2] = 0.0f;
+		if (grounded && VectorNormalize(heading) > 0.0f)
+			next = BotSFJ_PickTrackRoute(bs, ps, heading,
+				pickupRadius > BOT_SFJ_TRACK_CHAIN_RADIUS ? pickupRadius : BOT_SFJ_TRACK_CHAIN_RADIUS,
+				finished, fleeFrom, &entry);
+		if (next < 0)
+		{
+			BotSFJ_EndTrackRoute(bs, "recorded route complete, back to waypoints");
+			return qfalse;
+		}
+		BotSFJ_StartTrackRoute(bs, next, entry, "chain into");
+		route = &g_botSfjTrackRoutes[next];
 	}
 	if (level.time - bs->sfjRouteTime >
 		BotSFJ_TrackNodeTimeout((int)BotSFJ_ClampSetting(bot_strafe_nodetimeout.value, 1000.0f, 15000.0f),
@@ -4937,6 +5163,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	qboolean carryingFlag;
 	qboolean enemyCarriesFlag = qfalse;
 	qboolean retreating;
+	qboolean routeRetreat;
 	qboolean haveRoute;
 	qboolean airborneJump;
 	qboolean previousCorridorValid;
@@ -5004,15 +5231,18 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	retreating = (bs->combatAction == BOT_COMBAT_ACTION_RETREAT_DEFENSE ||
 		bs->runningLikeASissy || bs->runningToEscapeThreat || carryingFlag) ? qtrue : qfalse;
 
+	/* Outside saber-only play a retreating bot may flee along a recorded route. */
+	routeRetreat = (retreating && enemyClient && !NewBotAI_IsSaberOnlyDuel(bs)) ? qtrue : qfalse;
+
 	previousCorridorValid = bs->sfjCorridorValid;
 	bs->sfjCorridorValid = qfalse;
 	/* Fights take priority over recorded routes. */
 	if (bs->sfjRoute && enemyClient && bs->frame_Enemy_Vis &&
-		enemyDistance < BOT_SFJ_NAV_ENEMY_GUARD && !carryingFlag)
+		enemyDistance < BOT_SFJ_NAV_ENEMY_GUARD && !carryingFlag && !routeRetreat)
 		BotSFJ_EndTrackRoute(bs, "enemy close, leaving recorded route");
 	haveRoute = (!enemyClient || !bs->frame_Enemy_Vis || enemyDistance >= BOT_SFJ_NAV_ENEMY_GUARD ||
-		carryingFlag) ? BotSFJ_GetTrackRouteCorridor(bs, ps, effectiveDirection,
-			routeDirection, routeDestination) : qfalse;
+		carryingFlag || routeRetreat) ? BotSFJ_GetTrackRouteCorridor(bs, ps, effectiveDirection,
+			routeRetreat ? enemyClient->ps.origin : NULL, routeDirection, routeDestination) : qfalse;
 	if (!haveRoute)
 		haveRoute = BotSFJ_GetRouteHintCorridor(bs, ps, effectiveDirection,
 			routeDirection, routeDestination);
@@ -5153,6 +5383,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 			}
 		}
 		bs->sfjNextStartTime = 0;
+		bs->sfjBackward = BotSFJ_UseBackwardStrafe(purpose == BOT_SFJ_INTENT_RETREAT,
+			NewBotAI_IsSaberOnlyDuel(bs), bot_strafe_backward.integer, rand() % 100) ? qtrue : qfalse;
 		bs->sfjPhase = BOT_SFJ_PHASE_PREPARE;
 		bs->sfjPhaseTime = level.time;
 		bs->sfjPeakSpeed = 0.0f;
@@ -5371,13 +5603,17 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	candidate = *bi;
 	BotSFJ_HalfBeatAxes(bs->sfjStrafeSide, bs->sfjStrafeOnly,
 		&forwardMove, &rightMove);
+	if (bs->sfjBackward && bs->sfjIntent == BOT_SFJ_INTENT_RETREAT)
+		BotSFJ_BackwardAxes(&forwardMove, &rightMove);
 	candidate.viewangles[YAW] = BotSFJ_ViewYawForAxes(commandYaw, forwardMove, rightMove);
 	VectorClear(candidate.dir);
 	candidate.speed = 400.0f;
 	candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
 		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_WALK);
-	if (forwardMove)
+	if (forwardMove > 0)
 		candidate.actionflags |= ACTION_MOVEFORWARD;
+	else if (forwardMove < 0)
+		candidate.actionflags |= ACTION_MOVEBACK;
 	candidate.actionflags |= rightMove < 0 ? ACTION_MOVELEFT : ACTION_MOVERIGHT;
 	if (BotSFJ_JumpPressed(bs->sfjPhase, grounded))
 		candidate.actionflags |= ACTION_JUMP;
@@ -14622,7 +14858,13 @@ static void NewBotAI_TrackEnemySwing(bot_state_t *bs)
 	swinging = (enemyPs->weapon == WP_SABER && !enemyPs->saberInFlight &&
 		(PM_SaberInStart(enemyPs->saberMove) || BG_SaberInAttack(enemyPs->saberMove))) ? qtrue : qfalse;
 	if (swinging && !bs->enemySwingActive)
+	{
+		bs->enemySwingChain = NewBotAI_EnemySweepChainCount(bs->enemySwingChain,
+			bs->enemySwingEndTime > 0 ? level.time - bs->enemySwingEndTime : -1);
 		bs->enemySwingStartTime = level.time;
+	}
+	else if (!swinging && bs->enemySwingActive)
+		bs->enemySwingEndTime = level.time;
 	bs->enemySwingActive = swinging;
 }
 
@@ -14630,6 +14872,20 @@ static void NewBotAI_TrackEnemySwing(bot_state_t *bs)
 static qboolean NewBotAI_ShouldCounterSwing(bot_state_t *bs)
 {
 	NewBotAI_TrackEnemySwing(bs);
+	if (NewBotAI_IsSaberOnlyDuel(bs))
+	{
+		//Saber-only: never swing into a live swing; punish in the gap right after it.
+		if (bs->enemySwingActive || bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
+			bs->cur_ps.weaponTime > 0 || bs->cur_ps.saberBlocked != BLOCKED_NONE ||
+			bs->cur_ps.saberInFlight ||
+			(bs->cur_ps.saberMove != LS_NONE && bs->cur_ps.saberMove != LS_READY) ||
+			bs->enemySwingEndTime <= 0 ||
+			!NewBotAI_SweepPunishReady(level.time - bs->enemySwingEndTime,
+				NewBotAI_GetEnemyDistance2D(bs), bs->counterSwingFor == bs->enemySwingEndTime))
+			return qfalse;
+		bs->counterSwingFor = bs->enemySwingEndTime;
+		return qtrue;
+	}
 	if (!bs->enemySwingActive || bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
 		bs->cur_ps.weaponTime > 0 || bs->cur_ps.saberBlocked != BLOCKED_NONE ||
 		bs->cur_ps.saberInFlight ||
@@ -14648,6 +14904,7 @@ static qboolean NewBotAI_ShouldCounterSwing(bot_state_t *bs)
 static qboolean NewBotAI_UpdateSwingDodge(bot_state_t *bs)
 {
 	float dist2D;
+	qboolean saberOnly;
 
 	if (!bs || !bs->currentEnemy || !bs->currentEnemy->client || bs->cur_ps.weapon != WP_SABER)
 		return qfalse;
@@ -14663,20 +14920,39 @@ static qboolean NewBotAI_UpdateSwingDodge(bot_state_t *bs)
 		return qfalse;
 
 	dist2D = NewBotAI_GetEnemyDistance2D(bs);
+	saberOnly = NewBotAI_IsSaberOnlyDuel(bs);
+	if (saberOnly && NewBotAI_ShouldHoldOffSweeper(bs->enemySwingChain, bs->enemySwingActive, dist2D))
+	{
+		//Don't charge into a sweep chain from outside reach; sidestep and wait for the gap.
+		if (NewBotAI_HeldLateralLeft(bs))
+			trap->EA_MoveLeft(bs->client);
+		else
+			trap->EA_MoveRight(bs->client);
+		return qtrue;
+	}
 	if (bs->swingDodgeRolledFor != bs->enemySwingStartTime)
 	{
 		const int mistakeChance = (bs->settings.skill < 7.0f) ? NewBotAI_GetDecisionMistakeChance(bs) / 2 : 0;
 
 		bs->swingDodgeRolledFor = bs->enemySwingStartTime;
 		bs->swingDodgeEnemyMove = bs->currentEnemy->client->ps.saberMove;
-		bs->swingDodgeStyle = NewBotAI_GetSwingDodgeChoice(dist2D,
-			bs->cur_ps.groundEntityNum != ENTITYNUM_NONE ? 1 : 0,
-			(bs->cur_ps.fd.forcePowersKnown & (1 << FP_LEVITATION)) ? 1 : 0,
-			mistakeChance, Q_irand(1, 100), Q_irand(1, 100));
-		if (bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_NONE &&
-			bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_BACKPEDAL &&
-			NewBotAI_EnemySwingAdvances(Q_irand(1, 100)))
-			bs->swingDodgeStyle = NEWBOTAI_SWING_DODGE_ADVANCE;
+		if (saberOnly)
+		{
+			//Back off only from 90-120u; closer in, step inside or hold and block.
+			bs->swingDodgeStyle = NewBotAI_GetSaberOnlySweepResponse(dist2D,
+				mistakeChance, Q_irand(1, 100), Q_irand(1, 100));
+		}
+		else
+		{
+			bs->swingDodgeStyle = NewBotAI_GetSwingDodgeChoice(dist2D,
+				bs->cur_ps.groundEntityNum != ENTITYNUM_NONE ? 1 : 0,
+				(bs->cur_ps.fd.forcePowersKnown & (1 << FP_LEVITATION)) ? 1 : 0,
+				mistakeChance, Q_irand(1, 100), Q_irand(1, 100));
+			if (bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_NONE &&
+				bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_BACKPEDAL &&
+				NewBotAI_EnemySwingAdvances(Q_irand(1, 100)))
+				bs->swingDodgeStyle = NEWBOTAI_SWING_DODGE_ADVANCE;
+		}
 		bs->swingDodgeDir = Q_irand(0, 1) ? 1 : -1;
 		if (bs->swingDodgeStyle == NEWBOTAI_SWING_DODGE_JUMP)
 			trap->EA_Jump(bs->client);
@@ -15496,7 +15772,8 @@ void NewBotAI_GetMovement(bot_state_t *bs)
 				}
 			}
 		}
-		else if (!pressAdvantage && ((g_entities[bs->client].health < hardRetreatHealth) ||
+		else if (!pressAdvantage && !NewBotAI_IsSaberOnlyDuel(bs) &&
+				((g_entities[bs->client].health < hardRetreatHealth) ||
 				((g_entities[bs->client].health < softRetreatHealth)
 				&& (bs->cur_ps.fd.forcePower < 30)
 				&& !(bs->cur_ps.fd.forcePowersActive & (1 << FP_ABSORB))
@@ -17605,6 +17882,7 @@ static void NewBotAI_ResetFanChain(bot_state_t *bs)
 	bs->fanPhaseStartTime = 0;
 	bs->fanChainStartTime = 0;
 	bs->fanChainStartHealth = 0;
+	bs->fanChainTarget = 0;
 	bs->fanSwingCount = 0;
 	bs->fanSwingStarted = 0;
 	bs->fanDwellYawOffset = 0.0f;
@@ -17662,7 +17940,8 @@ static float NewBotAI_GetFanBiasPercent(bot_state_t *bs)
 	{
 		//Saber-only duels have no force fallback, so fanning stays available at medium
 		//health and is scaled by the HP+armor difference instead of switched off.
-		return NewBotAI_ScaleSaberDuelFanBias(fanBias, NewBotAI_GetTotalHealthDelta(bs));
+		return NewBotAI_SweepStanceFanBias(NewBotAI_ScaleSaberDuelFanBias(fanBias,
+			NewBotAI_GetTotalHealthDelta(bs)), bs->cur_ps.fd.saberAnimLevel);
 	}
 
 	if (ourHealth < 55)
@@ -17717,7 +17996,7 @@ static float NewBotAI_GetFanBiasPercent(bot_state_t *bs)
 		fanBias = 0.0f;
 	}
 
-	return fanBias;
+	return NewBotAI_SweepStanceFanBias(fanBias, bs->cur_ps.fd.saberAnimLevel);
 }
 
 // Item 2: fan/fanning is a left-right (or right-left) alternating horizontal swing chain.
@@ -17759,7 +18038,7 @@ static void NewBotAI_PrepareHorizontalSwingStart(bot_state_t *bs)
 		return;
 	}
 
-	if (bs->fanPhase != FAN_PHASE_INACTIVE &&
+	if (bs->fanPhase != FAN_PHASE_INACTIVE && !NewBotAI_IsSaberOnlyDuel(bs) &&
 		g_entities[bs->client].health < NEWBOTAI_FAN_CHAIN_MIN_HEALTH)
 	{
 		//Item 13: the chain only breaks early once the bot drops below 70 HP - chip damage
@@ -17811,7 +18090,10 @@ static void NewBotAI_PrepareHorizontalSwingStart(bot_state_t *bs)
 		{
 			//Weight the next link by jundon's transitions (R2L->L2R 101, L2R->R2L 67)
 			//unless the chain is still landing hits.
+			//Yellow/staff sweeps run their planned length before the link roll applies.
 			if (!NewBotAI_FanChainIsLanding(msSinceHit) &&
+				!NewBotAI_SweepChainForceLink(bs->fanSwingCount + 1, bs->fanChainTarget,
+					NewBotAI_GetEnemyDistance2D(bs)) &&
 				Q_irand(1, 100) > NewBotAI_FanLinkChance(bs->fanAttackDir))
 			{
 				NewBotAI_ResetFanChain(bs);
@@ -17913,6 +18195,7 @@ static void NewBotAI_PrepareHorizontalSwingStart(bot_state_t *bs)
 			bs->fanChainStartHealth = g_entities[bs->client].health;
 			bs->fanSwingCount = 0;
 			bs->fanSwingStarted = 0;
+			bs->fanChainTarget = NewBotAI_SweepChainTarget(bs->cur_ps.fd.saberAnimLevel, Q_irand(1, 100));
 			if (bot_fan_debug.integer)
 			{
 				Com_Printf("fan_debug: bot %i package=%s dir=%i enemy=%i range=%.1f hp=%i fp=%i\n",
@@ -21899,7 +22182,8 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 
 		if (bs->saberEscapeStyleUntil <= level.time)
 		{
-			bs->saberEscapeStyle = NewBotAI_ChooseEscapeStyle(context.ourTotalHealth, sideAllowed,
+			bs->saberEscapeStyle = NewBotAI_ChooseEscapeStyle(
+				NewBotAI_EscapeHealthFor(context.ourTotalHealth, context.saberOnlyDuel), sideAllowed,
 				ps->fd.forcePower >= 10,
 				G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, BOTLEARN_TOK_SWING,
 					BOTLEARN_TOK_HOP, BOTLEARN_TOK_NONE, bs->settings.skill),
@@ -25920,5 +26204,6 @@ int BotAIShutdown( int restart ) {
 	else {
 		trap->BotLibShutdown();
 	}
+	BotSFJ_SaveRouteStats();
 	return qtrue;
 }
