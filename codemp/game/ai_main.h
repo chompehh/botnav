@@ -601,6 +601,9 @@ typedef struct bot_state_s
 	int					footWalkHeld, footWalkReleased;	// footing smoother: walk button
 	int					footDebugDeferred, footDebugTime;	// bot_footing_debug counters
 	int					lateralSideLeft, lateralSideUntil;	// held side for drain/retreat lateral movement
+	int					pursuitJumpTime, pursuitJumpCooldown;	// saber pursuit jump at a fleeing enemy
+	int					saberEscapeStyle, saberEscapeStyleUntil;	// low-health escape style hold
+	int					saberStillSince, saberStallBreakUntil;	// saber stall breaker
 	float				navProgressBest;	// best distance to the current waypoint goal
 	int					navProgressTime;	// level.time navProgressBest last improved
 	int					navProgressGoal;	// waypoint index + 1 navProgressBest refers to (0 = none)

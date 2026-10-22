@@ -269,6 +269,17 @@ Live-map validation checklist:
 
 Human strafe-jump demonstrations are captured with `bot_strafetrack` and exported with `exportStrafeTrack` (see above); dueltrack CSVs do not include strafe routes.
 
+### Saber technique adjustments from duel data
+
+Figures come from the exported dueltrack and learned CSVs (DuckDB over `dueltrack_events*.csv`, partitioned by `parent_id`). Bots won 7% of saber-only duels against humans (11/156) and 30% of full-force duels (109/367).
+
+- **Pursuit jump.** When the opponent moves away at more than 100 u/s at 96–260 units, the technique controller may jump forward once (20% per flight in saber-only, 8% in full force, adjusted by the learned `idle>jump>swing` bonus within ±`BOTLEARN_BONUS_CAP`/3, then a 2.2–4.2 s cooldown) and swing on landing within 0.9 s. Humans followed 21.4% of jumps with a swing within 0.9 s; bots 0.6%. The landing swing still needs a legal attack, and airborne swing starts stay gated.
+- **Longer bursts.** A burst only ends early on a soft exposure (health behind, no landed hit) after 2 swings, plus one for skill 6+ and one when the learned `swing>swing` preference is positive (max 4). Hard exposure (enemy attacking, recently hurt, blocked) still ends it after 2.
+- **Low-health escapes.** At 40 HP+armor or less, retreats choose (held 0.7–1.3 s) between a back-and-side diagonal (45), an eager escape jump (30, ± half the learned `swing>hop` bonus) and a plain back-pedal (25). Bots back-pedalled 81% of the time at low HP (humans 23%).
+- **Fewer reflexive jumps in full force.** The escape jump is skipped while recently hurt in full-force play unless the jump escape was chosen. Bots jumped after 63% of hits (humans 29%).
+- **Stall breaker.** Grounded, slower than 40 u/s within 150 units for 600 ms and not swinging or locked: the bot swings if in reach (half the time) or takes a 450 ms traced side step.
+- **Hallways and corners.** Saber footwork traces no longer reject a direction because of a wall or prop in the way; only the floor up to the contact is checked (hazards, lava, slime, drops). Solid non-player brush entities count as floor. Bots took 17.4% of hits standing still against 8.1% for humans.
+
 ## Retreat Wall Escapes
 
 When a retreating bot (hard/soft retreat, or backing off from a fast incoming enemy) is about to back into a wall, a probe along its actual movement direction spots the wall shortly before contact. The bot then commits (~0.9 s) to one of: a vertical wallrun, flipkick then drain, drain then flipkick, a roll around the opponent, or a hop around/over the opponent. Each option is only offered when it is possible right now (flipkick enabled and in range, drain known and allowed, open space beside or above the enemy, levitation for the wallrun). The choice is uniformly random at first and then weighted by bot learning (`wallrun`, `roll`, `hop` learning tokens plus the existing kick/drain sequences); during tracked duels each choice is recorded as a decision so its outcome feeds the learned weights.

@@ -2660,6 +2660,58 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 
 BOOST_AUTO_TEST_SUITE_END()
 
+BOOST_AUTO_TEST_CASE( saber_pursuit_escape_stall )
+{
+	int still = 0;
+
+	BOOST_CHECK_EQUAL( NewBotAI_PursuitJumpChance( 1, 0 ), NEWBOTAI_PURSUIT_SABER_CHANCE );
+	BOOST_CHECK_EQUAL( NewBotAI_PursuitJumpChance( 0, 0 ), NEWBOTAI_PURSUIT_FORCE_CHANCE );
+	BOOST_CHECK_LE( NewBotAI_PursuitJumpChance( 1, 1000 ), 35 );
+	BOOST_CHECK_GE( NewBotAI_PursuitJumpChance( 0, -1000 ), 0 );
+
+	BOOST_CHECK( NewBotAI_ShouldPursuitJump( -150.0f, 180.0f, 1, 0, 0, 1, 20, 10 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 180.0f, 1, 0, 0, 1, 20, 30 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -50.0f, 180.0f, 1, 0, 0, 1, 20, 1 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 60.0f, 1, 0, 0, 1, 20, 1 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 400.0f, 1, 0, 0, 1, 20, 1 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 180.0f, 0, 0, 0, 1, 20, 1 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 180.0f, 1, 1, 0, 1, 20, 1 ) );
+	BOOST_CHECK( !NewBotAI_ShouldPursuitJump( -150.0f, 180.0f, 1, 0, 0, 0, 20, 1 ) );
+
+	BOOST_CHECK( NewBotAI_PursuitLandingSwing( 1500, 1000, 1, 80.0f, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_PursuitLandingSwing( 2000, 1000, 1, 80.0f, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_PursuitLandingSwing( 1500, 1000, 0, 80.0f, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_PursuitLandingSwing( 1500, 1000, 1, 150.0f, 100.0f ) );
+
+	BOOST_CHECK_EQUAL( NewBotAI_SaberBurstLimit( 3, 0 ), 2 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberBurstLimit( 8, 10 ), 4 );
+	BOOST_CHECK( NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BURST, 2, 1, 0, 4 ) );
+	BOOST_CHECK( !NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BURST, 2, 0, 1, 4 ) );
+	BOOST_CHECK( NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BURST, 4, 0, 1, 4 ) );
+	BOOST_CHECK( !NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BASIC, 4, 1, 1, 2 ) );
+
+	// healthy bots keep the planner's back-pedal
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
+	{
+		int counts[3] = { 0, 0, 0 };
+		int r;
+		for ( r = 0; r < 100; r++ )
+			counts[NewBotAI_ChooseEscapeStyle( 30, 1, 1, 0, r )]++;
+		BOOST_CHECK_LE( counts[NEWBOTAI_ESCAPE_BACKPEDAL], 30 );
+		BOOST_CHECK_GT( counts[NEWBOTAI_ESCAPE_DIAGONAL], 0 );
+		BOOST_CHECK_GT( counts[NEWBOTAI_ESCAPE_JUMP], 0 );
+	}
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 30, 0, 0, 0, 7 ), NEWBOTAI_ESCAPE_BACKPEDAL );
+
+	BOOST_CHECK( !NewBotAI_StallBreakDue( 1000, &still, 10.0f, 100.0f, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_StallBreakDue( 1400, &still, 10.0f, 100.0f, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_StallBreakDue( 1700, &still, 10.0f, 100.0f, 1, 0 ) );
+	BOOST_CHECK_EQUAL( still, 0 );
+	BOOST_CHECK( !NewBotAI_StallBreakDue( 1800, &still, 10.0f, 100.0f, 1, 1 ) );
+	BOOST_CHECK( !NewBotAI_StallBreakDue( 2600, &still, 10.0f, 100.0f, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_StallBreakDue( 3400, &still, 200.0f, 100.0f, 1, 0 ) );
+}
+
 BOOST_AUTO_TEST_CASE( footing_smoother )
 {
 	int sign = 0, since = 0, active = 0, rev = 0;

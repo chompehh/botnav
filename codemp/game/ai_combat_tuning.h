@@ -2425,4 +2425,140 @@ static inline int BotFooting_FilterButton(int desired, int *held, int *releasedA
 	return 0;
 }
 
+
+// Pursuit jump: in saber-only duels humans followed 21.4% of jumps with a swing inside
+// 0.9 s (bots 0.6%), and idle>jump won 91% of 98 human uses. Jump at an opponent who is
+// opening the gap, then swing on landing. Full-force air swings hit far less often than
+// ground swings (14.6% vs 37.3%), so the base rate there is lower.
+#define NEWBOTAI_PURSUIT_FLEE_SPEED 100.0f
+#define NEWBOTAI_PURSUIT_MIN_RANGE 96.0f
+#define NEWBOTAI_PURSUIT_MAX_RANGE 260.0f
+#define NEWBOTAI_PURSUIT_SWING_MS 900
+#define NEWBOTAI_PURSUIT_SABER_CHANCE 20
+#define NEWBOTAI_PURSUIT_FORCE_CHANCE 8
+#define NEWBOTAI_PURSUIT_COOLDOWN_MIN_MS 2200
+#define NEWBOTAI_PURSUIT_COOLDOWN_MAX_MS 4200
+
+static inline int NewBotAI_PursuitJumpChance(int saberOnly, int learnedBonus)
+{
+	int chance = saberOnly ? NEWBOTAI_PURSUIT_SABER_CHANCE : NEWBOTAI_PURSUIT_FORCE_CHANCE;
+
+	if (learnedBonus > BOTLEARN_BONUS_CAP)
+		learnedBonus = BOTLEARN_BONUS_CAP;
+	else if (learnedBonus < -BOTLEARN_BONUS_CAP)
+		learnedBonus = -BOTLEARN_BONUS_CAP;
+	chance += learnedBonus / 3;
+	if (chance < 0)
+		chance = 0;
+	else if (chance > 35)
+		chance = 35;
+	return chance;
+}
+
+// enemyApproachSpeed is the enemy's own velocity toward us (negative when fleeing).
+static inline int NewBotAI_ShouldPursuitJump(float enemyApproachSpeed, float range, int grounded,
+	int enemyAttacking, int selfAttacking, int cooldownReady, int chance, int roll)
+{
+	if (!grounded || enemyAttacking || selfAttacking || !cooldownReady)
+		return 0;
+	if (enemyApproachSpeed > -NEWBOTAI_PURSUIT_FLEE_SPEED)
+		return 0;
+	if (range < NEWBOTAI_PURSUIT_MIN_RANGE || range > NEWBOTAI_PURSUIT_MAX_RANGE)
+		return 0;
+	return roll <= chance;
+}
+
+// Swing once back on the ground inside the human jump-to-swing window.
+static inline int NewBotAI_PursuitLandingSwing(int now, int jumpTime, int grounded, float range, float swingRange)
+{
+	return jumpTime > 0 && grounded && now - jumpTime > 120 &&
+		now - jumpTime <= NEWBOTAI_PURSUIT_SWING_MS && range <= swingRange;
+}
+
+// Burst length before a soft exposure (health behind, no landed hit) ends it. Humans'
+// 3-4 swing chains won over 90%; bots chained 0.09 attacks per swing end vs 0.72.
+static inline int NewBotAI_SaberBurstLimit(int skill, int learnedPreference)
+{
+	int limit = 2;
+
+	if (skill >= 6)
+		limit++;
+	if (learnedPreference > 0)
+		limit++;
+	return limit > 4 ? 4 : limit;
+}
+
+static inline int NewBotAI_SaberBurstCompleteScaled(newbotai_saber_family_t family, int acceptedAttacks,
+	int hardExposed, int softExposed, int limit)
+{
+	if (family != NEWBOTAI_SABER_BURST)
+		return 0;
+	if (acceptedAttacks >= 2 && hardExposed)
+		return 1;
+	return acceptedAttacks >= limit && softExposed;
+}
+
+// Low-health escape style. Bots back-pedalled 81% of the time at 40 HP or less (humans
+// 23%) and only half as often opened 150+ units of distance.
+typedef enum
+{
+	NEWBOTAI_ESCAPE_BACKPEDAL = 0,
+	NEWBOTAI_ESCAPE_DIAGONAL,
+	NEWBOTAI_ESCAPE_JUMP
+} newbotai_escape_style_t;
+
+#define NEWBOTAI_ESCAPE_LOW_HEALTH 40
+
+static inline newbotai_escape_style_t NewBotAI_ChooseEscapeStyle(int ourTotalHealth, int sideAllowed,
+	int jumpReady, int learnedHopBonus, int roll)
+{
+	int diagonal, jumpWeight, total;
+
+	if (ourTotalHealth > NEWBOTAI_ESCAPE_LOW_HEALTH)
+		return NEWBOTAI_ESCAPE_BACKPEDAL;
+	if (learnedHopBonus > BOTLEARN_BONUS_CAP)
+		learnedHopBonus = BOTLEARN_BONUS_CAP;
+	else if (learnedHopBonus < -BOTLEARN_BONUS_CAP)
+		learnedHopBonus = -BOTLEARN_BONUS_CAP;
+	diagonal = sideAllowed ? 45 : 0;
+	jumpWeight = jumpReady ? 30 + learnedHopBonus / 2 : 0;
+	if (jumpWeight < 0)
+		jumpWeight = 0;
+	total = 25 + diagonal + jumpWeight;
+	roll = roll % total;
+	if (roll < diagonal)
+		return NEWBOTAI_ESCAPE_DIAGONAL;
+	if (roll < diagonal + jumpWeight)
+		return NEWBOTAI_ESCAPE_JUMP;
+	return NEWBOTAI_ESCAPE_BACKPEDAL;
+}
+
+// Planting: bots took 17.4% of hits standing still (humans 8.1%). Break a stall that
+// lasts this long within this range when not attacking or locked.
+#define NEWBOTAI_STALL_RANGE 150.0f
+#define NEWBOTAI_STALL_SPEED 40.0f
+#define NEWBOTAI_STALL_MS 600
+#define NEWBOTAI_STALL_BREAK_MS 450
+
+static inline int NewBotAI_StallBreakDue(int now, int *stillSince, float speed2D, float range,
+	int grounded, int busy)
+{
+	if (!grounded || busy || speed2D >= NEWBOTAI_STALL_SPEED || range > NEWBOTAI_STALL_RANGE)
+	{
+		*stillSince = 0;
+		return 0;
+	}
+	if (!*stillSince)
+	{
+		*stillSince = now;
+		return 0;
+	}
+	if (now - *stillSince >= NEWBOTAI_STALL_MS)
+	{
+		*stillSince = 0;
+		return 1;
+	}
+	return 0;
+}
+
 #endif
