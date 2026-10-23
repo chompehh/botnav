@@ -3087,6 +3087,19 @@ BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
 	BOOST_CHECK_EQUAL( BotSFJ_TrackRouteScore( 0.0f, 600.0f, 0, 0, 0.0f, 192.0f ), 0.0f );
 	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 0, 0 ), 0.5f, 0.001f );
 	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 2, 5 ), 0.75f, 0.001f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackStallFactor( 0 ), 1.0f );
+	BOOST_CHECK( BotSFJ_TrackStallFactor( 2 ) < BotSFJ_TrackStallFactor( 1 ) );
+	BOOST_CHECK_GE( BotSFJ_TrackStallFactor( 100 ), 0.1f );
+	BOOST_CHECK( BotSFJ_TrackForceJumpChargeAllows( 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 0, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 1, 1, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackHazardBypassAllows( 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 0, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 1, 0, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( 1400.0f, 0.0f, 1,
+		BOT_SFJ_TRACK_APPROACH_RADIUS ) );
 
 	/* Backward strafing only on full-force retreats, at the configured rate. */
 	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 0, 0, 100, 0 ) );
@@ -3126,7 +3139,8 @@ BOOST_AUTO_TEST_CASE( recorded_circle_start_has_bounded_reachable_approach )
 	/* A nearer waypoint or opposite input does not constrain circle-start eligibility. */
 	BOOST_CHECK( BotSFJ_TrackEntryAllows( 600.0f, 32.0f, 1, 96.0f ) );
 	BOOST_CHECK( BotSFJ_TrackEntryAllows( 768.0f, 64.0f, 1, 96.0f ) );
-	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 769.0f, 0.0f, 1, 96.0f ) );
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( BOT_SFJ_TRACK_APPROACH_RADIUS, 0.0f, 1, 96.0f ) );
+	BOOST_CHECK( !BotSFJ_TrackEntryAllows( BOT_SFJ_TRACK_APPROACH_RADIUS + 1.0f, 0.0f, 1, 96.0f ) );
 	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 100.0f, 65.0f, 1, 96.0f ) );
 	BOOST_CHECK( !BotSFJ_TrackEntryAllows( 100.0f, -65.0f, 1, 96.0f ) );
 	/* Mid-route joins retain their smaller pickup bound. */

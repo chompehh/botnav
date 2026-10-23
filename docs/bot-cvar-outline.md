@@ -198,6 +198,8 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 
 `bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
 
+Recorded human routes are considered before improvised waypoint corridors. Circle starts can be approached from up to 1,536 units away along a swept, floor-checked path; route starts and mid-route joins must point at least partly forward. Repeated route stalls lower that route's selection score, while interrupted attempts do not count as collisions. A force-jump charge is allowed to continue only on a recorded force-jump hop. Once a selected route is underway outside combat, its recorded path bypasses generic ledge, falling, hazard, and predicted-arc rejection so the bot can follow jumps over gaps and obstructions. Safe path checks still govern the approach to the track; combat or an active enemy restores the normal chasm/hazard checks. Required waypoint interactions remain barriers.
+
 Arc validation performs bounded swept player-hull integration at the command's pmove slice size until a real static, walkable contact; unresolved falls are rejected rather than vertically probing for a floor. Ceilings, dynamic blockers, lava, slime, no-drop/void areas, and instant-kill `trigger_hurt` volumes along the full arc reject the intent. Landing-corridor slack uses `bot_strafe_tolerance` instead of requiring exact waypoint landings. Cached checks are reused only for matching route/input choices; every takeoff/rejump is refreshed, and meaningful airborne heading changes require revalidation. Instant-kill triggers are cached per map instead of being queried with an area search for every sample. Selection and final command ownership both require the AI's own queued movement to be aligned with the corridor.
 
 The lookahead permits local turns up to 45 degrees and a total departure up to
@@ -207,83 +209,42 @@ commands produce the world wish direction used by prediction. Required route
 endpoints and lethal terrain remain barriers. Holding-position diagnostics
 separate `beStill`, waiting, and camping; these are not blanket-disabled.
 
-The checked-in human input sample has 20,664 frames, including 18,233 airborne
-frames and 14,294 airborne frames with released jump input. Reproduce with:
+The latest uploaded human strafe export has 2,114 routes, 7,507 landing nodes,
+and 461,386 input frames. A total of 57,846 input frames have `force_jump = 1`,
+across 312 routes; on `mp/ctf4`, 38 of 82 routes include force-jump input. The
+input rows include position, velocity, jump-held and force-jump state, but not
+force-speed state, wallrun timing, or collision entities/outcomes. These exports
+are snapshots split across `strafetrack_inputs (3).csv` and
+`strafetrack_inputs_part2.csv` through `part4.csv`; do not add the older,
+fully-contained snapshots to these counts.
 
-```python
-import csv
-with open("/absolute/path/to/botnav/strafetrack_inputs.csv", newline="") as source:
-    frames = list(csv.DictReader(source))
-air = [r for r in frames if r["grounded"] == "0"]
-print(len(frames), len(air), sum(int(r["upmove"]) < 10 for r in air))
-```
-
-The same query on the release attachment `strafetrack_inputs.1.csv` returns
-52,986 frames, 43,198 airborne, and 34,086 airborne releases. These are overlapping
-snapshots, not additive sample counts.
-
-The checked-in snapshots now include `strafetrack_inputs (1).csv` and
-`strafetrack_inputs (2).csv`. They contain 52,986 and 71,210 frames respectively;
-the base file is entirely contained in `(1)`, and `(1)` entirely in `(2)`.
-The newest snapshot contains 326 routes, 58,661 airborne frames and 46,401
-airborne jump releases. `strafetrack_routes (1).csv` and `(2).csv` are identical;
-do not combine their counts. Reproduce the overlap and movement examples with:
+Reproduce the route, frame, and force-jump counts using Python's CSV reader:
 
 ```python
 import csv
 from pathlib import Path
 root = Path("/absolute/path/to/botnav")
 def load(name):
-    with (root / name).open(newline="") as source:
+    with (root / name).open(encoding="latin1", newline="") as source:
         return list(csv.DictReader(source))
-names = ["strafetrack_inputs.csv", "strafetrack_inputs (1).csv",
-         "strafetrack_inputs (2).csv"]
-snapshots = [load(name) for name in names]
-sets = [{tuple(row.values()) for row in rows} for rows in snapshots]
-for name, rows in zip(names, snapshots):
-    air = [r for r in rows if r["grounded"] == "0"]
-    print(name, len(rows), len({r["route_id"] for r in rows}),
-          len(air), sum(int(r["upmove"]) < 10 for r in air))
-print("overlap:", len(sets[0] & sets[1]), len(sets[0] & sets[2]),
-      len(sets[1] & sets[2]))  # 20664, 20664, 52986
-print("same routes:", load("strafetrack_routes (1).csv") ==
-      load("strafetrack_routes (2).csv"))
-for route, frame in [("50", 129), ("124", 84), ("96", 53)]:
-    rows = [r for r in snapshots[-1] if r["route_id"] == route]
-    i = next(i for i, r in enumerate(rows) if int(r["frame"]) == frame)
-    r = rows[i]
-    future = [float(q["speed"]) for q in rows[i + 1:]
-              if 0 < int(q["time_ms"]) - int(r["time_ms"]) <= 1000]
-    print(route, frame, r["time_ms"], r["grounded"], r["yaw_delta"],
-          rows[i - 1]["speed"], r["speed"], rows[i + 1]["speed"],
-          max(future, default=0))
-nodes = load("strafetrack_nodes (1).csv")
-print("air_ms > 3000:", sum(int(n["air_ms"]) > 3000 for n in nodes),
-      "of", len(nodes))  # 153 of 1351
-print([(n["air_ms"], n["speed"]) for n in nodes
-       if n["route_id"] == "37" and n["node_index"] == "0"])
+routes = load("strafetrack_routes (3).csv")
+inputs = sum((load(name) for name in [
+    "strafetrack_inputs (3).csv", "strafetrack_inputs_part2.csv",
+    "strafetrack_inputs_part3.csv", "strafetrack_inputs_part4.csv"
+]), [])
+force_routes = {r["route_id"] for r in inputs if r["force_jump"] == "1"}
+ctf4 = {r["id"] for r in routes if r["mapname"].lower() == "mp/ctf4"}
+print(len(routes), len(inputs), len(force_routes), len(ctf4), len(ctf4 & force_routes))
 ```
 
-Examples from the newest input snapshot:
-- Route 50, frame 129 (4290 ms): airborne view yaw changes 62.13 degrees at
-  505.36 u/s; the next frame retains 501.64 u/s. View rotation is not travel
-  direction: this is evidence against treating every large view turn as an
-  unsafe route turn, not permission to remove landing safety.
-- Route 124, frame 84 (2805 ms): speed falls from 449.69 to 196.12 u/s, then
-  reaches 605.47 u/s within one second. Route 96, frame 53 (1782 ms) falls
-  from 425.07 to 48.17 u/s and recovers to 452.52 u/s within one second.
-  These support a recovery window rather than immediate slowdown failure.
-  The CSV has no collision normals/entities, so neither event proves a wall hit.
-- Route 37, node 0 records 8811 ms between start and landing at 547.00 u/s.
-  Long recorded intervals need human-timing-aware timeouts rather than a fixed
-  three-second limit. These intervals alone do not prove uninterrupted free flight.
-
-This supports releasing jump during flight rather than always spending a
-grounded command on release. It does not by itself show why a particular bot
-aborted. Compare `strafeJumpStats reset` / `strafeJumpStats` and fresh recordings
-on both open and curved routes; confirm multiple takeoffs per uninterrupted
-sequence, retained speed, and safe handoff at required endpoints. Repeat near
-walls, lethal volumes, low ceilings, moving blockers, and required interactions.
+Recorded hop styles already carry a force-jump flag and estimated jump height.
+Bots keep the jump held while rising toward that recorded height, when Levitation
+is available and enabled. Confirm route starts, force-jump takeoffs, landing
+completion, and retained speed with `strafeJumpStats reset` / `strafeJumpStats`.
+The capture does not identify individual collision normals or entities, so bot
+route stalls are the available evidence for collision-prone route selection.
+Future recordings should include force-speed state, wallrun state/timing, and
+bot collision outcomes before those behaviors can be replayed or learned safely.
 
 Walls: the takeoff arc uses the real 15-unit player hull and removes speed into
 walls while continuing bounded wall-slide simulation (up to 64 contact slices).

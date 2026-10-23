@@ -610,6 +610,7 @@ typedef struct bot_state_s
 	int					sfjRoute;			// recorded multi-node route being followed + 1 (0 = none)
 	int					sfjRouteNode;		// next landing node on sfjRoute
 	int					sfjRouteTime;		// level.time the route was last advanced
+	qboolean			sfjForceJumpHop;	// current recorded hop includes a force jump
 	qboolean			sfjRouteApproach;
 	qboolean			sfjRouteAttemptActive;
 	int					sfjRouteStarted;
