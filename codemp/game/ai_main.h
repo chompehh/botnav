@@ -598,6 +598,7 @@ typedef struct bot_state_s
 	int					sfjLastEnemyDistanceTime;
 	int					sfjLastEnemyTargetNum;
 	int					sfjArcCheckedTime;
+	int					sfjArcSpeedContext;
 	qboolean			sfjArcSafe;
 	qboolean			sfjArcBlocked;
 	vec3_t				sfjArcDirection;
@@ -611,9 +612,26 @@ typedef struct bot_state_s
 	int					sfjRouteNode;		// next landing node on sfjRoute
 	int					sfjRouteTime;		// level.time the route was last advanced
 	qboolean			sfjForceJumpHop;	// current recorded hop includes a force jump
+	float				sfjForceJumpTargetHeight;
 	qboolean			sfjRouteApproach;
 	qboolean			sfjRouteAttemptActive;
 	int					sfjRouteStarted;
+	int					sfjRouteStat;
+	int					sfjRouteSpeedContext;
+	qboolean			sfjRouteHopLaunched;
+	qboolean			sfjRouteFailureNoted;
+	int					sfjPendingHopStat;
+	int					sfjPendingHopNode;
+	int					sfjPendingHopTime;
+	qboolean			sfjPendingHopFailed;
+	vec3_t				sfjTravelGoal;
+	qboolean			sfjTravelGoalValid;
+	int					sfjTravelGoalKind;
+	int					sfjTravelPlanTime;
+	int					sfjPlannedRoute;
+	int					sfjPlannedEntry;
+	int					sfjLastRoute;
+	int					sfjNextWaypointAcquire;
 	int					sfjRouteSampleTime;
 	vec3_t				sfjRouteSampleOrigin;
 	float				sfjRouteDistance;
