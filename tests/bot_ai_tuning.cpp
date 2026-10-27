@@ -3774,4 +3774,80 @@ BOOST_AUTO_TEST_CASE( curved_endpoint_counterexample_cannot_escape_terminal_segm
 	BOOST_CHECK( !BotSFJ_PolylineEndpointAllows( points, 3, 225, 250, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( human_route_hops_stay_trusted_until_repeated_failures_or_death )
+{
+	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, BOT_SFJ_TRACK_TRUST_FAILURES - 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 0, BOT_SFJ_TRACK_TRUST_FAILURES, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, 5, 5 ) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 0, 6, 5 ) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 1, 0, 10 ) );
+}
+
+BOOST_AUTO_TEST_CASE( circle_start_requires_position_and_heading_not_proximity )
+{
+	/* Start at origin, first landing along +x. */
+	BOOST_CHECK( BotSFJ_TrackStartReady( 0, 0, 0, 0, 1, 0, 0, 0, 25, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackStartReady( -10, 8, 0, 0, 1, 0, 200, 0, 25, 0 ) );
+	/* Nearby but off the line: the old 48u touch would have started here. */
+	BOOST_CHECK( !BotSFJ_TrackStartReady( 0, 30, 0, 0, 1, 0, 0, 0, 25, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackStartReady( 30, 0, 0, 0, 1, 0, 0, 0, 25, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackStartReady( -40, 0, 0, 0, 1, 0, 0, 0, 25, 0 ) );
+	/* Fast run-up may trigger a little early, but not from far behind. */
+	BOOST_CHECK( BotSFJ_TrackStartReady( -28, 0, 0, 0, 1, 0, 300, 0, 50, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackStartReady( -40, 0, 0, 0, 1, 0, 300, 0, 50, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackStartReady( -80, 0, 0, 0, 1, 0, 300, 0, 50, 0 ) );
+	/* Wrong movement heading at the spot. */
+	BOOST_CHECK( !BotSFJ_TrackStartReady( 0, 0, 0, 0, 1, 0, 0, 250, 25, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackStartReady( 0, 0, 0, 0, 1, 0, 0, 250, 25, 1 ) );
+	BOOST_CHECK_CLOSE( BotSFJ_TrackStartLead( 300, 50 ), 15.0f, 0.01f );
+	BOOST_CHECK_CLOSE( BotSFJ_TrackStartLead( 2000, 100 ), 48.0f, 0.01f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackStartLead( -5, 50 ), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( circle_start_aim_uses_runup_unless_already_behind_start )
+{
+	float tx, ty;
+
+	BOOST_CHECK( BotSFJ_TrackStartAim( -200, 10, 0, 0, 1, 0, 96, &tx, &ty ) );
+	BOOST_CHECK_EQUAL( tx, 0.0f );
+	BOOST_CHECK( !BotSFJ_TrackStartAim( 0, 200, 0, 0, 1, 0, 96, &tx, &ty ) );
+	BOOST_CHECK_CLOSE( tx, -96.0f, 0.01f );
+	BOOST_CHECK( !BotSFJ_TrackStartAim( 100, 0, 0, 0, 1, 0, 96, &tx, &ty ) );
+	BOOST_CHECK( BotSFJ_TrackStartAim( 100, 0, 0, 0, 1, 0, 0, &tx, &ty ) );
+}
+
+BOOST_AUTO_TEST_CASE( better_nearby_routes_earn_a_bounded_extra_walk )
+{
+	const float weak = BotSFJ_TrackQualityCredit( 400, 260, 10, 1, 1.0f );
+	const float strong = BotSFJ_TrackQualityCredit( 3000, 600, 10, 9, 1.0f );
+
+	BOOST_CHECK( strong > weak );
+	BOOST_CHECK( strong <= BOT_SFJ_TRACK_QUALITY_WALK );
+	BOOST_CHECK( BotSFJ_TrackQualityCredit( 3000, 600, 10, 9, 0.1f ) < strong );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackQualityCredit( 0, 600, 10, 9, 1.0f ), 0.0f );
+	BOOST_CHECK( BotSFJ_TrackQualityCredit( 3000, 600, 0, 0, 1.0f ) > 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( force_speed_comes_only_from_human_speed_routes )
+{
+	/* Unknown or no recorded Speed never authorizes activation. */
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( -1, -1, 1, 1, 3, 100, 10 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( 0, -1, 1, 1, 3, 100, 10 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedActivatable( 1, 2, 1, 1, 3, 100, 10 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( 1, 3, 1, 1, 2, 100, 10 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( 1, 1, 0, 1, 3, 100, 10 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( 1, 1, 1, 0, 3, 100, 10 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedActivatable( 1, 1, 1, 1, 3, 5, 10 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedUsable( 1, 2, 0, 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedUsable( 1, 2, 0, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedUsable( 0, -1, 0, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( 0, 1, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( -1, 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 1, 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 0, 0, 0 ) );
+}
+
 BOOST_AUTO_TEST_SUITE_END()

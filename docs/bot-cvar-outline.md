@@ -198,7 +198,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 
 `bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
 
-Recorded human routes are considered before improvised waypoint corridors. Circle starts can be approached from up to 3,072 units away along a swept, floor-checked path, even when a legacy waypoint is closer or points elsewhere; mid-route joins still require forward alignment. Routes can cross fatal drops: a validated jump is checked along its flight path and at its landing, not against the empty ground or hazards underneath the gap. Grounded approaches, circle preparation, and cancelled-jump walking never receive that exemption. Live flight hazards and landing checks remain active both in and out of combat. Required mover interactions remain barriers.
+Recorded human routes are considered before improvised waypoint corridors. Circle starts can be approached from up to 3,072 units away along a swept, floor-checked path, even when a legacy waypoint is closer or points elsewhere; mid-route joins still require forward alignment. Routes can cross fatal drops: a validated jump is checked along its flight path and at its landing, not against the empty ground or hazards underneath the gap. Grounded approaches, circle preparation, and cancelled-jump walking never receive that exemption. Live flight hazards and landing checks remain active both in and out of combat. Required mover interactions remain barriers. Ordinary walking treats a wall or a small ledge riser ahead as an obstacle, not a pit: the floor is probed where the bot can actually reach, so it keeps walking (and jumping obstacles) instead of freezing. Grounded route connections may climb or drop single steps. Lava, slime, nodrop, trigger_hurt and lethal drops are still refused.
 
 Arc validation performs bounded swept player-hull integration at the command's pmove slice size until a real static, walkable contact; unresolved falls are rejected rather than vertically probing for a floor. Ceilings, dynamic blockers, lava, slime, no-drop/void areas, and instant-kill `trigger_hurt` volumes along the full arc reject the intent. Landing-corridor slack uses `bot_strafe_tolerance` instead of requiring exact waypoint landings. Cached checks are reused only for matching route/input choices; every takeoff/rejump is refreshed, and meaningful airborne heading changes require revalidation. Instant-kill triggers are cached per map instead of being queried with an area search for every sample. Selection and final command ownership both require the AI's own queued movement to be aligned with the corridor.
 
@@ -346,9 +346,19 @@ A grounded bot searches for human circle-jump starts within 3,072 horizontal uni
 and 64 vertical units, independently of its legacy waypoint heading or the
 distance to the current waypoint. The approach must pass swept clearance,
 footing and hazard checks; a recording is not permission to walk across a gap.
-The bot walks to within 48 units of the chosen start before beginning its jump
-sequence. A blocked approach or one lasting over twenty seconds falls back to
-ordinary navigation. Nearby mid-route pickups remain available as described below.
+The bot walks at full speed to the recorded start and begins its jump only once it
+is lined up there: grounded, within 24 units of the start height, within 16
+units of the start-to-first-landing line and at most 16 units past the start,
+and moving within 25 degrees of that heading (human takeoffs were 2-12 units
+from the start, about 70% within 19 degrees). A running bot may begin up to
+48 units early by the distance it covers before leaving the ground. When the
+bot is not already behind the start, it first walks to a clear run-up point
+96 (or 48) units behind it; without a clear run-up it walks straight to the
+start and only position is checked. Being near the start is never enough on
+its own. A blocked approach, two seconds without 16 units of progress, or an
+approach over twenty seconds falls back to ordinary navigation and looks for
+another start right away. A chain into another route at 250 u/s or more keeps
+its momentum and uses the earlier 48-unit entry. Nearby mid-route pickups remain available as described below.
 
 Recorded routes take precedence over single-jump hints and waypoint corridors.
 During approach and chaining, incidental waypoint jump/duck flags and navigation
@@ -375,7 +385,11 @@ Route choice and chaining:
   through swept, floor-checked connectors up to 1,024 units long. Connectivity
   is built one route per frame and shared between bots. Planning considers safe
   acquisition cost, recorded speed, completion history, stalls, and individual
-  hop reliability. Actual approaches are checked again against the live map.
+  hop reliability. A longer, faster or more reliable route may be chosen over
+  a nearer one: its credit is up to 384 units of extra walking, scaled by its
+  completion rate, hop reliability, length (full at 2,048 units) and average
+  recorded speed (full at 600 u/s). Actual approaches are checked again
+  against the live map.
 - Strategic destinations are distinct from the next landing: CTF flag/base or
   carrier goals, visible targets or last-seen enemy positions, and other explicit
   objectives guide route-network selection. When no such goal exists, the bot
@@ -391,30 +405,46 @@ Route choice and chaining:
   Backward-facing escape and saber-only restrictions still apply.
 - Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by start
   and last landing plus execution speed context so re-exports retain history.
-  The versioned format begins with `botroute_stats 3`; each route stores start x/y/z, last landing x/y/z,
+  The versioned format begins with `botroute_stats 4`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
   traversal deaths, unsafe-arc rejections, and 32 triples of hop failures, passes,
   and successful force-jump hold height.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
   unknown legacy history for export ranking. Legacy eight-field and version 2
-  rows remain readable. Joining mid-route or chaining in counts as an attempt.
+  rows remain readable. Version 3 files are migrated once: hop failures, stalls
+  and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
+  cleared, while deaths, passes and completions are kept. Joining mid-route or chaining in counts as an attempt.
   Interrupted attempts are excluded from the completion-rate denominator.
   Approach walking is excluded from the measured distance, duration and speed
   integrals; measurement begins at the circle start.
   Measured travel speed and retention relative to recorded speed influence
   selection; unmeasured history stays neutral. An unsuccessful route retains its
-  five-second per-bot retry delay. Failed hops additionally receive a shared
-  cooldown: initially 15 seconds for stalls/unsafe arcs or 60 seconds for lethal
-  traversal, doubling with failures up to five minutes. Reliability penalties
+  five-second per-bot retry delay. Human route hops are trusted: when the bot's
+  own arc prediction finds wall or ledge contact, an off-corridor landing or a
+  slide, but no hazard (trigger_hurt, lava, slime, nodrop, open drop, damaging
+  landing or mover), the bot still takes the hop the human took. Grounded
+  frames on a trusted hop are released only for hazards, not for ledge lips.
+  A hop loses that trust after a death on it, or after three or more real
+  failures to carry speed through it that outnumber its passes. Only lethal
+  failures or untrusted hops receive a shared cooldown: initially 15 seconds
+  for stalls/unsafe arcs or 60 seconds for lethal traversal, doubling with
+  failures up to five minutes. Reliability penalties
   persist across maps/restarts, while successful prefixes remain usable; bots
   stop before a quarantined hop rather than repeating it. Falling, lava, slime
   and kill-trigger deaths are attributed to the launched hop, including a
   three-second window after airborne input release. Unrelated combat deaths are
   interruptions, not terrain failures. Results are saved every 30 seconds when
   dirty, on reload, and at map end/shutdown.
-- Force Speed no longer blocks initiation. Known Speed-required hops need
-  compatible active Speed; normal or legacy-unknown routes may also be tried
+- Force Speed for navigation comes only from human routes recorded with it.
+  Plain waypoint travel no longer switches Speed on. A bot taking a hop
+  recorded with active Speed (at a level no higher than its own) taps Force
+  Speed itself once it is within 256 units of the circle start, when
+  `bot_forcepowers` is on, Speed is not disabled, and it has the force power.
+  Unknown (legacy) recordings never authorize Speed. On a route recorded
+  without Speed, out of sight of enemies, a bot whose Speed did not come from a
+  route taps it off once (after the engine's 1.5 s deactivation delay). Combat
+  Speed use is unchanged. Normal or legacy-unknown routes may still be tried
   under Speed after validating their actual trajectory. Matching recordings
   receive preference. The 128-route export budget is shared between normal,
   active Speed levels, and unknown legacy recordings, with spatial coverage
