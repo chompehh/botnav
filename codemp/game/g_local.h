@@ -1877,6 +1877,7 @@ void G_StrafeTrackCommand( gentity_t *ent );
 void G_StrafeTrackFlushAll( void );
 float BotSFJ_RouteExportFactor( const char *lowerMap, const float *start, const float *end );
 qboolean BotSFJ_ClientIsStrafeJumping( int clientNum );
+void BotSFJ_ClientDied( int clientNum, int meansOfDeath );
 void G_WriteClientSessionData( gclient_t *client );
 void player_die (gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int damage, int mod);
 void AddScore( gentity_t *ent, vec3_t origin, int score );

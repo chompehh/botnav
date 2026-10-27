@@ -2864,6 +2864,87 @@ BOOST_AUTO_TEST_CASE( escape_strafes_start_outside_saber_range )
 	BOOST_CHECK_EQUAL( BotSFJ_EscapeStartDistance( -5.0f ), 0.0f );
 }
 
+BOOST_AUTO_TEST_CASE( route_network_connects_detours_without_crossing_unsafe_gaps )
+{
+	const float edges[25] = {
+		-1, 200, -1, -1, -1,
+		-1, -1, 300, -1, -1,
+		-1, 100, -1, -1, -1,
+		-1, -1, 50, -1, -1,
+		-1, -1, -1, -1, -1
+	};
+	const float seed[5] = {100, -1, -1, 500, -1};
+	float cost[5];
+	int first[5];
+	BotSFJ_RoutePaths( 5, edges, seed, cost, first );
+	BOOST_CHECK_EQUAL( first[1], 0 );
+	BOOST_CHECK_EQUAL( cost[1], 300 );
+	BOOST_CHECK_EQUAL( first[2], 3 );
+	BOOST_CHECK_EQUAL( cost[2], 550 );
+	BOOST_CHECK_EQUAL( first[4], -1 );
+	BOOST_CHECK_EQUAL( cost[4], -1 );
+
+	const float none[5] = {-1, -1, -1, -1, -1};
+	BotSFJ_RoutePaths( 5, edges, none, cost, first );
+	for (int i = 0; i < 5; i++)
+		BOOST_CHECK_EQUAL( first[i], -1 );
+}
+
+BOOST_AUTO_TEST_CASE( route_failures_are_contextual_and_retries_are_bounded )
+{
+	const int counts[5] = {200, 0, 0, 100, 4};
+	int quotas[5];
+	BotSFJ_TrackCoverageQuotas( counts, 128, quotas );
+	BOOST_CHECK_EQUAL( quotas[0], 62 );
+	BOOST_CHECK_EQUAL( quotas[3], 62 );
+	BOOST_CHECK_EQUAL( quotas[4], 4 );
+	BOOST_CHECK_EQUAL( quotas[1] + quotas[2], 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSpeedGroup( -1, -1 ), 4 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSpeedGroup( 0, 3 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackSpeedGroup( 1, 3 ), 3 );
+	BOOST_CHECK_EQUAL( BotSFJ_SpeedContext( 0, 3 ), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_SpeedContext( 1, 1 ), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_SpeedContext( 1, 3 ), 3 );
+	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 1, 1 ), BotSFJ_HopRetryDelay( 1, 0 ) );
+	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 3, 0 ), BotSFJ_HopRetryDelay( 1, 0 ) );
+	BOOST_CHECK_EQUAL( BotSFJ_HopRetryDelay( 100, 1 ), 300000 );
+	BOOST_CHECK_LT( BotSFJ_HopReliability( 2, 0 ), BotSFJ_HopReliability( 1, 0 ) );
+	BOOST_CHECK_GT( BotSFJ_HopReliability( 1, 5 ), BotSFJ_HopReliability( 1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( held_force_jump_predicts_more_airtime_and_validates_the_landing )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_ForceJumpRetryHeight( 100, 0, 384 ), 100 );
+	BOOST_CHECK_EQUAL( BotSFJ_ForceJumpRetryHeight( 100, 2, 384 ), 164 );
+	BOOST_CHECK_EQUAL( BotSFJ_ForceJumpRetryHeight( 350, 4, 384 ), 384 );
+	BOOST_CHECK( BotSFJ_ForceJumpHold( 1, 164, 1, 0, 120, 200 ) );
+	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 100, 1, 0, 120, 200 ) );
+	BOOST_CHECK( BotSFJ_RecordedLandingAllows( 600, 0, 128, 610, 10, 128, 96 ) );
+	BOOST_CHECK( !BotSFJ_RecordedLandingAllows( 600, 0, 128, 300, 0, 128, 96 ) );
+	BOOST_CHECK( !BotSFJ_RecordedLandingAllows( 600, 0, 128, 600, 0, -1000, 96 ) );
+	BOOST_CHECK_EQUAL( BotSFJ_HeldJumpVelocity( 3, 0, 1, 0, 1, 200, 80, 250 ), 225 );
+	BOOST_CHECK_EQUAL( BotSFJ_HeldJumpVelocity( 3, 1, 0, 0, 1, 200, 80, 250 ), 225 );
+	BOOST_CHECK_EQUAL( BotSFJ_HeldJumpVelocity( 3, 1, 1, 0, 1, 100, 120, 250 ), 225 );
+	float flight[2] = {0, 0};
+	for (int hold = 0; hold < 2; hold++)
+	{
+		float z = 0, velocity = 225;
+		for (int step = 0; step < 4000; step++)
+		{
+			velocity = BotSFJ_HeldJumpVelocity( 3, 1, 1, step < 25,
+				hold, 160, z, velocity );
+			const float previous = velocity;
+			velocity -= 0.8f;
+			z += (previous + velocity) * 0.0005f;
+			flight[hold] += 0.001f;
+			if (z <= 0)
+				break;
+		}
+	}
+	BOOST_CHECK_GT( flight[1], flight[0] + 0.25f );
+	BOOST_CHECK_LT( flight[1], 4.0f );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 BOOST_AUTO_TEST_CASE( recorded_route_tolerance )
@@ -3094,12 +3175,14 @@ BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
 	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 0, 1, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 1, 0, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 1, 1, 1 ) );
-	BOOST_CHECK( BotSFJ_TrackHazardBypassAllows( 1, 0, 0 ) );
-	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 0, 0, 0 ) );
-	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 1, 1, 0 ) );
-	BOOST_CHECK( !BotSFJ_TrackHazardBypassAllows( 1, 0, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedAllows( -1, -1, 1, 3 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedAllows( 0, 0, 1, 3 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedAllows( 1, 3, 0, 3 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedAllows( 1, 3, 1, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedAllows( 1, 2, 1, 3 ) );
 	BOOST_CHECK( BotSFJ_TrackEntryAllows( 1400.0f, 0.0f, 1,
 		BOT_SFJ_TRACK_APPROACH_RADIUS ) );
+	BOOST_CHECK( BotSFJ_TrackEntryAllows( 3000.0f, 0.0f, 1, 96.0f ) );
 
 	/* Backward strafing only on full-force retreats, at the configured rate. */
 	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 0, 0, 100, 0 ) );

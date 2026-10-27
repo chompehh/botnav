@@ -5,7 +5,7 @@
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
-#define BOT_SFJ_TRACK_APPROACH_RADIUS 1536.0f
+#define BOT_SFJ_TRACK_APPROACH_RADIUS 3072.0f
 #define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
 #define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
@@ -15,9 +15,10 @@
 #define BOT_SFJ_PURSUIT_STOP_DISTANCE 384.0f
 #define BOT_SFJ_PURSUIT_START_RATE 80.0f
 #define BOT_SFJ_PURSUIT_STOP_RATE 20.0f
+#define BOT_SFJ_NAV_ENEMY_GUARD 384.0f
 #define BOT_SFJ_JUMP_VELOCITY 225.0f
-/* Two seconds remain representable even at the supported 1 ms pmove slice. */
-#define BOT_SFJ_MAX_ARC_STEPS 2048
+/* Held force jumps need a longer horizon than ordinary hops. */
+#define BOT_SFJ_MAX_ARC_STEPS 4096
 #define BOT_SFJ_MAX_CORRIDOR_POINTS 513
 
 static inline float BotSFJ_ClampSetting(float value, float minimum, float maximum)
@@ -125,10 +126,98 @@ static inline int BotSFJ_TrackForceJumpChargeAllows(int route, int forceJumpHop,
 	return route && forceJumpHop && !routeApproach;
 }
 
-static inline int BotSFJ_TrackHazardBypassAllows(int route, int routeApproach,
-	int inCombat)
+static inline int BotSFJ_SpeedContext(int active, int level)
 {
-	return route && !routeApproach && !inCombat;
+	return active ? (level < 1 ? 1 : (level > 3 ? 3 : level)) : 0;
+}
+
+static inline int BotSFJ_TrackSpeedGroup(int active, int level)
+{
+	return active == 0 ? 0 : (active == 1 && level >= 1 && level <= 3 ? level : 4);
+}
+
+static inline void BotSFJ_TrackCoverageQuotas(const int counts[5], int maximum,
+	int quotas[5])
+{
+	int i, remaining = maximum;
+	int changed;
+
+	for (i = 0; i < 5; i++)
+		quotas[i] = 0;
+	do
+	{
+		changed = 0;
+		for (i = 0; i < 5 && remaining > 0; i++)
+			if (quotas[i] < counts[i])
+			{
+				quotas[i]++;
+				remaining--;
+				changed = 1;
+			}
+	} while (changed && remaining > 0);
+}
+
+static inline int BotSFJ_TrackSpeedAllows(int recordedActive, int recordedLevel,
+	int active, int level)
+{
+	return recordedActive <= 0 ||
+		(active && (recordedLevel < 0 || level >= recordedLevel));
+}
+
+static inline int BotSFJ_HopRetryDelay(int failures, int lethal)
+{
+	int delay = lethal ? 60000 : 15000;
+	int i;
+
+	for (i = 1; i < failures && delay < 300000; i++)
+		delay *= 2;
+	return delay > 300000 ? 300000 : delay;
+}
+
+static inline float BotSFJ_HopReliability(int failures, int passes)
+{
+	return ((float)passes + 1.0f) / ((float)passes + 1.0f + 4.0f * failures);
+}
+
+/* Multi-source Dijkstra: seeds are safe approaches, edges are safe connectors.
+ * A negative cost means unreachable; first[] keeps the acquisition route. */
+static inline void BotSFJ_RoutePaths(int count, const float *edges,
+	const float *seed, float *cost, int *first)
+{
+	int visited[BOT_SFJ_MAX_TRACK_ROUTES];
+	int i, j, step, best;
+
+	if (count < 0 || count > BOT_SFJ_MAX_TRACK_ROUTES)
+		return;
+	for (i = 0; i < count; i++)
+	{
+		visited[i] = 0;
+		cost[i] = seed[i];
+		first[i] = seed[i] >= 0.0f ? i : -1;
+	}
+	for (step = 0; step < count; step++)
+	{
+		best = -1;
+		for (i = 0; i < count; i++)
+			if (!visited[i] && cost[i] >= 0.0f &&
+				(best < 0 || cost[i] < cost[best]))
+				best = i;
+		if (best < 0)
+			break;
+		visited[best] = 1;
+		for (j = 0; j < count; j++)
+		{
+			const float edge = edges[best * count + j];
+			const float next = cost[best] + edge;
+
+			if (!visited[j] && edge >= 0.0f &&
+				(cost[j] < 0.0f || next < cost[j]))
+			{
+				cost[j] = next;
+				first[j] = first[best];
+			}
+		}
+	}
 }
 
 /* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
@@ -920,6 +1009,25 @@ static inline int BotSFJ_ForceJumpHold(int recordedForce, float recordedHeight, 
 	return 1;
 }
 
+static inline float BotSFJ_ForceJumpRetryHeight(float recordedHeight, int failures,
+	float maximumHeight)
+{
+	float height = recordedHeight + (float)(failures > 4 ? 4 : (failures < 0 ? 0 : failures)) * 32.0f;
+
+	return BotSFJ_ClampSetting(height, 0.0f, maximumHeight);
+}
+
+static inline int BotSFJ_RecordedLandingAllows(float targetX, float targetY,
+	float targetZ, float landingX, float landingY, float landingZ, float tolerance)
+{
+	const float x = landingX - targetX;
+	const float y = landingY - targetY;
+
+	return isfinite(x) && isfinite(y) && isfinite(landingZ) &&
+		tolerance >= 0.0f && x * x + y * y <= tolerance * tolerance &&
+		fabsf(landingZ - targetZ) <= 64.0f;
+}
+
 /* Reject hairpins, but allow a gently curving, linked trail to be considered. */
 static inline int BotSFJ_CurveSegmentAllows(float localAlignment, float totalAlignment)
 {
@@ -1019,6 +1127,20 @@ static inline float BotSFJ_JKALaunchVelocity(int forceLevel, float height,
 		height = 0.0f;
 	return ((jumpHeight[forceLevel] - height) / jumpHeight[forceLevel]) *
 		jumpStrength[forceLevel] / 10.0f + BOT_SFJ_JUMP_VELOCITY;
+}
+
+static inline float BotSFJ_HeldJumpVelocity(int forceLevel, int canLevitate,
+	int hasForce, int initialHold, int recordedHold, float targetHeight,
+	float height, float velocity)
+{
+	const int holding = initialHold ||
+		(recordedHold && velocity > 0.0f && height < targetHeight);
+
+	if (holding && canLevitate && (height <= 32.0f || hasForce))
+		return BotSFJ_JKALaunchVelocity(forceLevel, height, 1);
+	if ((holding || recordedHold) && velocity > BOT_SFJ_JUMP_VELOCITY)
+		return BOT_SFJ_JUMP_VELOCITY;
+	return velocity;
 }
 
 static inline void BotSFJ_PredictReleasedVertical(int forceLevel, int forceEligible,
