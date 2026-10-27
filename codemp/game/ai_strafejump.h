@@ -5,9 +5,9 @@
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
-#define BOT_SFJ_TRACK_APPROACH_RADIUS 768.0f
+#define BOT_SFJ_TRACK_APPROACH_RADIUS 1536.0f
 #define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
-#define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 5000
+#define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
 #define BOT_SFJ_MAX_TRACK_ROUTES 128
 #define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
@@ -107,6 +107,28 @@ static inline int BotSFJ_TrackResolvedAttempts(int attempts, int completions, in
 	if (interrupted > 0)
 		attempts -= interrupted;
 	return attempts > completions ? attempts : completions;
+}
+
+static inline float BotSFJ_TrackStallFactor(int stalls)
+{
+	float factor;
+
+	if (stalls <= 0)
+		return 1.0f;
+	factor = powf(0.65f, (float)stalls);
+	return factor < 0.1f ? 0.1f : factor;
+}
+
+static inline int BotSFJ_TrackForceJumpChargeAllows(int route, int forceJumpHop,
+	int routeApproach)
+{
+	return route && forceJumpHop && !routeApproach;
+}
+
+static inline int BotSFJ_TrackHazardBypassAllows(int route, int routeApproach,
+	int inCombat)
+{
+	return route && !routeApproach && !inCombat;
 }
 
 /* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
