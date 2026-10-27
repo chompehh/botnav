@@ -601,6 +601,8 @@ typedef struct bot_state_s
 	int					sfjArcSpeedContext;
 	qboolean			sfjArcSafe;
 	qboolean			sfjArcBlocked;
+	qboolean			sfjArcHazard;		// last arc check failed on a hazard (liquid, nodrop, kill trigger, harmful landing, mover)
+	qboolean			sfjArcTrusted;		// last arc check was accepted on trust in the human route
 	vec3_t				sfjArcDirection;
 	vec3_t				sfjArcDestination;
 	int					sfjArcSide;
@@ -632,6 +634,13 @@ typedef struct bot_state_s
 	int					sfjPlannedEntry;
 	int					sfjLastRoute;
 	int					sfjNextWaypointAcquire;
+	vec3_t				sfjApproachTarget;	// current walk target while approaching a circle start
+	float				sfjApproachRunup;	// run-up distance behind the circle start (0 = walk straight to it)
+	qboolean			sfjApproachViaRunup;	// walking to the run-up point before lining up on the start
+	float				sfjApproachBest;	// closest distance to the approach target so far
+	int					sfjApproachBestTime;	// level.time sfjApproachBest last improved
+	int					sfjSpeedSource;		// 0 none, 1 Speed not from a route, 2 Speed activated for a Speed route
+	int					sfjSpeedPressTime;	// level.time the controller last pressed Force Speed
 	int					sfjRouteSampleTime;
 	vec3_t				sfjRouteSampleOrigin;
 	float				sfjRouteDistance;

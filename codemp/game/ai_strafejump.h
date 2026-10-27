@@ -164,6 +164,154 @@ static inline int BotSFJ_TrackSpeedAllows(int recordedActive, int recordedLevel,
 		(active && (recordedLevel < 0 || level >= recordedLevel));
 }
 
+/*
+ * Force Speed for a recorded route comes only from a human recording that used
+ * it. Unknown (-1) never authorizes Speed. The bot must be able to activate it
+ * now at no less than the recorded level.
+ */
+static inline int BotSFJ_TrackSpeedActivatable(int recordedActive, int recordedLevel,
+	int powersAllowed, int known, int level, int forcePower, int needed)
+{
+	if (recordedActive != 1 || !powersAllowed || !known || level < 1 || level > 3)
+		return 0;
+	if (recordedLevel > level)
+		return 0;
+	return forcePower >= needed;
+}
+
+/* A route hop that needs Speed is usable now, or once the bot activates Speed. */
+static inline int BotSFJ_TrackSpeedUsable(int recordedActive, int recordedLevel,
+	int active, int level, int activatable)
+{
+	return BotSFJ_TrackSpeedAllows(recordedActive, recordedLevel, active, level) ||
+		(recordedActive == 1 && !active && activatable);
+}
+
+/* Bot-held Speed that did not come from a Speed route is turned off on a normal route. */
+static inline int BotSFJ_TrackSpeedShouldDrop(int routeRecordedActive, int speedActive,
+	int speedFromRoute, int enemyVisible)
+{
+	return routeRecordedActive != 1 && speedActive && !speedFromRoute && !enemyVisible;
+}
+
+/*
+ * Human routes are trusted over the bot's own arc prediction (walls, ledges,
+ * off-corridor landings). Trust is lost only after a death on the route, or
+ * after repeated real failures to carry speed through the hop that outnumber
+ * its successful passes. Hazards are never trusted away.
+ */
+#define BOT_SFJ_TRACK_TRUST_FAILURES 3
+
+static inline int BotSFJ_TrackHopTrusted(int deaths, int failures, int passes)
+{
+	return deaths <= 0 &&
+		(failures < BOT_SFJ_TRACK_TRUST_FAILURES || failures <= passes);
+}
+
+/*
+ * Recorded takeoffs are within about 12u of the stored start and run along the
+ * start->first-landing heading. The circle jump starts only once the bot is on
+ * that line at the start, moving along it; a moving bot may trigger a little
+ * early by the distance it covers before leaving the ground.
+ */
+#define BOT_SFJ_TRACK_START_TOUCH 16.0f
+#define BOT_SFJ_TRACK_START_HEADING 25.0f
+#define BOT_SFJ_TRACK_START_RUNUP 96.0f
+#define BOT_SFJ_TRACK_START_CONE 20.0f
+
+static inline float BotSFJ_TrackStartLead(float speed, int frameMs)
+{
+	float seconds;
+
+	if (!isfinite(speed) || speed <= 0.0f)
+		return 0.0f;
+	seconds = (float)(frameMs > 0 ? frameMs : 0) / 1000.0f;
+	/* Slow starts spend up to 120 ms swinging the view before takeoff. */
+	if (speed < 250.0f)
+		seconds += 0.12f;
+	return BotSFJ_ClampSetting(speed * seconds, 0.0f, 48.0f);
+}
+
+/* (hx, hy) is the unit start->first-landing heading. */
+static inline int BotSFJ_TrackStartReady(float ox, float oy, float sx, float sy,
+	float hx, float hy, float vx, float vy, int frameMs, int relaxedHeading)
+{
+	const float rx = ox - sx;
+	const float ry = oy - sy;
+	const float along = rx * hx + ry * hy;
+	const float lateral = fabsf(rx * hy - ry * hx);
+	const float speed = sqrtf(vx * vx + vy * vy);
+	const float lead = BotSFJ_TrackStartLead(speed, frameMs);
+
+	if (!isfinite(along) || !isfinite(lateral) || !isfinite(speed))
+		return 0;
+	if (relaxedHeading)
+		return sqrtf(rx * rx + ry * ry) <= BOT_SFJ_TRACK_START_TOUCH + lead;
+	if (lateral > BOT_SFJ_TRACK_START_TOUCH ||
+		along > BOT_SFJ_TRACK_START_TOUCH ||
+		along < -(BOT_SFJ_TRACK_START_TOUCH + lead))
+		return 0;
+	if (speed < 32.0f)
+		return 1;
+	return (vx * hx + vy * hy) / speed >=
+		cosf(BOT_SFJ_TRACK_START_HEADING * 0.017453292519943295f);
+}
+
+/*
+ * Where to walk while approaching a circle start: straight through the start
+ * from behind it along the route heading, otherwise to a run-up point behind
+ * the start first. Returns 1 when aiming at the start itself.
+ */
+static inline int BotSFJ_TrackStartAim(float ox, float oy, float sx, float sy,
+	float hx, float hy, float runup, float *tx, float *ty)
+{
+	const float rx = ox - sx;
+	const float ry = oy - sy;
+	const float along = rx * hx + ry * hy;
+	const float lateral = fabsf(rx * hy - ry * hx);
+	const float cone = tanf(BOT_SFJ_TRACK_START_CONE * 0.017453292519943295f);
+
+	if (runup <= 0.0f || (along <= 0.0f &&
+		lateral <= (BOT_SFJ_TRACK_START_TOUCH > -along * cone ?
+			BOT_SFJ_TRACK_START_TOUCH : -along * cone)))
+	{
+		*tx = sx;
+		*ty = sy;
+		return 1;
+	}
+	*tx = sx - hx * runup;
+	*ty = sy - hy * runup;
+	return 0;
+}
+
+/*
+ * A nearby route that is more successful, longer or faster is worth a short
+ * extra walk compared with the nearest start. The credit is bounded, so far
+ * routes do not displace a close start by much.
+ */
+#define BOT_SFJ_TRACK_QUALITY_WALK 384.0f
+
+static inline float BotSFJ_TrackQualityCredit(float remaining, float averageSpeed,
+	int attempts, int completions, float reliability)
+{
+	float success, lengthFactor, speedFactor;
+
+	if (!isfinite(remaining) || remaining <= 0.0f)
+		return 0.0f;
+	if (attempts < 0)
+		attempts = 0;
+	if (completions < 0)
+		completions = 0;
+	if (completions > attempts)
+		completions = attempts;
+	success = ((float)completions + 1.0f) / ((float)attempts + 2.0f);
+	lengthFactor = BotSFJ_ClampSetting(remaining / 2048.0f, 0.0f, 1.0f);
+	speedFactor = BotSFJ_ClampSetting((averageSpeed - 250.0f) / 350.0f, 0.0f, 1.0f);
+	return BOT_SFJ_TRACK_QUALITY_WALK * success *
+		(0.5f * lengthFactor + 0.5f * speedFactor) *
+		BotSFJ_ClampSetting(reliability, 0.0f, 1.0f);
+}
+
 static inline int BotSFJ_HopRetryDelay(int failures, int lethal)
 {
 	int delay = lethal ? 60000 : 15000;
