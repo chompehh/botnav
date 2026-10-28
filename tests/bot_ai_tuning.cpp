@@ -2634,10 +2634,23 @@ BOOST_AUTO_TEST_CASE( sfj_track_circle_jump_start )
 BOOST_AUTO_TEST_CASE( sfj_track_landing_and_end )
 {
 	int slow;
+	int previousGrounded = 1;
+	int commandLandings = 0;
+	const int commandGrounded[] = { 0, 1, 0, 1 };
+	int i;
 
 	BOOST_CHECK( BotSFJ_TrackLanded( 0, 1 ) );
 	BOOST_CHECK( !BotSFJ_TrackLanded( 1, 1 ) );
 	BOOST_CHECK( !BotSFJ_TrackLanded( 0, 0 ) );
+	BOOST_CHECK_EQUAL( BotSFJ_AvoidWallrunSide( 1, 1, 0 ), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_AvoidWallrunSide( -1, 1, 1 ), -1 );
+	/* Two hops between server frames must still produce two command landings. */
+	for ( i = 0; i < (int)( sizeof( commandGrounded ) / sizeof( commandGrounded[0] ) ); i++ )
+	{
+		commandLandings += BotSFJ_TrackLanded( previousGrounded, commandGrounded[i] );
+		previousGrounded = commandGrounded[i];
+	}
+	BOOST_CHECK_EQUAL( commandLandings, 2 );
 
 	/* Slow only counts on the ground at or below ground speed. */
 	BOOST_CHECK_EQUAL( BotSFJ_TrackSlowSince( 0, 1000, 0, 100.0f, 250.0f ), 0 );

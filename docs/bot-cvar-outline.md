@@ -304,7 +304,7 @@ A bot uses a route when it is within 96 units of `start_pos`, or alongside the r
 
 With `bot_strafetrack 1` (default), the server records human strafe jumps on every map:
 - **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route (session #N) began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees `Recording strafe route (session #N ...)`. `N` is only a per-session counter that restarts whenever the game module loads; it is not the database id.
-- **While recording:** every usercmd the server processes (about every 8 ms at 125 fps, not once per server frame) stores forward/strafe/jump input, yaw, pitch, yaw change, command time and msec, position, horizontal velocity, speed, grounded state, jump-held, force-jump state, and Force Speed active state and level. The last 150 ms before the start (the takeoff flick) are kept from a short pre-roll buffer and have negative `time_ms`. Each landing becomes a route node (position, speed, strafe key held on that hop, air time) plus the hop's style: side-only share of the air time, side-switch point (% of the air time), first key side, takeoff and in-air yaw speed, and whether the player force jumped and how high. Each landing is the bots' next goal.
+- **While recording:** every usercmd the server processes (about every 8 ms at 125 fps, not once per server frame) stores forward/strafe/jump input, yaw, pitch, yaw change, command time and msec, position, horizontal velocity, speed, grounded state, jump-held, force-jump state, and Force Speed active state and level. The last 150 ms before the start (the takeoff flick) are kept from a short pre-roll buffer and have negative `time_ms`. Ground-to-air and air-to-ground transitions are measured at command resolution, so a landing and its hop style cannot be lost when multiple hops occur between server frames. Each landing becomes a route node (position, speed, strafe key held on that hop, air time) plus the hop's style: side-only share of the air time, side-switch point (% of the air time), first key side, takeoff and in-air yaw speed, and whether the player force jumped and how high. Each landing is the bots' next goal.
 - **No lag:** recording only copies numbers into a fixed per-player buffer. When a route ends the route and node rows are saved at once and the input rows are written 512 per server frame; a new route from the same player starts once they are in. Remaining rows are flushed on disconnect and shutdown.
 - **End:** the player has been on the ground at or below normal ground speed for 150 ms. The console prints the result. Routes with fewer than 2 landings or under 256 units, or that touch lava/slime/no-drop, are discarded, as are routes cut short by death, teleporting, spectating or forced movement.
 
@@ -316,7 +316,7 @@ With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewr
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at 24 MB, like `exportDuelTrack`);
-- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 128 routes per map are chosen, starts at least 192 units apart, in order of human value (length x average speed) times the bots' own result on the loaded map: neutral until the bots have tried a route 4 times, then (0.25 + 1.5 x success rate) x speed retention, halving every two further failures while never completed. Fast routes the bots finish stay; routes they keep failing drop out first. Routes saved by older builds get their hop style measured once from their stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
+- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 256 routes per map are chosen, starts at least 192 units apart, in order of human value (length x average speed) times the bots' own result on the loaded map: neutral until the bots have tried a route 4 times, then (0.25 + 1.5 x success rate) x speed retention, halving every two further failures while never completed. Fast routes the bots finish stay; routes they keep failing drop out first. Routes saved by older builds get their hop style measured once from their stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
 - reloads the routes, so bots start using them immediately.
 
 Recorded route block format:
@@ -381,7 +381,9 @@ node matching does not remove terminal checks. Nodes are confirmed on the ground
 not merely by flying past their horizontal coordinates.
 
 Route choice and chaining:
+- At takeoff, the controller probes the engine's lateral wallrun trace; if the selected diagonal side would trigger a sideways wallrun, it tries the opposite strafe with a freshly validated arc.
 - A bounded, directed route network joins recorded endpoints to circle starts
+  or intermediate landings
   through swept, floor-checked connectors up to 1,024 units long. Connectivity
   is built one route per frame and shared between bots. Planning considers safe
   acquisition cost, recorded speed, completion history, stalls, and individual
@@ -392,7 +394,9 @@ Route choice and chaining:
   against the live map.
 - Strategic destinations are distinct from the next landing: CTF flag/base or
   carrier goals, visible targets or last-seen enemy positions, and other explicit
-  objectives guide route-network selection. When no such goal exists, the bot
+  objectives guide route-network selection. Last-seen enemies are pursued only
+  within `bot_target_timeout` and `bot_targetdistance`; a flag carrier's return
+  route cannot be displaced by an incidental pickup. When no such goal exists, the bot
   retains a distant reachable route endpoint broadly in its current direction.
   Connected routes may take a local detour to make overall progress. If no circle
   can be approached directly, idle bots can use a reachable waypoint trail to

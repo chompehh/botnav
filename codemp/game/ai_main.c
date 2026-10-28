@@ -4879,26 +4879,40 @@ static void BotSFJ_UpdateConnections(bot_state_t *bs)
 	memset(tried, 0, sizeof(tried));
 	for (attempt = 0; attempt < 8; attempt++)
 	{
-		int best = -1;
 		float distance = BOT_SFJ_TRACK_CHAIN_RADIUS + 1.0f;
+		int best = -1, bestEntry = -1;
 
 		for (j = 0; j < g_botSfjTrackRouteCount; j++)
 		{
-			const float gap = Distance(end, g_botSfjTrackRoutes[j].start);
+			const bot_sfj_track_route_t *to = &g_botSfjTrackRoutes[j];
+			int entry;
 
-			if (i != j && !tried[j] && gap < distance &&
-				fabsf(end[2] - g_botSfjTrackRoutes[j].start[2]) <= 64.0f)
+			if (i == j || tried[j] ||
+				g_botSfjConnections[i * g_botSfjTrackRouteCount + j] >= 0.0f)
+				continue;
+			for (entry = 0; entry < to->nodeCount; entry++)
 			{
-				best = j;
-				distance = gap;
+				const float *position = entry ? to->node[entry - 1] : to->start;
+				const float gap = Distance(end, position);
+
+				if (gap < distance && fabsf(end[2] - position[2]) <= 64.0f)
+				{
+					best = j;
+					bestEntry = entry;
+					distance = gap;
+				}
 			}
 		}
 		if (best < 0)
 			break;
 		tried[best] = 1;
-		if (BotSFJ_WalkConnectionSafe(bs, end, g_botSfjTrackRoutes[best].start,
+		if (BotSFJ_WalkConnectionSafe(bs, end, bestEntry ?
+				g_botSfjTrackRoutes[best].node[bestEntry - 1] :
+				g_botSfjTrackRoutes[best].start,
 				BOT_SFJ_TRACK_CHAIN_RADIUS))
+		{
 			g_botSfjConnections[i * g_botSfjTrackRouteCount + best] = distance;
+		}
 	}
 }
 
@@ -4906,11 +4920,13 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 	qboolean retreating)
 {
 	const float *goal = NULL;
+	const qboolean carryingFlag = BotSFJ_ClientCarriesFlag(g_entities[bs->client].client);
+	const int targetTimeout = Com_Clampi(0, 60000, bot_target_timeout.integer);
 
-	if ((bs->ctfState || BotSFJ_ClientCarriesFlag(g_entities[bs->client].client)) &&
+	if ((bs->ctfState || carryingFlag) &&
 		bs->wpDestination)
 		goal = bs->wpDestination->origin;
-	if (bs->wantFlag && bs->wantFlag->inuse)
+	if (!carryingFlag && bs->wantFlag && bs->wantFlag->inuse)
 		goal = bs->wantFlag->r.currentOrigin;
 	if (bs->ctfState == CTFSTATE_GUARDCARRIER && bs->squadLeader &&
 		bs->squadLeader->client && bs->squadLeader->health > 0)
@@ -4918,9 +4934,15 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 	if (bs->currentEnemy && bs->currentEnemy->client && bs->frame_Enemy_Vis)
 		VectorCopy(bs->currentEnemy->client->ps.origin, bs->lastEnemySpotted);
 	if (!goal && !retreating && bs->currentEnemy && bs->currentEnemy->client &&
-		(bs->frame_Enemy_Vis || (bs->lastVisibleEnemyIndex == bs->currentEnemy->s.number &&
-			bs->lastVisibleEnemyTime > 0)))
-		goal = bs->lastEnemySpotted;
+		(bs->frame_Enemy_Vis || (targetTimeout > 0 &&
+			bs->lastVisibleEnemyIndex == bs->currentEnemy->s.number &&
+			bs->lastVisibleEnemyTime > level.time - targetTimeout)))
+	{
+		const float targetDistance = bot_targetdistance.value;
+
+		if (targetDistance <= 0.0f || Distance(ps->origin, bs->lastEnemySpotted) <= targetDistance)
+			goal = bs->lastEnemySpotted;
+	}
 	if (!goal && (bs->siegeState || bs->rangedPickupEntity >= MAX_CLIENTS) &&
 		bs->wpDestination)
 		goal = bs->wpDestination->origin;
@@ -4995,9 +5017,8 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		{
 			if (stat)
 				quality[i] *= BotSFJ_HopReliability(stat->hopFailures[k], stat->hopPasses[k]);
-			if (!BotSFJ_HopAvailable(bs, ps, candidate, k))
-				whole[i] = 0;
 		}
+		whole[i] = 0;
 		quality[i] = BotSFJ_ClampSetting(quality[i], 0.02f, 1.0f);
 		if (i == exclude || !BotSFJ_TrackRetryAllows(i, bs->sfjRouteRetryUntil, level.time))
 			continue;
@@ -5066,6 +5087,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			{
 				entries[i] = entry;
 				lastNodes[i] = k - 1;
+				whole[i] = (k == candidate->nodeCount) ? 1 : 0;
 				seed[i] = score;
 			}
 		}
@@ -5076,11 +5098,25 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			const bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[j];
 			const float connection = g_botSfjConnections[i * count + j];
 			int node;
-			qboolean usable = whole[i] && whole[j] && j != exclude &&
+			qboolean usable = j != exclude &&
 				BotSFJ_TrackRetryAllows(j, bs->sfjRouteRetryUntil, level.time);
 
-			for (node = 0; usable && node < route->nodeCount; node++)
-				usable = BotSFJ_HopAvailable(bs, ps, route, node);
+			if (usable)
+			{
+				qboolean routeSuffixAvailable = qfalse;
+
+				for (node = 0; node < route->nodeCount && !routeSuffixAvailable; node++)
+				{
+					int suffix;
+					qboolean suffixUsable = qtrue;
+
+					for (suffix = node; suffix < route->nodeCount && suffixUsable; suffix++)
+						suffixUsable = BotSFJ_HopAvailable(bs, ps, route, suffix);
+					if (suffixUsable)
+						routeSuffixAvailable = qtrue;
+				}
+				usable = whole[i] && routeSuffixAvailable;
+			}
 			edges[i * count + j] = usable && connection >= 0.0f ?
 				connection + Distance(route->start, route->node[route->nodeCount - 1]) *
 					0.25f / quality[j] : -1.0f;
@@ -6825,6 +6861,33 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	}
 }
 
+static qboolean BotSFJ_WallrunSideBlocked(bot_state_t *bs, const playerState_t *ps,
+	float yaw, int rightMove)
+{
+	trace_t tr;
+	vec3_t angles, right, end, mins, maxs, idealNormal, wallNormal;
+
+	if (!bs || !ps || !rightMove)
+		return qfalse;
+	VectorSet(angles, 0.0f, yaw, 0.0f);
+	AngleVectors(angles, NULL, right, NULL);
+	VectorMA(ps->origin, rightMove > 0 ? 16.0f : -16.0f, right, end);
+	VectorCopy(g_entities[bs->client].r.mins, mins);
+	VectorCopy(g_entities[bs->client].r.maxs, maxs);
+	mins[2] = 0.0f;
+	maxs[2] = 24.0f;
+	JP_Trace(&tr, ps->origin, mins, maxs, end, bs->client, MASK_SOLID, qfalse, 0, 0);
+	if (tr.fraction >= 1.0f ||
+		(bs->currentEnemy && tr.entityNum == bs->currentEnemy->s.number))
+		return qfalse;
+	VectorSubtract(ps->origin, end, idealNormal);
+	VectorCopy(tr.plane.normal, wallNormal);
+	VectorNormalize(idealNormal);
+	VectorNormalize(wallNormal);
+	return tr.entityNum < MAX_CLIENTS || DotProduct(wallNormal, idealNormal) > 0.7f ?
+		qtrue : qfalse;
+}
+
 static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int elapsedTime)
 {
 	bot_input_t candidate;
@@ -7145,6 +7208,52 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	if (backward)
 		BotSFJ_BackwardAxes(&forwardMove, &rightMove);
 	targetView = BotSFJ_ViewYawForAxes(commandYaw, forwardMove, rightMove);
+	if (grounded && BotSFJ_JumpPressed(bs->sfjPhase, grounded) &&
+		forwardMove > 0 && rightMove != 0 &&
+		ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_1)
+	{
+		const int otherSide = -bs->sfjStrafeSide;
+		int otherForward, otherRight;
+		float otherYaw, otherView;
+
+		if (BotSFJ_AvoidWallrunSide(bs->sfjStrafeSide,
+			BotSFJ_WallrunSideBlocked(bs, ps, targetView, rightMove),
+			BotSFJ_WallrunSideBlocked(bs, ps, targetView, -rightMove)) !=
+			bs->sfjStrafeSide)
+		{
+			BotSFJ_HalfBeatAxes(otherSide, bs->sfjStrafeOnly, &otherForward, &otherRight);
+			if (backward)
+				BotSFJ_BackwardAxes(&otherForward, &otherRight);
+			otherYaw = BotSFJ_CommandYaw(routeYaw, ps->velocity[0], ps->velocity[1],
+				(float)ps->speed, pm_airaccelerate, (float)sliceMsec / 1000.0f, otherSide);
+			if (circleJump)
+			{
+				const float swing = 30.0f * (1.0f - (float)(time - bs->sfjPhaseTime) / 120.0f);
+				otherYaw = AngleNormalize360(routeYaw -
+					(otherSide < 0 ? -swing : swing));
+			}
+			otherView = BotSFJ_ViewYawForAxes(otherYaw, otherForward, otherRight);
+			if (!BotSFJ_WallrunSideBlocked(bs, ps, otherView, otherRight))
+			{
+				const int previousSide = bs->sfjStrafeSide;
+
+				bs->sfjStrafeSide = otherSide;
+				if (BotSFJ_CachedArcIsSafe(bs, ps, bs->sfjIntentDirection,
+					bs->sfjIntentDestination, commandMsec, sliceMsec, time, qtrue))
+				{
+					forwardMove = otherForward;
+					rightMove = otherRight;
+					commandYaw = otherYaw;
+					targetView = otherView;
+				}
+				else
+				{
+					bs->sfjStrafeSide = previousSide;
+					bs->sfjArcCheckedTime = 0;
+				}
+			}
+		}
+	}
 	viewYaw = targetView;
 	/* Human-shaped aim: flick on the ground, settle after takeoff, then track slowly. */
 	if (!bs->sfjOwnsInput || !bs->sfjViewTime || time < bs->sfjViewTime ||
