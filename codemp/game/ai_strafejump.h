@@ -9,7 +9,7 @@
 #define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
 #define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
-#define BOT_SFJ_MAX_TRACK_ROUTES 128
+#define BOT_SFJ_MAX_TRACK_ROUTES 256
 #define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
 #define BOT_SFJ_PURSUIT_STOP_DISTANCE 384.0f
@@ -1537,6 +1537,11 @@ static inline int BotSFJ_TrackCircleJumpStart(int grounded, int forwardMove, int
 static inline int BotSFJ_TrackLanded(int wasGrounded, int grounded)
 {
 	return !wasGrounded && grounded;
+}
+
+static inline int BotSFJ_AvoidWallrunSide(int side, int selectedBlocked, int otherBlocked)
+{
+	return selectedBlocked && !otherBlocked ? -side : side;
 }
 
 /* Returns the updated "slow on ground since" time (0 = not slow). */

@@ -11355,8 +11355,8 @@ void Svcmd_ExportDuelTrack_f(void)
 Human strafe-jump route recording (bot_strafetrack / exportStrafeTrack)
 
 A route starts on a human circle jump and is echoed to the console. Every
-server frame stores the player's inputs; every landing becomes a route node
-(the bots' next goal). The route ends when the player is back on the ground
+processed command stores the player's inputs; every landing becomes a route
+node (the bots' next goal). The route ends when the player is back on the ground
 at or below normal ground speed. Kept routes are saved to the local tracking
 database; exportStrafeTrack writes strafetrack_*.csv and regenerates
 botroutes/<map>.botroute so bots start using them.
@@ -11366,7 +11366,7 @@ botroutes/<map>.botroute so bots start using them.
 #define STRAFETRACK_PREROLL 32
 #define STRAFETRACK_PREROLL_MS 150
 #define STRAFETRACK_SAVE_BATCH 512
-#define STRAFETRACK_ROUTES_PER_MAP 128
+#define STRAFETRACK_ROUTES_PER_MAP 256
 #define STRAFETRACK_EXPORT_CANDIDATES 4096
 #define STRAFETRACK_COVERAGE_SPACING 192.0f
 #define STRAFETRACK_BEGIN_MARKER "// BEGIN recorded strafe routes (exportStrafeTrack)"
@@ -11421,6 +11421,7 @@ typedef struct
 	qboolean cmdPrevGrounded;
 	float cmdPrevYaw;
 	int cmdPrevTime;
+	vec3_t cmdPrevOrigin;
 	float cmdTakeoffZ;
 	int cmdTakeoffTime;
 	int cmdTakeoffSpeedActive;
@@ -11445,9 +11446,7 @@ typedef struct
 	int routeNum;
 	int startTime;
 	int startCmdTime;
-	int liftOffTime;
 	int slowSince;
-	int sideVotes;
 	float startSpeed;
 	int speedActive;
 	int speedLevel;
@@ -11788,6 +11787,44 @@ static void G_StrafeTrackTakeoffSpeed(const playerState_t *ps, const strafetrack
 	}
 }
 
+static void G_StrafeTrackRecordLanding(strafetrack_client_t *track, const playerState_t *ps,
+	int commandTime)
+{
+	strafetrack_node_t *node;
+
+	if (!track->active || track->nodeCount >= BOT_SFJ_TRACK_MAX_NODES)
+		return;
+	node = &track->nodes[track->nodeCount++];
+	VectorCopy(ps->origin, node->origin);
+	node->speed = sqrtf(ps->velocity[0] * ps->velocity[0] +
+		ps->velocity[1] * ps->velocity[1]);
+	node->side = track->lastHopValid ? track->lastHop.firstSide : 0;
+	node->airMs = track->cmdTakeoffTime > 0 && commandTime >= track->cmdTakeoffTime ?
+		commandTime - track->cmdTakeoffTime : 0;
+	node->timeMs = commandTime >= track->startCmdTime ?
+		commandTime - track->startCmdTime : 0;
+	node->speedActive = track->lastHopSpeedActive;
+	node->speedLevel = track->lastHopSpeedLevel;
+	if (track->lastHopValid)
+	{
+		node->style = track->lastHop;
+		if (track->lastHopSpeedActive >= 0 && track->lastHopSpeedLevel >= 0)
+		{
+			node->speedActive = track->lastHopSpeedActive;
+			node->speedLevel = track->lastHopSpeedLevel;
+		}
+		track->lastHopValid = qfalse;
+	}
+	else
+		BotSFJ_HopStyleClear(&node->style);
+	if (bot_strafetrack.integer >= 2)
+		trap->Print("Strafe route %i landing %i at (%.0f %.0f %.0f), speed %.0f, air %i ms, side-only %i%%, switch %i%%, takeoff yaw %.0f/s, air yaw %.0f/s%s\n",
+			track->routeNum, track->nodeCount, node->origin[0], node->origin[1], node->origin[2],
+			node->speed, node->airMs, node->style.sideOnlyPct, node->style.switchPct,
+			node->style.takeoffRate, node->style.airRate,
+			node->style.forceJump ? va(", force jump %.0f high", node->style.forceHeight) : "");
+}
+
 /*
  * Called after every Pmove (once per processed usercmd, about every 8 ms for a
  * 125 fps client). Only copies a few numbers into fixed buffers; the database
@@ -11823,6 +11860,7 @@ void G_StrafeTrackCommand(gentity_t *ent)
 		track->cmdPrevGrounded = grounded;
 		track->cmdPrevYaw = client->ps.viewangles[YAW];
 		track->cmdPrevTime = client->ps.commandTime;
+		VectorCopy(client->ps.origin, track->cmdPrevOrigin);
 		track->cmdTakeoffZ = client->ps.origin[2];
 		track->cmdTakeoffTime = 0;
 		track->cmdTakeoffSpeedActive = -1;
@@ -11856,7 +11894,7 @@ void G_StrafeTrackCommand(gentity_t *ent)
 	if (track->cmdPrevGrounded && !grounded)
 	{
 		BotSFJ_StyleAccumReset(&track->accum);
-		track->cmdTakeoffZ = client->ps.fd.forceJumpZStart ? client->ps.fd.forceJumpZStart : client->ps.origin[2];
+		track->cmdTakeoffZ = track->cmdPrevOrigin[2];
 		track->cmdTakeoffTime = in.cmdTime;
 		track->cmdTakeoffSpeedActive = in.speedActive;
 		track->cmdTakeoffSpeedLevel = in.speedLevel;
@@ -11866,12 +11904,13 @@ void G_StrafeTrackCommand(gentity_t *ent)
 		BotSFJ_StyleAccumAdd(&track->accum, msec, in.forwardmove, in.rightmove, in.yawDelta);
 		BotSFJ_StyleAccumForce(&track->accum, in.forceJump, client->ps.origin[2] - track->cmdTakeoffZ);
 	}
-	else if (!track->cmdPrevGrounded)
+	else if (BotSFJ_TrackLanded(track->cmdPrevGrounded, grounded))
 	{
 		BotSFJ_StyleAccumFinish(&track->accum, &track->lastHop);
 		track->lastHopSpeedActive = track->cmdTakeoffSpeedActive;
 		track->lastHopSpeedLevel = track->cmdTakeoffSpeedLevel;
 		track->lastHopValid = qtrue;
+		G_StrafeTrackRecordLanding(track, &client->ps, in.cmdTime);
 	}
 
 	if (track->active)
@@ -11892,6 +11931,7 @@ void G_StrafeTrackCommand(gentity_t *ent)
 	track->cmdPrevGrounded = grounded;
 	track->cmdPrevYaw = client->ps.viewangles[YAW];
 	track->cmdPrevTime = client->ps.commandTime;
+	VectorCopy(client->ps.origin, track->cmdPrevOrigin);
 }
 
 /* Copies the commands just before the route start (the takeoff flick) into the route. */
@@ -12017,9 +12057,7 @@ void G_StrafeTrackFrame(gentity_t *ent)
 			track->routeNum = ++g_strafeTrackRouteCounter;
 			track->startTime = level.time;
 			track->startCmdTime = client->ps.commandTime;
-			track->liftOffTime = level.time;
 			track->slowSince = 0;
-			track->sideVotes = 0;
 			track->startSpeed = speed;
 			G_StrafeTrackTakeoffSpeed(&client->ps, track, &track->speedActive, &track->speedLevel);
 			track->hopSpeedActive = track->speedActive;
@@ -12057,48 +12095,8 @@ void G_StrafeTrackFrame(gentity_t *ent)
 		VectorCopy(client->ps.origin, track->lastOrigin);
 		if (speed > track->maxSpeed)
 			track->maxSpeed = speed;
-		if (!grounded)
-			track->sideVotes += client->pers.cmd.rightmove > 0 ? 1 : (client->pers.cmd.rightmove < 0 ? -1 : 0);
-
-		if (BotSFJ_TrackLanded(track->prevGrounded, grounded))
-		{
-			if (track->nodeCount < BOT_SFJ_TRACK_MAX_NODES)
-			{
-				strafetrack_node_t *node = &track->nodes[track->nodeCount++];
-
-				VectorCopy(client->ps.origin, node->origin);
-				node->speed = speed;
-				node->side = track->sideVotes > 0 ? 1 : (track->sideVotes < 0 ? -1 : 0);
-				node->airMs = level.time - track->liftOffTime;
-				node->timeMs = level.time - track->startTime;
-				/* This node ends a hop; Speed belongs to that hop's takeoff, not this landing. */
-				node->speedActive = track->hopSpeedActive;
-				node->speedLevel = track->hopSpeedLevel;
-				/* Style of the hop that ended here, measured per usercmd. */
-				if (track->lastHopValid)
-				{
-					node->style = track->lastHop;
-					if (track->lastHopSpeedActive >= 0 && track->lastHopSpeedLevel >= 0)
-					{
-						node->speedActive = track->lastHopSpeedActive;
-						node->speedLevel = track->lastHopSpeedLevel;
-					}
-					track->lastHopValid = qfalse;
-				}
-				else
-					BotSFJ_HopStyleClear(&node->style);
-				if (bot_strafetrack.integer >= 2)
-					trap->Print("Strafe route %i landing %i at (%.0f %.0f %.0f), speed %.0f, air %i ms, side-only %i%%, switch %i%%, takeoff yaw %.0f/s, air yaw %.0f/s%s\n",
-						track->routeNum, track->nodeCount, node->origin[0], node->origin[1], node->origin[2],
-						speed, node->airMs, node->style.sideOnlyPct, node->style.switchPct,
-						node->style.takeoffRate, node->style.airRate,
-						node->style.forceJump ? va(", force jump %.0f high", node->style.forceHeight) : "");
-			}
-		}
 		if (track->prevGrounded && !grounded)
 		{
-			track->liftOffTime = level.time;
-			track->sideVotes = 0;
 			G_StrafeTrackTakeoffSpeed(&client->ps, track, &track->hopSpeedActive, &track->hopSpeedLevel);
 		}
 		track->slowSince = BotSFJ_TrackSlowSince(track->slowSince, level.time, grounded, speed, groundSpeed);
