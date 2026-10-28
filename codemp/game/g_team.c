@@ -22,6 +22,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "g_local.h"
+#include "g_ctf_tracking.h"
 #include "bg_saga.h"
 
 typedef struct teamgame_s {
@@ -339,14 +340,41 @@ void Team_SetFlagStatus( int team, flagStatus_t status ) {
 	}
 }
 
+static gentity_t *g_ctfTrackCarrier[3];
+static int g_ctfTrackCarrierConnect[3];
+
+static void Team_TrackObjective(gentity_t *player, int event, int team, const vec3_t origin)
+{
+	if (team < TEAM_FREE || team > TEAM_BLUE)
+		return;
+	if (event == CTF_TRACK_DROP)
+	{
+		player = g_ctfTrackCarrier[team];
+		if (player && (!player->inuse || !player->client ||
+			player->client->pers.connectTime != g_ctfTrackCarrierConnect[team]))
+			player = NULL;
+	}
+	G_CTFTrackEvent(player, event, team, origin);
+	if (event == CTF_TRACK_PICKUP)
+	{
+		g_ctfTrackCarrier[team] = player;
+		g_ctfTrackCarrierConnect[team] = player->client->pers.connectTime;
+	}
+	else
+		g_ctfTrackCarrier[team] = NULL;
+}
+
 void Team_CheckDroppedItem( gentity_t *dropped ) {
 	if( dropped->item->giTag == PW_REDFLAG ) {
+		Team_TrackObjective(NULL, CTF_TRACK_DROP, TEAM_RED, dropped->r.currentOrigin);
 		Team_SetFlagStatus( TEAM_RED, FLAG_DROPPED );
 	}
 	else if( dropped->item->giTag == PW_BLUEFLAG ) {
+		Team_TrackObjective(NULL, CTF_TRACK_DROP, TEAM_BLUE, dropped->r.currentOrigin);
 		Team_SetFlagStatus( TEAM_BLUE, FLAG_DROPPED );
 	}
 	else if( dropped->item->giTag == PW_NEUTRALFLAG ) {
+		Team_TrackObjective(NULL, CTF_TRACK_DROP, TEAM_FREE, dropped->r.currentOrigin);
 		Team_SetFlagStatus( TEAM_FREE, FLAG_DROPPED );
 	}
 }
@@ -614,6 +642,7 @@ gentity_t *Team_ResetFlag( int team ) {
 		return NULL;
 	}
 
+	g_ctfTrackCarrier[team] = NULL;
 	ent = NULL;
 	while ((ent = G_Find (ent, FOFS(classname), c)) != NULL) {
 		if (ent->flags & FL_DROPPED_ITEM)
@@ -732,7 +761,9 @@ void Team_CaptureFlagSound( gentity_t *ent, int team ) {
 }
 
 void Team_ReturnFlag( int team ) {
-	Team_ReturnFlagSound(Team_ResetFlag(team), team);
+	gentity_t *flag = Team_ResetFlag(team);
+	Team_TrackObjective(NULL, CTF_TRACK_RETURN, team, flag ? flag->r.currentOrigin : NULL);
+	Team_ReturnFlagSound(flag, team);
 	if( level.gametype != GT_CTF ) {
 		//PrintMsg(NULL, "The flag has returned!\n" );
 	}
@@ -776,6 +807,7 @@ void Team_DroppedFlagThink(gentity_t *ent) {
 		team = TEAM_FREE;
 	}
 
+	Team_TrackObjective(NULL, CTF_TRACK_RETURN, team, ent->r.currentOrigin);
 	Team_ReturnFlagSound( Team_ResetFlag( team ), team );
 	// Reset Flag will delete this entity
 }
@@ -793,6 +825,7 @@ int Team_TouchOneFlagBase (gentity_t *ent, gentity_t *other, int team) {
 		return 0; // We don't have the flag
 	}
 
+	Team_TrackObjective(other, CTF_TRACK_CAPTURE, TEAM_FREE, other->client->ps.origin);
 	cl->ps.powerups[PW_NEUTRALFLAG] = 0;
 
 	teamgame.last_flag_capture = level.time;
@@ -940,6 +973,7 @@ int Team_TouchOurFlag( gentity_t *ent, gentity_t *other, int team ) {
 
 
 		other->client->pers.teamState.lastreturnedflag = level.time;
+		Team_TrackObjective(other, CTF_TRACK_RETURN, team, other->client->ps.origin);
 		//ResetFlag will remove this entity!  We must return zero
 		Team_ReturnFlagSound(Team_ResetFlag(team), team); //is this crashing wtf
 		return 0;
@@ -1019,6 +1053,9 @@ int Team_TouchOurFlag( gentity_t *ent, gentity_t *other, int team ) {
 
 	//PrintMsg( NULL, "%s" S_COLOR_WHITE " captured the %s flag!\n", cl->pers.netname, TeamName(OtherTeam(team)));
 
+	Team_TrackObjective(other, CTF_TRACK_CAPTURE,
+		enemy_flag == PW_REDFLAG ? TEAM_RED : enemy_flag == PW_BLUEFLAG ? TEAM_BLUE : TEAM_FREE,
+		other->client->ps.origin);
 	cl->ps.powerups[enemy_flag] = 0;
 
 	teamgame.last_flag_capture = level.time;
@@ -1295,6 +1332,9 @@ int Team_TouchEnemyFlag( gentity_t *ent, gentity_t *other, int team ) {
 	// Increase the team's score
 	//AddTeamScore(ent->s.pos.trBase, other->client->sess.sessionTeam, 1, qtrue); //wtf why?
 
+	Team_TrackObjective(other, CTF_TRACK_PICKUP,
+		level.gametype == GT_CTF && g_neutralFlag.integer == 6 ? TEAM_FREE : team,
+		other->client->ps.origin);
 	Team_SetFlagStatus( team, FLAG_TAKEN );
 
 	cl->pers.teamState.flagsince = level.time;

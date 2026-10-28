@@ -1719,6 +1719,7 @@ svcmd_t svcmds[] = {
 	{ "resetdueltrack",				Svcmd_ResetDuelTrack_f,				qfalse },
 	{ "resetdueltracks",			Svcmd_ResetDuelTrack_f,				qfalse },
 	{ "resetlearningtrack",			Svcmd_ResetLearningTrack_f,			qfalse },
+	{ "resetstrafetrack",			Svcmd_ResetStrafeTrack_f,			qfalse },
 	{ "resetScores",				Svcmd_ResetScores_f,				qfalse },
 
 	{ "saberDisable",				Svcmd_ToggleSaberDisable_f,			qfalse },

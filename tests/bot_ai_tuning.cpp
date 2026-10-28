@@ -2903,6 +2903,67 @@ BOOST_AUTO_TEST_CASE( route_network_connects_detours_without_crossing_unsafe_gap
 		BOOST_CHECK_EQUAL( first[i], -1 );
 }
 
+BOOST_AUTO_TEST_CASE( route_network_retains_successors_across_multiple_unseeded_routes )
+{
+	const float edges[16] = {
+		-1, 120, -1, -1,
+		-1, -1, 140, -1,
+		-1, -1, -1, 160,
+		-1, -1, -1, -1
+	};
+	const float seed[4] = {40, -1, -1, -1};
+	float cost[4];
+	int first[4], parent[4];
+	BotSFJ_RoutePathsWithParents( 4, edges, seed, cost, first, parent );
+	BOOST_CHECK_EQUAL( first[3], 0 );
+	BOOST_CHECK_EQUAL( parent[0], -1 );
+	BOOST_CHECK_EQUAL( parent[1], 0 );
+	BOOST_CHECK_EQUAL( parent[2], 1 );
+	BOOST_CHECK_EQUAL( parent[3], 2 );
+	BOOST_CHECK_EQUAL( cost[3], 460 );
+	BOOST_CHECK( BotSFJ_GoalRouteScore( 1000, 100, cost[3] ) > 0 );
+	BOOST_CHECK( BotSFJ_GoalRouteScore( 1000, 1100, 20 ) < 0 );
+	BOOST_CHECK( BotSFJ_GoalRouteScore( 100, 90, 1000 ) < 0 );
+	BOOST_CHECK( BotSFJ_GoalRouteScore( 100, std::numeric_limits<float>::quiet_NaN(), 10 ) < 0 );
+}
+
+BOOST_AUTO_TEST_CASE( momentum_loss_requires_a_real_wall_and_launched_hop )
+{
+	BOOST_CHECK( BotSFJ_MomentumCollision( 600, 200, 50, 1, 1, 0 ) );
+	BOOST_CHECK( BotSFJ_MomentumCollision( 400, 180, 150, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 400, 181, 50, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, 200, 151, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, 200, 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, 200, 50, 0, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, 200, 50, 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, 200, 50, 1, 1, 1 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 290, 40, 50, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision( 600, -1, 50, 1, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_MomentumCollision(
+		std::numeric_limits<float>::infinity(), 200, 50, 1, 1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( human_ground_segments_restart_without_forcing_every_landing_to_pause )
+{
+	BOOST_CHECK( BotSFJ_GroundRestart( 250, 0 ) );
+	BOOST_CHECK( BotSFJ_GroundRestart( 50, 49 ) );
+	BOOST_CHECK( !BotSFJ_GroundRestart( 249, 48 ) );
+	BOOST_CHECK( !BotSFJ_GroundRestart( -1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( defensive_routes_escape_backwards_without_overriding_flag_goals )
+{
+	BOOST_CHECK( BotSFJ_DefensiveRouteEscape( -0.01f, 1, 0, 500, 300 ) );
+	BOOST_CHECK( !BotSFJ_DefensiveRouteEscape( 0, 1, 0, 500, 300 ) );
+	BOOST_CHECK( !BotSFJ_DefensiveRouteEscape( -1, 0, 0, 500, 300 ) );
+	BOOST_CHECK( !BotSFJ_DefensiveRouteEscape( -1, 1, 1, 500, 300 ) );
+	BOOST_CHECK( !BotSFJ_DefensiveRouteEscape( -1, 1, 0, 200, 300 ) );
+	BOOST_CHECK( BotSFJ_BackwardRouteEscape( 1, 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_BackwardRouteEscape( 0, 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_BackwardRouteEscape( 1, 1, 1 ) );
+	BOOST_CHECK( !BotSFJ_BackwardRouteEscape( 1, 0, 0 ) );
+}
+
 BOOST_AUTO_TEST_CASE( route_failures_are_contextual_and_retries_are_bounded )
 {
 	const int counts[5] = {200, 0, 0, 100, 4};
@@ -3197,14 +3258,6 @@ BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
 		BOT_SFJ_TRACK_APPROACH_RADIUS ) );
 	BOOST_CHECK( BotSFJ_TrackEntryAllows( 3000.0f, 0.0f, 1, 96.0f ) );
 
-	/* Backward strafing only on full-force retreats, at the configured rate. */
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 0, 0, 100, 0 ) );
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 1, 100, 0 ) );
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, 0, 0 ) );
-	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, 100, 99 ) );
-	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, 50, 49 ) );
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, 50, 50 ) );
-
 	/* Mirrored keys with the view turned around keep the same wish direction. */
 	for ( int side = -1; side <= 1; side += 2 )
 	{
@@ -3374,17 +3427,39 @@ BOOST_AUTO_TEST_CASE( recorded_route_actual_performance_beats_recorded_speed_alo
 	BOOST_CHECK( BotSFJ_TrackRouteScore( 1000, 600, 0, 0, 600, 768 ) > 0.0f );
 }
 
-BOOST_AUTO_TEST_CASE( backward_boolean_preserves_legacy_probability_when_enabled )
+BOOST_AUTO_TEST_CASE( backward_boolean_always_applies_to_eligible_retreats )
 {
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 0, 100 ), 0 );
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 50 ), 50 );
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 0 ), 0 );
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 100 ), 100 );
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, 150 ), 100 );
-	BOOST_CHECK_EQUAL( BotSFJ_BackwardPercent( 1, -1 ), 0 );
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 0, BotSFJ_BackwardPercent( 0, 100 ), 0 ) );
-	BOOST_CHECK( !BotSFJ_UseBackwardStrafe( 1, 1, BotSFJ_BackwardPercent( 1, 100 ), 0 ) );
-	BOOST_CHECK( BotSFJ_UseBackwardStrafe( 1, 0, BotSFJ_BackwardPercent( 1, 100 ), 99 ) );
+	BOOST_CHECK( !BotSFJ_BackwardRouteEscape( 1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_BackwardRouteEscape( 1, 1, 1 ) );
+	for (int attempt = 0; attempt < 100; ++attempt)
+		BOOST_CHECK( BotSFJ_BackwardRouteEscape( 1, 0, 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( retreat_routes_prioritize_enemy_separation_over_route_length )
+{
+	const float position[3] = {0, 0, 0}, enemy[3] = {100, 0, 0};
+	const float away[3] = {-100, 0, 0}, toward[3] = {100, 0, 0};
+	const float lateral[3] = {0, 100, 0}, diagonal[3] = {-100, 100, 100};
+	BOOST_CHECK( BotSFJ_EscapeEntryAway( position, away, enemy ) );
+	BOOST_CHECK( BotSFJ_EscapeEntryAway( position, diagonal, enemy ) );
+	BOOST_CHECK( !BotSFJ_EscapeEntryAway( position, toward, enemy ) );
+	BOOST_CHECK( !BotSFJ_EscapeEntryAway( position, lateral, enemy ) );
+	BOOST_CHECK( !BotSFJ_EscapeEntryAway( position, position, enemy ) );
+	BOOST_CHECK( !BotSFJ_EscapeEntryAway( position, away, position ) );
+	const float directEscape = BotSFJ_EscapeRouteScore( 500, 1100, 700 );
+	const float longDetour = BotSFJ_EscapeRouteScore( 500, 750, 2000 );
+	BOOST_CHECK_GT( directEscape, 0 );
+	BOOST_CHECK_GT( directEscape, longDetour );
+	BOOST_CHECK_GT( BotSFJ_EscapeRouteScore( 500, 1500, 700 ), directEscape );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 500, 400, 0 ), 0 );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 500, 500, 0 ), 0 );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 500, 627, 0 ), 0 );
+	BOOST_CHECK_GT( BotSFJ_EscapeRouteScore( 500, 628, 0 ), 0 );
+	/* A cached successor stops qualifying when the enemy moves closer to its end. */
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 900, 800, 0 ), 0 );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 500, INFINITY, 0 ), 0 );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( NAN, 800, 0 ), 0 );
+	BOOST_CHECK_LT( BotSFJ_EscapeRouteScore( 500, 800, -1 ), 0 );
 }
 
 BOOST_AUTO_TEST_CASE( saber_only_sweeps_and_low_health )
@@ -3540,6 +3615,71 @@ BOOST_AUTO_TEST_CASE( backward_strafe_view_faces_back_along_route )
 		const float viewYaw = BotSFJ_ViewYawForAxes( wishYaw, forward, right );
 		BOOST_CHECK_GT( fabsf( BotSFJ_AngleDelta( viewYaw, 0.0f ) ), 140.0f );
 	}
+}
+
+BOOST_AUTO_TEST_CASE( backward_escape_keeps_target_in_view_without_changing_air_wish )
+{
+	for (int side = -1; side <= 1; side += 2)
+	{
+		for (int only = 0; only < 2; ++only)
+		{
+			for (int speed = 300; speed <= 700; speed += 50)
+			{
+				const float wishYaw = BotSFJ_CommandYaw( 350.0f,
+					(float)speed * cosf( 350.0f * 0.017453292519943295f ),
+					(float)speed * sinf( 350.0f * 0.017453292519943295f ),
+					250.0f, 1.0f, 0.008f, side );
+				for (int offset = -60; offset <= 60; offset += 15)
+				{
+					int forward = 0, right = 0;
+					float viewYaw = 0.0f;
+					const float targetYaw = 170.0f + (float)offset;
+					BOOST_REQUIRE( BotSFJ_BackwardTargetView( wishYaw, targetYaw,
+						side, only, &forward, &right, &viewYaw ) );
+					BOOST_CHECK( BotSFJ_EscapeTargetInView( viewYaw, targetYaw ) );
+					BOOST_CHECK_LE( forward, 0 );
+					BOOST_CHECK( side > 0 ? right >= 0 : right <= 0 );
+					BOOST_CHECK_SMALL( BotSFJ_AngleDelta( viewYaw -
+						BotSFJ_AxesYaw( forward, right ), wishYaw ), 0.001f );
+				}
+			}
+		}
+	}
+	int forward = -127, right = 127;
+	float viewYaw = 135.0f;
+	BOOST_CHECK( !BotSFJ_BackwardTargetView( 0.0f, 0.0f, 1, 0,
+		&forward, &right, &viewYaw ) );
+	BOOST_CHECK_EQUAL( forward, -127 );
+	BOOST_CHECK_EQUAL( right, 127 );
+	BOOST_CHECK_EQUAL( viewYaw, 135.0f );
+	BOOST_CHECK( BotSFJ_EscapeTargetInView( 350.0f, 10.0f ) );
+	BOOST_CHECK( !BotSFJ_EscapeTargetInView( 0.0f, 90.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( backward_circle_start_uses_inverse_diagonal_while_facing_target )
+{
+	for (int yaw = 0; yaw < 360; yaw += 30)
+	{
+		for (int side = -1; side <= 1; side += 2)
+		{
+			for (int age = 0; age <= 120; age += 10)
+			{
+				int forward = 0, right = 0;
+				float viewYaw = 0.0f;
+				const float wishYaw = BotSFJ_CircleWishYaw( (float)yaw, side, age, 1 );
+				BOOST_REQUIRE( BotSFJ_BackwardTargetView( wishYaw,
+					(float)yaw + 180.0f, side, 0, &forward, &right, &viewYaw ) );
+				BOOST_CHECK_EQUAL( forward, -127 );
+				BOOST_CHECK_EQUAL( right, side > 0 ? 127 : -127 );
+				BOOST_CHECK( BotSFJ_EscapeTargetInView( viewYaw, (float)yaw + 180.0f ) );
+				BOOST_CHECK_SMALL( BotSFJ_AngleDelta( viewYaw -
+					BotSFJ_AxesYaw( forward, right ), wishYaw ), 0.001f );
+			}
+		}
+	}
+	BOOST_CHECK_EQUAL( BotSFJ_CircleWishYaw( 0.0f, 1, 0, 0 ), -30.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CircleWishYaw( 0.0f, -1, 0, 0 ), 30.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CircleWishYaw( 0.0f, 1, 120, 0 ), 0.0f );
 }
 
 BOOST_AUTO_TEST_CASE( human_wish_offset_is_wider_than_optimum_and_capped )

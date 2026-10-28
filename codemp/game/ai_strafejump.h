@@ -327,10 +327,65 @@ static inline float BotSFJ_HopReliability(int failures, int passes)
 	return ((float)passes + 1.0f) / ((float)passes + 1.0f + 4.0f * failures);
 }
 
+static inline int BotSFJ_MomentumCollision(float before, float after,
+	int elapsed, int launched, int wallContact, int externallyForced)
+{
+	return launched && wallContact && !externallyForced &&
+		elapsed > 0 && elapsed <= 150 && isfinite(before) && isfinite(after) &&
+		before >= 300.0f && after >= 0.0f &&
+		before - after >= 200.0f && after <= before * 0.45f;
+}
+
+static inline int BotSFJ_GroundRestart(int groundMs, float takeoffDistance)
+{
+	return groundMs >= 250 || takeoffDistance > 48.0f;
+}
+
+static inline float BotSFJ_GoalRouteScore(float before, float after, float cost)
+{
+	if (!isfinite(before) || !isfinite(after) || !isfinite(cost) ||
+		before < 0.0f || after < 0.0f || cost < 0.0f)
+		return -1.0f;
+	return before - after - cost * 0.15f;
+}
+
+#define BOT_SFJ_TRACK_FLEE_GAIN 128.0f
+
+static inline float BotSFJ_EscapeRouteScore(float before, float after, float cost)
+{
+	if (!isfinite(before) || !isfinite(after) || !isfinite(cost) ||
+		before < 0.0f || after < before + BOT_SFJ_TRACK_FLEE_GAIN || cost < 0.0f)
+		return -1.0f;
+	return after - before - cost * 0.15f;
+}
+
+static inline int BotSFJ_EscapeEntryAway(const float *position, const float *entry,
+	const float *enemy)
+{
+	const float moveX = entry[0] - position[0], moveY = entry[1] - position[1];
+	const float awayX = position[0] - enemy[0], awayY = position[1] - enemy[1];
+	const float lengths = (moveX * moveX + moveY * moveY) * (awayX * awayX + awayY * awayY);
+
+	return isfinite(lengths) && lengths > 0.0f &&
+		moveX * awayX + moveY * awayY >= 0.25f * sqrtf(lengths);
+}
+
+static inline int BotSFJ_DefensiveRouteEscape(float aggression, int enemy,
+	int carryingFlag, float distance, float startDistance)
+{
+	return enemy && !carryingFlag && isfinite(aggression) && aggression < 0.0f &&
+		distance >= startDistance;
+}
+
+static inline int BotSFJ_BackwardRouteEscape(int retreat, int saberOnly, int enabled)
+{
+	return retreat && !saberOnly && enabled;
+}
+
 /* Multi-source Dijkstra: seeds are safe approaches, edges are safe connectors.
  * A negative cost means unreachable; first[] keeps the acquisition route. */
-static inline void BotSFJ_RoutePaths(int count, const float *edges,
-	const float *seed, float *cost, int *first)
+static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
+	const float *seed, float *cost, int *first, int *parent)
 {
 	int visited[BOT_SFJ_MAX_TRACK_ROUTES];
 	int i, j, step, best;
@@ -342,6 +397,8 @@ static inline void BotSFJ_RoutePaths(int count, const float *edges,
 		visited[i] = 0;
 		cost[i] = seed[i];
 		first[i] = seed[i] >= 0.0f ? i : -1;
+		if (parent)
+			parent[i] = -1;
 	}
 	for (step = 0; step < count; step++)
 	{
@@ -363,9 +420,17 @@ static inline void BotSFJ_RoutePaths(int count, const float *edges,
 			{
 				cost[j] = next;
 				first[j] = first[best];
+				if (parent)
+					parent[j] = best;
 			}
 		}
 	}
+}
+
+static inline void BotSFJ_RoutePaths(int count, const float *edges,
+	const float *seed, float *cost, int *first)
+{
+	BotSFJ_RoutePathsWithParents(count, edges, seed, cost, first, NULL);
 }
 
 /* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
@@ -381,11 +446,6 @@ static inline float BotSFJ_TrackPerformance(float distance, float durationMs,
 	retention = referenceIntegral > 0.0f ?
 		BotSFJ_ClampSetting(speedIntegral / referenceIntegral, 0.25f, 1.5f) : 1.0f;
 	return sqrtf(speed * retention);
-}
-
-static inline int BotSFJ_BackwardPercent(int enabled, int legacyPercent)
-{
-	return enabled ? (int)BotSFJ_ClampSetting((float)legacyPercent, 0.0f, 100.0f) : 0;
 }
 
 /* A landing node is a progress marker, not an exact touchdown requirement. */
@@ -896,6 +956,54 @@ static inline float BotSFJ_PickAxesForView(float viewYaw, float wishYaw, int sid
 		}
 	}
 	return best;
+}
+
+#define BOT_SFJ_ESCAPE_VIEW_CONE 60.0f
+
+static inline float BotSFJ_CircleWishYaw(float routeYaw, int side, int ageMs, int backward)
+{
+	const float swing = (backward ? 15.0f : 30.0f) *
+		(1.0f - BotSFJ_ClampSetting((float)ageMs, 0.0f, 120.0f) / 120.0f);
+
+	return routeYaw - (side < 0 ? -swing : swing);
+}
+
+static inline int BotSFJ_EscapeTargetInView(float viewYaw, float targetYaw)
+{
+	return fabsf(BotSFJ_AngleDelta(viewYaw, targetYaw)) <= BOT_SFJ_ESCAPE_VIEW_CONE;
+}
+
+/* Change inverse key style, never the validated world-space wish direction. */
+static inline int BotSFJ_BackwardTargetView(float wishYaw, float targetYaw, int side,
+	int strafeOnly, int *forward, int *right, float *viewYaw)
+{
+	int candidateForward[3], candidateRight[3];
+	int i, best = -1;
+	float bestError = BOT_SFJ_ESCAPE_VIEW_CONE + 0.01f;
+
+	BotSFJ_HalfBeatAxes(side, strafeOnly, &candidateForward[0], &candidateRight[0]);
+	BotSFJ_HalfBeatAxes(side, !strafeOnly, &candidateForward[1], &candidateRight[1]);
+	candidateForward[2] = 127;
+	candidateRight[2] = 0;
+	for (i = 0; i < 3; i++)
+	{
+		const float yaw = BotSFJ_ViewYawForAxes(wishYaw, -candidateForward[i], -candidateRight[i]);
+		const float error = fabsf(BotSFJ_AngleDelta(yaw, targetYaw));
+
+		if (BotSFJ_EscapeTargetInView(yaw, targetYaw) && error < bestError)
+		{
+			best = i;
+			bestError = error;
+			if (!i)
+				break;
+		}
+	}
+	if (best < 0)
+		return 0;
+	*forward = -candidateForward[best];
+	*right = -candidateRight[best];
+	*viewYaw = BotSFJ_ViewYawForAxes(wishYaw, *forward, *right);
+	return 1;
 }
 
 /*
@@ -1841,19 +1949,9 @@ static inline float BotSFJ_TrackExportFactor(int attempts, int completions, floa
 }
 
 /*
- * Backward strafe jumping: the view faces back along the route and the keys are
- * mirrored (back instead of forward, the other strafe key).  The wish direction,
- * and therefore the air acceleration, is unchanged.
+ * Mirror strafe keys without changing the world-space wish direction.
+ * BackwardTargetView additionally keeps the retreat target in the view cone.
  */
-static inline int BotSFJ_UseBackwardStrafe(int retreatIntent, int saberOnly, int percent, int roll)
-{
-	if (!retreatIntent || saberOnly || percent <= 0)
-		return 0;
-	if (percent >= 100)
-		return 1;
-	return roll >= 0 && (roll % 100) < percent;
-}
-
 static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 {
 	*forward = -*forward;
