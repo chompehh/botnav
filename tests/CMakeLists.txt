@@ -31,6 +31,7 @@ set(TestFiles
 	"duel_elo.cpp"
 	"duel_session.cpp"
 	"duel_capture.cpp"
+	"ctf_tracking.cpp"
 	"safe/string.cpp"
 	"safe/limited_vector.cpp"
 	"${SharedDir}/qcommon/safe/string.cpp"

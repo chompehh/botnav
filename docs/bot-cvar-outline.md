@@ -182,8 +182,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafe_wallmargin` | `32` | Endpoint setback from walls for direct enemy corridors, units, clamped 0–128. Lower values allow closer approaches without shrinking the collision hull or disabling wall-slide prediction. |
 | `bot_strafe_tolerance` | `80` | Horizontal waypoint/recorded-node acceptance and landing-corridor tolerance, units, clamped 16–256. Nodes mark progress rather than requiring exact touchdown; grounded height and lateral checks prevent unrelated nodes being skipped. |
 | `bot_strafe_loosen` | `1` | `1` relaxes non-hazard strafe-jump checks so bots commit to chains: waypoint lookahead allows 64-unit rises per link and 96 units overall, a 96-unit minimum grounded corridor, a temporarily hidden current waypoint, step-ups onto stairs/ramps in the arc simulation, takeoff from and landing on solid brush entities, bumping players, and pauses (instead of aborting) a running chain during a roll. Navigation crouch is held off while a chain owns input and for 300 ms after strafe input at speed, so it cannot turn into a roll. Hazard, `trigger_hurt`, lava, slime, no-drop, fall-damage and route-endpoint checks are unchanged. `0` restores the strict limits (32/64-unit rises, 160-unit corridor, world-only contacts, roll aborts). Compare with `strafeJumpStats`. |
-| `bot_strafes_backwards` | `1` | Boolean master switch for backwards strafe jumps (a backward circle jump with S + strafe keys, view toward the enemy) during suitable combat retreats outside saber-only play. A retreat within max(`bot_minstrafe`, 384) units of a visible enemy is always done backwards when this is enabled, and is not started at all when it is disabled, so bots no longer turn their back to circle-jump away. `0` disables them; `1` enables the existing retreat selection. The legacy percentage below still controls how often an eligible retreat uses backwards input, preserving existing configurations. |
-| `bot_strafe_backward` | `50` | Legacy percentage of eligible retreat strafe jumps done backwards when `bot_strafes_backwards` is enabled. The view faces back along the escape route and the keys are mirrored, preserving the wish direction; it does not independently lock aim onto the enemy. `0` disables backwards selection, `100` selects it for every eligible retreat. Retreating bots in full-force/FFA play may also flee along recorded routes that end at least 128 units farther from the enemy. |
+| `bot_strafes_backwards` | `1` | Master switch for backwards strafe escapes outside saber-only play. Eligible retreats initiate a backwards circle jump with S + inverse strafe and continue inverse strafe-jumping, including recorded routes, rather than selecting a random subset. The backwards ground sweep is limited to 15 degrees before takeoff. The controller keeps the target within 60 degrees of view yaw (last seen position when hidden), changing inverse key style without changing the validated world-space wish direction. Ground approaches face the target. A hop that cannot preserve both target-facing and safe movement yields to normal navigation/combat. Close visible-enemy escapes remain disallowed when backwards movement is disabled. Flag carriers retain their scoring-base goal. |
 | `bot_footing` | `1` | Final movement smoother. When separate subsystems queue opposite forward/back or left/right moves within 150–250 ms (shorter for higher skill), the reversal becomes a stop until the hold has passed, and crouch/walk cannot be re-pressed within the same hold after release. Stopping is always immediate. Strafe-jump chains, flipkicks, gripkick, pullkick jumps, rolls, knockdowns and swing dodges are exempt. The drain/retreat lateral step now holds one trace-checked side for 1.2–2.4 s instead of flipping every 1.5 s. `0` disables. |
 | `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
@@ -312,6 +311,41 @@ Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStraf
 
 All three tables and their CSV exports include nullable `speed_active` and `speed_level` columns. `speed_active` is the actual `FP_SPEED` active bit (`0` or `1`); `speed_level` is the player's configured Force Speed level (`0`–`3`), retained even while inactive. Route values describe the first hop's takeoff; node values describe the **takeoff of the hop ending at that node**, never its landing. The processed takeoff command is preferred over the end-of-frame snapshot. Input values are sampled after every processed command, including pre-roll, so Speed activation, expiry and level changes during a hop remain visible. Additive migrations leave older rows `NULL` (unknown); export never infers Speed from velocity or backfills it from landing state.
 
+CTF/CTY objective recording identifies the actual gametype and explicit flag
+`pickup`, `drop`, `return`, and `capture` events. `exportStrafeTrack` also writes
+`strafetrack_objective_sessions.csv`, `strafetrack_objective_journeys.csv`, and
+`strafetrack_objectives.csv` (with the normal optional prefix and part splitting).
+Session/journey IDs and route `start_ms`/`end_ms` connect movement segments across
+ground pauses. Player-confirmed captures and returns mark associated routes
+`objective_success = 1`; automatic flag resets are not player success evidence.
+Historical rows without this instrumentation remain unknown, not failed runs.
+Objective-confirmed demonstrations receive a bounded preference, never a bypass
+of goal progress, power availability or movement safety.
+
+The October 28 "Strafetracks 3" snapshot contains 265 human and 2,115 bot routes on
+`mp/ctf4`, but its old schemas have no flag events or gametype, so they cannot prove
+scoring. Reproduce the map counts with Python's `csv.DictReader` over the release's
+`strafetrack_routes.4.csv` and
+`Counter((row["mapname"], row["bot"]) for row in rows)`.
+To find potential ground restarts, join nodes to routes and compute
+`time_ms - LAG(time_ms) OVER (PARTITION BY route_id ORDER BY node_index) - air_ms`.
+Filtering human `mp/ctf4` rows to at least 250 ms finds 231 intervals across 122
+routes; this measures ground time, not the intent of each pause.
+
+`resetstrafetrack preview` reports a preservation-first cleanup without deleting
+recordings. `resetstrafetrack` targets 256 human demonstrations per map,
+prioritizing objective success and diversifying speed contexts, start areas and
+directions. Sole connectors and distinct force/speed/movement types survive
+beyond that soft target; redundant routes require nearby starts and endpoints.
+Bot comparison recordings are removed. Maps exceeding 4,096 human candidates
+cause cleanup to abort rather than discard unseen routes. Kept demonstrations
+retain their raw inputs and ground/takeoff measurements.
+Both commands refuse while recordings or pending input saves are active: stop
+recording with `bot_strafetrack 0`, let pending saves finish, then run the command
+and re-enable recording. The cleanup regenerates `.botroute` files, preserves
+hand-authored blocks and `.botroute_stats`, and does not clear combat learning
+or CTF objective evidence. Export/back up first; pruning is not reversible.
+
 With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewrites the current map's `botroutes/<map>.botroute` and reloads it, and the file is rewritten again at map end/shutdown, so bots use new routes without a manual export. `0` restores the manual `exportStrafeTrack` workflow.
 
 `exportStrafeTrack [prefix]` (server console):
@@ -381,6 +415,40 @@ node matching does not remove terminal checks. Nodes are confirmed on the ground
 not merely by flying past their horizontal coordinates.
 
 Route choice and chaining:
+- Retreat route scores prioritize increased distance from the opponent, minus
+  traversal cost, not route length alone. Acquired routes must initially lead
+  away and finish at least 128 units farther from the opponent. Cached choices
+  and planned successors recheck endpoint separation against the opponent's
+  current position; chained escape searches use the away-from-opponent heading.
+- Connections retain their exact destination entry node, not only their distance.
+  Planning can traverse multiple routes that are not directly reachable from the
+  bot's current position; every connected suffix must actually be available.
+  The selected successor is used when the first route finishes, with a fresh
+  walk/hop check. Endpoint progress toward the strategic goal must outweigh
+  traversal cost; a short local detour may still lead to a better connected endpoint.
+- `node_takeoff <x> <y> <z> <ground_ms>` records the takeoff for the hop ending at
+  the preceding `node`. A ground interval of at least 250 ms, or repositioning
+  more than 48 units from the previous landing, starts a safe grounded approach
+  and a fresh circle jump. It is not treated as an uninterrupted hop chain or
+  an instruction to wait an exact number of milliseconds. Legacy input rows
+  are used to recover takeoffs where possible; missing measurements stay unknown.
+- A measured speed loss of at least 200 u/s to at most 45% of the preceding
+  speed, from at least 300 u/s within 150 ms, is a collision failure only when
+  a world-wall hull sweep corroborates it during a launched hop. Forced movement,
+  ordinary ground pauses and uncorroborated speed loss are not collision evidence.
+  The failure belongs to the hop's takeoff, even if a landing marker changes.
+  Collision hops cool down; retries try bounded, floor-checked takeoff
+  repositioning rather than repeating the exact failed spot.
+- Before rejecting a recorded gap/corner hop, the controller can test yaw
+  corrections of +/-8 and +/-16 degrees and resource-legal Force Jump holds.
+  Only independently safe predicted alternatives are emitted; failed alternatives
+  do not discredit the original human input. Successful yaw/hold choices are
+  retained with route outcomes. Kill triggers, liquids, nodrop, unsafe drops,
+  damaging landings and mover restrictions still apply.
+- If all corridors fail while grounded and slow, a bounded, swept and
+  floor-checked turn/reposition can move the bot off an edge or corner before
+  replanning. This recovery walks on supported ground; it never grants permission
+  to walk across a gap just because a jump route exists.
 - At takeoff, the controller probes the engine's lateral wallrun trace; if the selected diagonal side would trigger a sideways wallrun, it tries the opposite strafe with a freshly validated arc.
 - A bounded, directed route network joins recorded endpoints to circle starts
   or intermediate landings
@@ -409,14 +477,14 @@ Route choice and chaining:
   Backward-facing escape and saber-only restrictions still apply.
 - Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by start
   and last landing plus execution speed context so re-exports retain history.
-  The versioned format begins with `botroute_stats 4`; each route stores start x/y/z, last landing x/y/z,
+  The versioned format begins with `botroute_stats 5`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
-  traversal deaths, unsafe-arc rejections, and 32 triples of hop failures, passes,
-  and successful force-jump hold height.
+  traversal deaths, unsafe-arc rejections, and 32 groups of hop failures, passes,
+  successful force-jump hold height, and successful yaw correction.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
-  unknown legacy history for export ranking. Legacy eight-field and version 2
-  rows remain readable. Version 3 files are migrated once: hop failures, stalls
+  unknown legacy history for export ranking. Legacy eight-field and versions 2-4
+  remain readable. Version 3 files are migrated once: hop failures, stalls
   and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
   cleared, while deaths, passes and completions are kept. Joining mid-route or chaining in counts as an attempt.
   Interrupted attempts are excluded from the completion-rate denominator.
@@ -560,6 +628,17 @@ Tracked duel data access:
 - Duel Elo for bots is one rating per bot level: `botlvl1` ... `botlvl10`, shared by every bot played at that level. Older per-bot keys (`<bot> [bot LN]`) in `data.db` are folded into `botlvlN` on map load.
 - Use server console command `resetdueltrack` to clear duel tracking summaries, participants, events, geometry, and aggregates from `dueltracks.db`. It refuses while a duel is active. Pending saves are completed first; a busy/failed save prevents the reset. The command reports the path and number of rows cleared and clears stale runtime tracking. It also forgets which legacy sources were imported, so `importDuelTrack` can bring them back. Learned aggregates and individual learning evidence are retained; accounts, Elo duel history, and legacy databases are not reset.
 - Use the separate server command `resetlearningtrack` to clear learned aggregates and evidence and refresh the runtime cache without deleting duel recordings, accounts or Elo. It refuses while a duel is active and flushes queued saves before resetting. These are commands, not persistent destructive cvars. Export/back up first.
+- For routine uploads, export both tracking families before cleanup and archive
+  that batch outside the live export directory. `resetdueltrack` preserves
+  `LocalBotLearnedSequence` and `LocalBotLearnedEvidence`; `resetstrafetrack`
+  preserves a compact demonstration set and route outcomes. Re-export after
+  cleanup to replace stale CSV parts. Exported CSVs are snapshots: removing
+  them does not erase live learning. Keep the learned/evidence exports in your
+  archive and back up `dueltracks.db` plus `botroutes/*.botroute` and
+  `botroutes/*.botroute_stats` for restoration. Do not delete the live database
+  or use `resetlearningtrack` merely to make a smaller upload. When copying a
+  live SQLite database, use an SQLite backup or stop the server; copying only
+  the `.db` while WAL writes are active is not a complete backup.
 - Use server console command `exportDuelTrack [prefix]` to export timestamped CSV files for:
   - `LocalDuelTrackSummary`
   - `LocalDuelTrackParticipant`

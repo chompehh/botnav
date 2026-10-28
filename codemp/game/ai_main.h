@@ -616,12 +616,25 @@ typedef struct bot_state_s
 	qboolean			sfjForceJumpHop;	// current recorded hop includes a force jump
 	float				sfjForceJumpTargetHeight;
 	qboolean			sfjRouteApproach;
+	qboolean			sfjRouteAcquiring;
 	qboolean			sfjRouteAttemptActive;
 	int					sfjRouteStarted;
 	int					sfjRouteStat;
 	int					sfjRouteSpeedContext;
 	qboolean			sfjRouteHopLaunched;
 	qboolean			sfjRouteFailureNoted;
+	int					sfjRouteLaunchedNode;
+	float				sfjRouteSampleSpeed;
+	vec3_t				sfjRouteSampleVelocity;
+	qboolean			sfjRouteCollision;
+	int					sfjRouteGroundNode;
+	int					sfjNextRoute;
+	int					sfjNextEntry;
+	int					sfjRecoveryUntil;
+	int					sfjRecoveryNextTime;
+	vec3_t				sfjRecoveryTarget;
+	float				sfjHopYawOffset;
+	int					sfjTrialForceNode;
 	int					sfjPendingHopStat;
 	int					sfjPendingHopNode;
 	int					sfjPendingHopTime;
@@ -632,6 +645,7 @@ typedef struct bot_state_s
 	int					sfjTravelPlanTime;
 	int					sfjPlannedRoute;
 	int					sfjPlannedEntry;
+	qboolean			sfjPlannedRetreat;
 	int					sfjLastRoute;
 	int					sfjNextWaypointAcquire;
 	vec3_t				sfjApproachTarget;	// current walk target while approaching a circle start

@@ -1875,6 +1875,8 @@ void BotSFJ_SaveRouteStats( void );
 void G_StrafeTrackExportCurrentMap( qboolean reload );
 void G_StrafeTrackCommand( gentity_t *ent );
 void G_StrafeTrackFlushAll( void );
+void Svcmd_ResetStrafeTrack_f( void );
+void G_CTFTrackEvent( gentity_t *player, int event, int flagTeam, const vec3_t origin );
 float BotSFJ_RouteExportFactor( const char *lowerMap, const float *start, const float *end );
 qboolean BotSFJ_ClientIsStrafeJumping( int clientNum );
 void BotSFJ_ClientDied( int clientNum, int meansOfDeath );
