@@ -2070,4 +2070,367 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 	*right = -*right;
 }
 
+/*
+ * Human route replay. Exported routes carry decimated per-command samples
+ * (position, view yaw, velocity yaw, speed, keys) and recorded vertical
+ * wallruns, so bots copy the human's yaw and keys at each point of the route
+ * instead of one universal corner rule.
+ */
+#define BOT_SFJ_REPLAY_MAX_SAMPLES 256
+#define BOT_SFJ_REPLAY_MAX_WALLRUNS 4
+#define BOT_SFJ_REPLAY_FLAG_GROUNDED 1
+#define BOT_SFJ_REPLAY_FLAG_JUMP 2
+#define BOT_SFJ_REPLAY_FLAG_WALLRUN 4
+#define BOT_SFJ_REPLAY_FLAG_FORCEJUMP 8
+#define BOT_SFJ_REPLAY_FLAG_WALLKNOWN 16	/* wall_run was recorded (not NULL) */
+#define BOT_SFJ_REPLAY_KEEP_DISTANCE 20.0f
+#define BOT_SFJ_REPLAY_KEEP_YAW 4.0f
+#define BOT_SFJ_REPLAY_KEEP_MS 100
+#define BOT_SFJ_REPLAY_MATCH_WINDOW 32
+#define BOT_SFJ_REPLAY_MATCH_HEIGHT 128.0f
+#define BOT_SFJ_REPLAY_YAW_CORRECTION 10.0f
+#define BOT_SFJ_REPLAY_CROSS_GAIN 0.08f
+#define BOT_SFJ_REPLAY_CROSS_MAX 6.0f
+#define BOT_SFJ_REPLAY_HARD_DEVIATION 160.0f
+#define BOT_SFJ_REPLAY_SOFT_DEVIATION 80.0f
+#define BOT_SFJ_REPLAY_SOFT_MS 300
+#define BOT_SFJ_REPLAY_LOOSE_HARD_DEVIATION 256.0f
+#define BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION 192.0f
+#define BOT_SFJ_REPLAY_LOOSE_SOFT_MS 400
+#define BOT_SFJ_REPLAY_SLOW_MS 350
+#define BOT_SFJ_REPLAY_HUMAN_FAST 1.15f
+#define BOT_SFJ_REPLAY_BOT_FAST 1.05f
+#define BOT_SFJ_REPLAY_SPEED_RATIO 0.6f
+#define BOT_SFJ_WALLRUN_MIN_ON_WALL_MS 420	/* engine needs 400 ms on the wall before a jump-off */
+#define BOT_SFJ_WALLRUN_REACH_2D 48.0f
+#define BOT_SFJ_WALLRUN_REACH_Z 40.0f
+
+typedef struct
+{
+	float origin[3];
+	float yaw;		/* human view yaw */
+	float velYaw;	/* human horizontal velocity yaw */
+	float speed;	/* human horizontal speed */
+	int timeMs;		/* ms since the route started */
+	int node;		/* next landing node when the sample was taken */
+	int forward, right, up;
+	int flags;
+} bot_sfj_replay_sample_t;
+
+typedef struct
+{
+	float origin[3];	/* where the human first touched the wall */
+	float yaw;			/* human view yaw at wall onset */
+	int node;
+	int timeMs;
+	int airMs;			/* airborne time before the wall */
+	int jumpOffMs;		/* wall onset to the second jump press (0 = none) */
+	int exitKind;		/* 1 jumped off, 2 ledge flip, 0 dropped off */
+	int inferred;		/* 1 = inferred from movement, wall_run was not recorded */
+} bot_sfj_replay_wallrun_t;
+
+static inline int BotSFJ_ReplaySign(int value)
+{
+	return value > 0 ? 1 : (value < 0 ? -1 : 0);
+}
+
+/* Decimation for export: keep key/flag changes and every 20 units, 4 degrees or 100 ms. */
+static inline int BotSFJ_ReplayKeepSample(const bot_sfj_replay_sample_t *kept,
+	const bot_sfj_replay_sample_t *sample)
+{
+	float dx, dy;
+
+	if (!kept)
+		return 1;
+	if (BotSFJ_ReplaySign(kept->forward) != BotSFJ_ReplaySign(sample->forward) ||
+		BotSFJ_ReplaySign(kept->right) != BotSFJ_ReplaySign(sample->right) ||
+		BotSFJ_ReplaySign(kept->up) != BotSFJ_ReplaySign(sample->up) ||
+		((kept->flags ^ sample->flags) & ~BOT_SFJ_REPLAY_FLAG_WALLKNOWN) || kept->node != sample->node)
+		return 1;
+	dx = sample->origin[0] - kept->origin[0];
+	dy = sample->origin[1] - kept->origin[1];
+	if (dx * dx + dy * dy >= BOT_SFJ_REPLAY_KEEP_DISTANCE * BOT_SFJ_REPLAY_KEEP_DISTANCE)
+		return 1;
+	if (fabsf(BotSFJ_AngleDelta(sample->yaw, kept->yaw)) >= BOT_SFJ_REPLAY_KEEP_YAW)
+		return 1;
+	return sample->timeMs - kept->timeMs >= BOT_SFJ_REPLAY_KEEP_MS;
+}
+
+/*
+ * Signed distance of p from segment a->b (positive = left of the travel
+ * direction) and the clamped projection fraction along the segment.
+ */
+static inline float BotSFJ_ReplaySegmentOffset(const float *a, const float *b, const float *p,
+	float *fraction, float *distance)
+{
+	float sx = b[0] - a[0], sy = b[1] - a[1];
+	float px = p[0] - a[0], py = p[1] - a[1];
+	float lenSq = sx * sx + sy * sy, t = 0.0f, cx, cy, cross;
+
+	if (lenSq > 0.0001f)
+	{
+		t = (px * sx + py * sy) / lenSq;
+		t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+	}
+	cx = p[0] - (a[0] + sx * t);
+	cy = p[1] - (a[1] + sy * t);
+	if (fraction)
+		*fraction = t;
+	if (distance)
+		*distance = sqrtf(cx * cx + cy * cy);
+	cross = lenSq > 0.0001f ? (sx * py - sy * px) / sqrtf(lenSq) : 0.0f;
+	return cross;
+}
+
+/*
+ * Nearest replay segment to origin, searched monotonically from cursor so a
+ * looping route cannot snap back to an earlier pass. Returns the segment start
+ * index (-1 when nothing is within the height band).
+ */
+static inline int BotSFJ_ReplayMatch(const bot_sfj_replay_sample_t *samples, int count, int cursor,
+	const float *origin, float *deviation, float *cross, float *fraction)
+{
+	int i, best = -1, first, last;
+	float bestDistance = 0.0f, bestCross = 0.0f, bestFraction = 0.0f;
+
+	if (!samples || count <= 0)
+		return -1;
+	if (cursor < 0)
+		cursor = 0;
+	if (cursor >= count)
+		cursor = count - 1;
+	first = cursor > 2 ? cursor - 2 : 0;
+	last = cursor + BOT_SFJ_REPLAY_MATCH_WINDOW;
+	if (last > count - 1)
+		last = count - 1;
+	for (i = first; i <= last; i++)
+	{
+		const bot_sfj_replay_sample_t *a = &samples[i];
+		const bot_sfj_replay_sample_t *b = &samples[i + 1 < count ? i + 1 : i];
+		float distance, offset, t, z;
+
+		offset = BotSFJ_ReplaySegmentOffset(a->origin, b->origin, origin, &t, &distance);
+		z = a->origin[2] + (b->origin[2] - a->origin[2]) * t;
+		if (fabsf(origin[2] - z) > BOT_SFJ_REPLAY_MATCH_HEIGHT)
+			continue;
+		if (best < 0 || distance < bestDistance - 0.01f)
+		{
+			best = i;
+			bestDistance = distance;
+			bestCross = offset;
+			bestFraction = t;
+		}
+	}
+	if (deviation)
+		*deviation = bestDistance;
+	if (cross)
+		*cross = bestCross;
+	if (fraction)
+		*fraction = bestFraction;
+	return best;
+}
+
+static inline float BotSFJ_ReplayClamp(float value, float limit)
+{
+	return value > limit ? limit : (value < -limit ? -limit : value);
+}
+
+/*
+ * View yaw that reproduces the human's wish angle relative to velocity at this
+ * point of the route, plus a small, bounded correction toward the human's
+ * travel direction and path. crossTrack is positive when the bot is left of
+ * the human path. Slow players use the human's absolute yaw.
+ */
+static inline float BotSFJ_ReplayViewYaw(float humanYaw, float humanVelYaw, float humanSpeed,
+	float targetVelYaw, float botVelYaw, float botSpeed, float crossTrack)
+{
+	float correction;
+
+	if (humanSpeed < 50.0f || botSpeed < 50.0f)
+		return humanYaw;
+	correction = 0.5f * BotSFJ_AngleDelta(targetVelYaw, botVelYaw) -
+		BotSFJ_ReplayClamp(crossTrack * BOT_SFJ_REPLAY_CROSS_GAIN, BOT_SFJ_REPLAY_CROSS_MAX);
+	correction = BotSFJ_ReplayClamp(correction, BOT_SFJ_REPLAY_YAW_CORRECTION);
+	return botVelYaw + BotSFJ_AngleDelta(humanYaw, humanVelYaw) + correction;
+}
+
+/* Off-course test; haveSamples selects the tight replay limits. */
+static inline int BotSFJ_ReplayOffCourse(float deviation, int deviatingMs, int haveSamples)
+{
+	const float hard = haveSamples ? BOT_SFJ_REPLAY_HARD_DEVIATION : BOT_SFJ_REPLAY_LOOSE_HARD_DEVIATION;
+	const float soft = haveSamples ? BOT_SFJ_REPLAY_SOFT_DEVIATION : BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION;
+	const int softMs = haveSamples ? BOT_SFJ_REPLAY_SOFT_MS : BOT_SFJ_REPLAY_LOOSE_SOFT_MS;
+
+	if (deviation > hard)
+		return 1;
+	return deviation > soft && deviatingMs >= softMs;
+}
+
+/*
+ * Instantaneous momentum loss: the human was above normal running speed here
+ * (and not repositioning on the ground) while the bot is not.
+ */
+static inline int BotSFJ_ReplayMomentumLow(float botSpeed, float humanSpeed, float normalSpeed,
+	int humanRepositioning)
+{
+	if (normalSpeed <= 0.0f)
+		normalSpeed = 250.0f;
+	if (humanRepositioning || humanSpeed <= normalSpeed * BOT_SFJ_REPLAY_HUMAN_FAST)
+		return 0;
+	return botSpeed < normalSpeed * BOT_SFJ_REPLAY_BOT_FAST ||
+		botSpeed < humanSpeed * BOT_SFJ_REPLAY_SPEED_RATIO;
+}
+
+/* Track how long a condition has held; returns elapsed ms (0 when false). */
+static inline int BotSFJ_ReplaySustain(int condition, int *since, int now)
+{
+	if (!condition)
+	{
+		*since = 0;
+		return 0;
+	}
+	if (*since <= 0)
+		*since = now;
+	return now - *since;
+}
+
+/* A recorded wallrun is reachable from the bot's position. */
+static inline int BotSFJ_RouteWallRunInReach(const float *botOrigin, const bot_sfj_replay_wallrun_t *run)
+{
+	const float dx = botOrigin[0] - run->origin[0], dy = botOrigin[1] - run->origin[1];
+
+	return dx * dx + dy * dy <= BOT_SFJ_WALLRUN_REACH_2D * BOT_SFJ_WALLRUN_REACH_2D &&
+		fabsf(botOrigin[2] - run->origin[2]) <= BOT_SFJ_WALLRUN_REACH_Z;
+}
+
+/* Second jump press is due after the human's wall time, never before the engine allows it. */
+static inline int BotSFJ_RouteWallRunJumpOffDue(int onWallMs, int jumpOffMs)
+{
+	if (jumpOffMs <= 0)
+		return 0;
+	return onWallMs >= (jumpOffMs > BOT_SFJ_WALLRUN_MIN_ON_WALL_MS ? jumpOffMs :
+		BOT_SFJ_WALLRUN_MIN_ON_WALL_MS);
+}
+
+static inline int BotSFJ_ReplayRisingJump(const bot_sfj_replay_sample_t *samples, int i)
+{
+	return i > 0 && samples[i].up > 0 && samples[i - 1].up <= 0;
+}
+
+/*
+ * Find vertical wallruns in full-resolution samples. Uses the recorded wall
+ * flag when present; otherwise infers them from a forward-held airborne stop
+ * against a wall followed by a climb.
+ */
+static inline int BotSFJ_ReplayScanWallRuns(const bot_sfj_replay_sample_t *samples, int count,
+	bot_sfj_replay_wallrun_t *out, int maxOut)
+{
+	int i, j, found = 0, known = 0, lastGround = 0;
+
+	for (i = 0; i < count; i++)
+		if (samples[i].flags & BOT_SFJ_REPLAY_FLAG_WALLKNOWN)
+			known = 1;
+	for (i = 1; i < count && found < maxOut; i++)
+	{
+		const bot_sfj_replay_sample_t *s = &samples[i];
+		int onset = 0, end = i, jumpOff = 0, exitKind = 0;
+
+		if (s->flags & BOT_SFJ_REPLAY_FLAG_GROUNDED)
+		{
+			lastGround = s->timeMs;
+			continue;
+		}
+		if (known)
+		{
+			if ((s->flags & BOT_SFJ_REPLAY_FLAG_WALLRUN) &&
+				!(samples[i - 1].flags & BOT_SFJ_REPLAY_FLAG_WALLRUN))
+			{
+				onset = 1;
+				for (end = i; end + 1 < count && (samples[end + 1].flags & BOT_SFJ_REPLAY_FLAG_WALLRUN); end++)
+					;
+			}
+		}
+		else if (samples[i - 1].speed >= 150.0f && s->speed <= 40.0f && s->forward > 0)
+		{
+			int risen = 0, pressed = 0;
+
+			for (j = i; j > 0 && samples[i].timeMs - samples[j].timeMs <= 100; j--)
+				if (BotSFJ_ReplayRisingJump(samples, j))
+					pressed = 1;
+			for (j = i; j < count && samples[j].timeMs - s->timeMs <= 400; j++)
+			{
+				if ((samples[j].flags & BOT_SFJ_REPLAY_FLAG_GROUNDED) || samples[j].speed > 80.0f)
+					break;
+				if (samples[j].origin[2] - s->origin[2] >= 40.0f)
+					risen = 1;
+			}
+			if (pressed && risen)
+			{
+				onset = 1;
+				for (end = i; end + 1 < count && !(samples[end + 1].flags & BOT_SFJ_REPLAY_FLAG_GROUNDED) &&
+					samples[end + 1].speed <= 120.0f && samples[end + 1].timeMs - s->timeMs <= 1200; end++)
+					;
+			}
+		}
+		if (!onset)
+			continue;
+		/* The jump-off press may land on the first command after the wall anim ends. */
+		for (j = i + 1; j <= end + 1 && j < count; j++)
+			if (BotSFJ_ReplayRisingJump(samples, j))
+			{
+				jumpOff = samples[j].timeMs - s->timeMs;
+				exitKind = 1;
+				break;
+			}
+		if (!exitKind)
+			for (j = end + 1; j < count && samples[j].timeMs - samples[end].timeMs <= 600; j++)
+				if (samples[j].flags & BOT_SFJ_REPLAY_FLAG_GROUNDED)
+				{
+					if (samples[j].origin[2] >= s->origin[2] + 32.0f)
+						exitKind = 2;
+					break;
+				}
+		out[found].origin[0] = s->origin[0];
+		out[found].origin[1] = s->origin[1];
+		out[found].origin[2] = s->origin[2];
+		out[found].yaw = s->yaw;
+		out[found].node = s->node;
+		out[found].timeMs = s->timeMs;
+		out[found].airMs = s->timeMs - lastGround > 0 ? s->timeMs - lastGround : 0;
+		out[found].jumpOffMs = jumpOff;
+		out[found].exitKind = exitKind;
+		out[found].inferred = !known;
+		found++;
+		i = end;
+	}
+	return found;
+}
+
+/*
+ * Combat hazard detours: candidate move yaws relative to the enemy (strafe
+ * left/right, back diagonals, straight back) ordered by how close they stay to
+ * the original move yaw, so the bot goes around a hazard before backing off.
+ */
+static inline int BotSFJ_CombatHazardCandidates(float moveYaw, float enemyYaw, float *out, int maxOut)
+{
+	const float offsets[5] = {90.0f, -90.0f, 135.0f, -135.0f, 180.0f};
+	float cost[5];
+	int i, j, n = 0;
+
+	for (i = 0; i < 5 && n < maxOut; i++)
+	{
+		float yaw = enemyYaw + offsets[i], c = fabsf(BotSFJ_AngleDelta(yaw, moveYaw));
+
+		for (j = n; j > 0 && cost[j - 1] > c + 0.01f; j--)
+		{
+			cost[j] = cost[j - 1];
+			out[j] = out[j - 1];
+		}
+		cost[j] = c;
+		out[j] = yaw;
+		n++;
+	}
+	return n;
+}
+
 #endif

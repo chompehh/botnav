@@ -1,3 +1,4 @@
+#include <cstring>
 #include <math.h>
 #include <limits>
 #include <cstdlib>
@@ -4087,6 +4088,172 @@ BOOST_AUTO_TEST_CASE( force_speed_comes_only_from_human_speed_routes )
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 1, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 0, 1 ) );
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 0, 0, 0 ) );
+}
+
+static bot_sfj_replay_sample_t ReplaySample(float x, float y, float z, float yaw, float velYaw,
+	float speed, int timeMs, int forward, int right, int up, int flags)
+{
+	bot_sfj_replay_sample_t s;
+
+	memset(&s, 0, sizeof(s));
+	s.origin[0] = x;
+	s.origin[1] = y;
+	s.origin[2] = z;
+	s.yaw = yaw;
+	s.velYaw = velYaw;
+	s.speed = speed;
+	s.timeMs = timeMs;
+	s.forward = forward;
+	s.right = right;
+	s.up = up;
+	s.flags = flags;
+	return s;
+}
+
+BOOST_AUTO_TEST_CASE( replay_view_yaw_copies_the_humans_corner_not_a_fixed_rule )
+{
+	/* Two corners at the same velocity: the human held 20 and 45 degrees of wish offset. */
+	const float gentle = BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f);
+	const float sharp = BotSFJ_ReplayViewYaw(135.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f);
+
+	BOOST_CHECK_CLOSE( gentle, 110.0f, 0.01 );
+	BOOST_CHECK_CLOSE( sharp, 135.0f, 0.01 );
+	/* The offset follows the bot's own velocity, plus a bounded correction. */
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 80.0f, 600.0f, 0.0f),
+		80.0f + 20.0f + 5.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 150.0f, 80.0f, 600.0f, 0.0f),
+		80.0f + 20.0f + BOT_SFJ_REPLAY_YAW_CORRECTION, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 1000.0f),
+		110.0f - BOT_SFJ_REPLAY_CROSS_MAX, 0.01 );
+	/* Slow (repositioning on the ground) copies the absolute human yaw. */
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(200.0f, 90.0f, 20.0f, 90.0f, 90.0f, 600.0f, 0.0f), 200.0f, 0.01 );
+}
+
+BOOST_AUTO_TEST_CASE( replay_off_course_and_momentum_limits )
+{
+	BOOST_CHECK( !BotSFJ_ReplayOffCourse(60.0f, 5000, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayOffCourse(100.0f, 200, 1) );
+	BOOST_CHECK( BotSFJ_ReplayOffCourse(100.0f, 300, 1) );
+	BOOST_CHECK( BotSFJ_ReplayOffCourse(170.0f, 0, 1) );
+	/* Routes without samples use the looser node corridor limits. */
+	BOOST_CHECK( !BotSFJ_ReplayOffCourse(170.0f, 0, 0) );
+	BOOST_CHECK( !BotSFJ_ReplayOffCourse(200.0f, 300, 0) );
+	BOOST_CHECK( BotSFJ_ReplayOffCourse(200.0f, 400, 0) );
+	BOOST_CHECK( BotSFJ_ReplayOffCourse(300.0f, 0, 0) );
+
+	BOOST_CHECK( BotSFJ_ReplayMomentumLow(250.0f, 500.0f, 250.0f, 0) );
+	BOOST_CHECK( BotSFJ_ReplayMomentumLow(280.0f, 600.0f, 250.0f, 0) );
+	BOOST_CHECK( !BotSFJ_ReplayMomentumLow(450.0f, 600.0f, 250.0f, 0) );
+	/* Human was not fast here, or was repositioning for a new circle jump. */
+	BOOST_CHECK( !BotSFJ_ReplayMomentumLow(100.0f, 260.0f, 250.0f, 0) );
+	BOOST_CHECK( !BotSFJ_ReplayMomentumLow(100.0f, 600.0f, 250.0f, 1) );
+
+	{
+		int since = 0;
+
+		BOOST_CHECK_EQUAL( BotSFJ_ReplaySustain(1, &since, 1000), 0 );
+		BOOST_CHECK_EQUAL( BotSFJ_ReplaySustain(1, &since, 1350), 350 );
+		BOOST_CHECK_EQUAL( BotSFJ_ReplaySustain(0, &since, 1400), 0 );
+		BOOST_CHECK_EQUAL( since, 0 );
+	}
+}
+
+BOOST_AUTO_TEST_CASE( replay_match_is_monotonic_and_signed )
+{
+	bot_sfj_replay_sample_t samples[4];
+	const float left[3] = {150.0f, 20.0f, 0.0f};
+	const float right[3] = {150.0f, -20.0f, 0.0f};
+	const float looped[3] = {10.0f, 0.0f, 0.0f};
+	float deviation, cross, fraction;
+
+	samples[0] = ReplaySample(0, 0, 0, 0, 0, 400, 0, 127, 0, 0, 0);
+	samples[1] = ReplaySample(100, 0, 0, 0, 0, 400, 100, 127, 0, 0, 0);
+	samples[2] = ReplaySample(200, 0, 0, 0, 0, 400, 200, 127, 0, 0, 0);
+	samples[3] = ReplaySample(300, 0, 0, 0, 0, 400, 300, 127, 0, 0, 0);
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayMatch(samples, 4, 0, left, &deviation, &cross, &fraction), 1 );
+	BOOST_CHECK_CLOSE( deviation, 20.0f, 0.01 );
+	BOOST_CHECK( cross > 0.0f );
+	BotSFJ_ReplayMatch(samples, 4, 0, right, &deviation, &cross, &fraction);
+	BOOST_CHECK( cross < 0.0f );
+	/* From a later cursor the bot cannot snap back to the route start. */
+	BOOST_CHECK( BotSFJ_ReplayMatch(samples, 4, 3, looped, &deviation, &cross, &fraction) >= 1 );
+}
+
+BOOST_AUTO_TEST_CASE( replay_decimation_keeps_key_changes )
+{
+	bot_sfj_replay_sample_t a = ReplaySample(0, 0, 0, 0, 0, 400, 0, 127, 127, 0, 0);
+	bot_sfj_replay_sample_t b = ReplaySample(5, 0, 0, 1, 0, 400, 20, 127, 127, 0, 0);
+
+	BOOST_CHECK( BotSFJ_ReplayKeepSample(NULL, &a) );
+	BOOST_CHECK( !BotSFJ_ReplayKeepSample(&a, &b) );
+	b.right = -127;
+	BOOST_CHECK( BotSFJ_ReplayKeepSample(&a, &b) );
+	b.right = 127;
+	b.origin[0] = 25.0f;
+	BOOST_CHECK( BotSFJ_ReplayKeepSample(&a, &b) );
+	b.origin[0] = 5.0f;
+	b.yaw = 6.0f;
+	BOOST_CHECK( BotSFJ_ReplayKeepSample(&a, &b) );
+}
+
+BOOST_AUTO_TEST_CASE( replay_recorded_vertical_wallrun_keeps_human_jump_off_time )
+{
+	bot_sfj_replay_sample_t samples[16];
+	bot_sfj_replay_wallrun_t runs[2];
+	const int known = BOT_SFJ_REPLAY_FLAG_WALLKNOWN;
+	int i, n = 0;
+
+	samples[n++] = ReplaySample(0, 0, 0, 0, 0, 400, 0, 127, 0, 0, known | BOT_SFJ_REPLAY_FLAG_GROUNDED);
+	samples[n++] = ReplaySample(40, 0, 20, 0, 0, 400, 50, 127, 0, 127, known);
+	samples[n++] = ReplaySample(80, 0, 40, 0, 0, 400, 100, 127, 0, 0, known);
+	samples[n++] = ReplaySample(100, 0, 50, 0, 0, 0, 150, 127, 0, 127, known | BOT_SFJ_REPLAY_FLAG_WALLRUN);
+	for (i = 1; i <= 9; i++)
+		samples[n++] = ReplaySample(100, 0, 50.0f + 20.0f * i, 0, 0, 0, 150 + 50 * i, 127, 0, 0,
+			known | BOT_SFJ_REPLAY_FLAG_WALLRUN);
+	samples[n++] = ReplaySample(100, 0, 240, 0, 0, 0, 650, 127, 0, 127, known | BOT_SFJ_REPLAY_FLAG_WALLRUN);
+	samples[n++] = ReplaySample(80, 0, 250, 180, 180, 200, 700, 0, 0, 0, known);
+	BOOST_REQUIRE_EQUAL( BotSFJ_ReplayScanWallRuns(samples, n, runs, 2), 1 );
+	BOOST_CHECK_EQUAL( runs[0].timeMs, 150 );
+	BOOST_CHECK_EQUAL( runs[0].jumpOffMs, 500 );
+	BOOST_CHECK_EQUAL( runs[0].exitKind, 1 );
+	BOOST_CHECK_EQUAL( runs[0].inferred, 0 );
+	BOOST_CHECK_EQUAL( runs[0].airMs, 150 );
+
+	/* Same run without the recorded flag is inferred from the stop and climb. */
+	for (i = 0; i < n; i++)
+		samples[i].flags &= ~(known | BOT_SFJ_REPLAY_FLAG_WALLRUN);
+	BOOST_REQUIRE_EQUAL( BotSFJ_ReplayScanWallRuns(samples, n, runs, 2), 1 );
+	BOOST_CHECK_EQUAL( runs[0].inferred, 1 );
+	BOOST_CHECK_EQUAL( runs[0].exitKind, 1 );
+	BOOST_CHECK_EQUAL( runs[0].jumpOffMs, 500 );
+
+	BOOST_CHECK( !BotSFJ_RouteWallRunJumpOffDue(400, 300) );
+	BOOST_CHECK( BotSFJ_RouteWallRunJumpOffDue(BOT_SFJ_WALLRUN_MIN_ON_WALL_MS, 300) );
+	BOOST_CHECK( !BotSFJ_RouteWallRunJumpOffDue(499, 500) );
+	BOOST_CHECK( BotSFJ_RouteWallRunJumpOffDue(500, 500) );
+	BOOST_CHECK( !BotSFJ_RouteWallRunJumpOffDue(5000, 0) );
+	{
+		const float near[3] = {120.0f, 20.0f, 60.0f};
+		const float far[3] = {200.0f, 0.0f, 50.0f};
+
+		BOOST_CHECK( BotSFJ_RouteWallRunInReach(near, &runs[0]) );
+		BOOST_CHECK( !BotSFJ_RouteWallRunInReach(far, &runs[0]) );
+	}
+}
+
+BOOST_AUTO_TEST_CASE( combat_hazard_candidates_strafe_then_back_off_keeping_aim )
+{
+	float out[5];
+	const int n = BotSFJ_CombatHazardCandidates(0.0f, 0.0f, out, 5);
+
+	BOOST_REQUIRE_EQUAL( n, 5 );
+	/* Running at the enemy over a pit: sidestep first, back off last. */
+	BOOST_CHECK_CLOSE( fabsf(BotSFJ_AngleDelta(out[0], 0.0f)), 90.0f, 0.01 );
+	BOOST_CHECK_CLOSE( fabsf(BotSFJ_AngleDelta(out[1], 0.0f)), 90.0f, 0.01 );
+	BOOST_CHECK_CLOSE( fabsf(BotSFJ_AngleDelta(out[4], 0.0f)), 180.0f, 0.01 );
+	/* Strafing left prefers the left-side detour. */
+	BotSFJ_CombatHazardCandidates(80.0f, 0.0f, out, 5);
+	BOOST_CHECK_CLOSE( BotSFJ_AngleDelta(out[0], 0.0f), 90.0f, 0.01 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()
