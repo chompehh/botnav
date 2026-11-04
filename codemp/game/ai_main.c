@@ -300,12 +300,17 @@ static void BotNav_FilterGapInput(bot_state_t *bs, bot_input_t *bi, int time);
 static void BotNav_ApplyLedgeEscape(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotSFJ_EffectiveInputDirection(const bot_input_t *bi, vec3_t direction);
 static void BotSFJ_DebugReject(bot_state_t *bs, const char *reason);
+static void QDECL BotDebug_Printf(const char *fmt, ...);
+static void BotSFJ_ResetReplay(bot_state_t *bs, int routeIndex, int entry);
+static void BotSFJ_DebugInfo(bot_state_t *bs, const char *text);
 int WaitingForNow(bot_state_t *bs, vec3_t goalpos);
 static void BotSFJ_SelectIntent(bot_state_t *bs);
 static void BotSFJ_ManageRouteSpeed(bot_state_t *bs);
 static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qboolean stalled);
 static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int elapsedTime);
 static void BotSFJ_ApplyWallRun(bot_state_t *bs, bot_input_t *bi, int time);
+static void BotSFJ_ApplyRouteWallRun(bot_state_t *bs, bot_input_t *bi, int time);
+static void BotNav_FilterCombatHazardInput(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
@@ -1113,10 +1118,12 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bi.actionflags = NewBotAI_SaberDuelActionFlags(bi.actionflags, ACTION_ALT_ATTACK,
 		NewBotAI_IsSaberOnlyDuel(bs));
 	BotSFJ_ApplyInput(bs, &bi, time, elapsed_time);
+	BotSFJ_ApplyRouteWallRun(bs, &bi, time);
 	BotSFJ_ApplyWallRun(bs, &bi, time);
 	BotNav_ApplyLedgeEscape(bs, &bi, time);
 	BotCombat_FilterRangedInput(bs, &bi);
 	BotNav_FilterGapInput(bs, &bi, time);
+	BotNav_FilterCombatHazardInput(bs, &bi, time);
 	//respawn hack
 	if (bi.actionflags & ACTION_RESPAWN) {
 		if (bs->lastucmd.buttons & BUTTON_ATTACK) bi.actionflags &= ~(ACTION_RESPAWN|ACTION_ATTACK);
@@ -2928,7 +2935,7 @@ static qboolean BotNav_LedgeEscape(bot_state_t *bs, vec3_t direction)
 		bs->sfjTravelPlanTime = bs->sfjArcCheckedTime = 0;
 		bs->jumpTime = bs->duckTime = 0;
 		if (bot_strafejumps_debug.integer >= 2)
-			Com_Printf("^5[SFJ ledge]^7 %s safe escape=%d for 400ms; replanning\n",
+			BotDebug_Printf("^5[SFJ ledge]^7 %s safe escape=%d for 400ms; replanning\n",
 				g_entities[bs->client].client->pers.netname, i);
 		return qtrue;
 	}
@@ -2989,6 +2996,229 @@ static void BotNav_FilterGapInput(bot_state_t *bs, bot_input_t *bi, int time)
 		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT);
 		VectorClear(bi->dir);
 		bi->speed = 0.0f;
+	}
+}
+
+/*
+ * Instant-death check from an arbitrary point: kill triggers along the step and
+ * lava/slime/nodrop or kill triggers below the sample.
+ */
+static qboolean BotNav_PointLeadsToDeath(bot_state_t *bs, const vec3_t from,
+	const vec3_t moveDir, float forwardDist, float downTraceDist)
+{
+	vec3_t start, end, origin;
+	trace_t tr;
+
+	VectorCopy(from, origin);
+	VectorCopy(from, start);
+	start[0] += moveDir[0] * forwardDist;
+	start[1] += moveDir[1] * forwardDist;
+	if (BotNav_SweepTouchesInstantKillTrigger(origin, start))
+		return qtrue;
+	VectorCopy(start, end);
+	end[2] -= downTraceDist;
+	JP_Trace(&tr, start, NULL, NULL, end, bs->client,
+		MASK_PLAYERSOLID | CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP, qfalse, 0, 0);
+	if (tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP))
+		return qtrue;
+	/* A bottomless drop (no floor within the trace) is a chasm. */
+	if (tr.fraction >= 1.0f && !tr.startsolid)
+		return qtrue;
+	return BotNav_SweepTouchesInstantKillTrigger(start, tr.endpos);
+}
+
+/* Moving this way in combat would run into an instant-kill trap or off a lethal ledge. */
+static qboolean BotNav_CombatDirectionHazard(bot_state_t *bs, vec3_t dir)
+{
+	static const float reach[3] = {48.0f, 96.0f, 144.0f};
+	int i;
+
+	for (i = 0; i < 3; i++)
+		if (BotNav_CheckInstantDeathHazardSample(bs, dir, reach[i], 1024.0f))
+			return qtrue;
+	return bs->cur_ps.groundEntityNum != ENTITYNUM_NONE &&
+		BotNav_CheckFallingHazard(bs, dir, qtrue);
+}
+
+/* Would a push (away from the enemy) or a pull (toward it) carry us into a chasm? */
+static qboolean BotNav_PushPullExposedAt(bot_state_t *bs, const vec3_t from,
+	const vec3_t toEnemy, float enemyDist, qboolean pull)
+{
+	static const float push[3] = {64.0f, 128.0f, 192.0f};
+	vec3_t away;
+	int i;
+
+	VectorScale(toEnemy, -1.0f, away);
+	for (i = 0; i < 3; i++)
+		if (BotNav_PointLeadsToDeath(bs, from, away, push[i], 1024.0f))
+			return qtrue;
+	if (pull)
+		for (i = 0; i < 3 && push[i] < enemyDist - 48.0f; i++)
+			if (BotNav_PointLeadsToDeath(bs, from, toEnemy, push[i], 1024.0f))
+				return qtrue;
+	return qfalse;
+}
+
+static qboolean BotNav_CombatCandidateClear(bot_state_t *bs, vec3_t dir)
+{
+	vec3_t end;
+	trace_t tr;
+
+	VectorMA(bs->origin, 32.0f, dir, end);
+	JP_Trace(&tr, bs->origin, g_entities[bs->client].r.mins,
+		g_entities[bs->client].r.maxs, end, bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
+	return !tr.startsolid && !tr.allsolid && tr.fraction >= 1.0f &&
+		!BotNav_CombatDirectionHazard(bs, dir);
+}
+
+/*
+ * In combat, never walk into a pit/trap between us and the enemy and do not
+ * stand where a push or pull throws us into a chasm. Only the move direction
+ * changes; the view (aim at the enemy) is left alone.
+ */
+static void BotNav_FilterCombatHazardInput(bot_state_t *bs, bot_input_t *bi, int time)
+{
+	gentity_t *self = &g_entities[bs->client];
+	gentity_t *enemy = bs->currentEnemy;
+	vec3_t toEnemy, dir, chosen, angles;
+	float enemyYaw, moveYaw, enemyDist, candidates[5];
+	qboolean moveHazard = qfalse, exposed = qfalse, pull = qfalse, threat;
+	const char *why = NULL;
+	int count, i;
+
+	if (!self->client || self->health <= 0 || !enemy || !enemy->client ||
+		enemy->health <= 0 || bs->cur_ps.pm_type != PM_NORMAL)
+	{
+		bs->navHazardUntil = 0;
+		bs->navPushExposed = qfalse;
+		return;
+	}
+	VectorSubtract(enemy->client->ps.origin, bs->origin, toEnemy);
+	toEnemy[2] = 0.0f;
+	enemyDist = VectorNormalize(toEnemy);
+	enemyYaw = vectoyaw(toEnemy);
+	if (bot_combatdebug.integer && time - bs->combatDebugBeatTime >= 2000)
+	{
+		bs->combatDebugBeatTime = time;
+		BotDebug_Printf("^3[combat]^7 %s enemy=%s range=%.0f visible=%d mode=%s grounded=%d hazardDetour=%d pushExposed=%d\n",
+			self->client->pers.netname, enemy->client->pers.netname, enemyDist,
+			bs->frame_Enemy_Vis ? 1 : 0, NewBotAI_IsSaberOnlyDuel(bs) ? "saber-only" : "full-force",
+			bs->cur_ps.groundEntityNum != ENTITYNUM_NONE, bs->navHazardUntil > time,
+			bs->navPushExposed ? 1 : 0);
+	}
+	if (enemyDist > 1024.0f || bs->sfjOwnsInput || bs->sfjWallRunStage || bs->sfjRouteWallStage ||
+		bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
+		bs->cur_ps.forceHandExtend == HANDEXTEND_KNOCKDOWN)
+		return;
+
+	/* Push/pull exposure, refreshed every 200 ms. */
+	threat = bs->frame_Enemy_Vis && enemyDist < 512.0f && !NewBotAI_IsSaberOnlyDuel(bs) &&
+		(enemy->client->ps.fd.forcePowersKnown & ((1 << FP_PUSH) | (1 << FP_PULL))) &&
+		!(g_forcePowerDisable.integer & ((1 << FP_PUSH) | (1 << FP_PULL)));
+	if (!threat)
+		bs->navPushExposed = qfalse;
+	else if (time >= bs->navPushCheckTime)
+	{
+		pull = (enemy->client->ps.fd.forcePowersKnown & (1 << FP_PULL)) &&
+			!(g_forcePowerDisable.integer & (1 << FP_PULL));
+		bs->navPushCheckTime = time + 200;
+		bs->navPushExposed = BotNav_PushPullExposedAt(bs, bs->origin, toEnemy, enemyDist, pull);
+		if (bs->navPushExposed)
+		{
+			vec3_t point;
+
+			/* Prefer a sidestep/backstep that ends where a push or pull is survivable. */
+			VectorClear(bs->navPushSafeDir);
+			count = BotSFJ_CombatHazardCandidates(enemyYaw + 90.0f, enemyYaw, candidates, 5);
+			for (i = 0; i < count; i++)
+			{
+				VectorSet(angles, 0.0f, candidates[i], 0.0f);
+				AngleVectors(angles, dir, NULL, NULL);
+				VectorMA(bs->origin, 128.0f, dir, point);
+				if (!BotNav_CombatCandidateClear(bs, dir) ||
+					BotNav_PushPullExposedAt(bs, point, toEnemy, enemyDist, pull))
+					continue;
+				VectorCopy(dir, bs->navPushSafeDir);
+				break;
+			}
+		}
+	}
+	exposed = bs->navPushExposed && VectorLengthSquared(bs->navPushSafeDir) > 0.0f;
+
+	if (BotSFJ_EffectiveInputDirection(bi, dir))
+	{
+		VectorNormalize(dir);
+		moveHazard = BotNav_CombatDirectionHazard(bs, dir);
+	}
+	else
+		VectorCopy(toEnemy, dir);
+	if (!moveHazard && bs->cur_ps.velocity[0] * bs->cur_ps.velocity[0] +
+		bs->cur_ps.velocity[1] * bs->cur_ps.velocity[1] > 150.0f * 150.0f)
+	{
+		vec3_t vel;
+
+		VectorSet(vel, bs->cur_ps.velocity[0], bs->cur_ps.velocity[1], 0.0f);
+		VectorNormalize(vel);
+		moveHazard = BotNav_CombatDirectionHazard(bs, vel);
+		if (moveHazard)
+			VectorCopy(vel, dir);
+	}
+	if (!moveHazard && !exposed && bs->navHazardUntil <= time)
+		return;
+
+	VectorClear(chosen);
+	if (exposed)
+	{
+		VectorCopy(bs->navPushSafeDir, chosen);
+		why = "standing where a push/pull reaches a chasm; repositioning";
+	}
+	else if (bs->navHazardUntil > time)
+	{
+		VectorSet(angles, 0.0f, bs->navHazardYaw, 0.0f);
+		AngleVectors(angles, chosen, NULL, NULL);
+		if (!BotNav_CombatCandidateClear(bs, chosen))
+			VectorClear(chosen);
+		else if (!moveHazard)
+			why = NULL;
+	}
+	if (VectorLengthSquared(chosen) <= 0.0f)
+	{
+		moveYaw = vectoyaw(dir);
+		count = BotSFJ_CombatHazardCandidates(moveYaw, enemyYaw, candidates, 5);
+		for (i = 0; i < count; i++)
+		{
+			VectorSet(angles, 0.0f, candidates[i], 0.0f);
+			AngleVectors(angles, chosen, NULL, NULL);
+			if (BotNav_CombatCandidateClear(bs, chosen))
+				break;
+			VectorClear(chosen);
+		}
+		why = VectorLengthSquared(chosen) > 0.0f ?
+			"instant-death hazard ahead; strafing around it while keeping aim" :
+			"instant-death hazard ahead and no safe detour; holding position";
+	}
+	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+		ACTION_MOVERIGHT | ACTION_JUMP | ACTION_DELAYEDJUMP);
+	if (VectorLengthSquared(chosen) > 0.0f)
+	{
+		VectorCopy(chosen, bi->dir);
+		bi->speed = 400.0f;
+		bs->navHazardYaw = vectoyaw(chosen);
+		if (moveHazard || exposed)
+			bs->navHazardUntil = time + 300;
+	}
+	else
+	{
+		VectorClear(bi->dir);
+		bi->speed = 0.0f;
+		bs->navHazardUntil = 0;
+	}
+	if (why && bot_combatdebug.integer && time - bs->navHazardDebugTime >= 1000)
+	{
+		bs->navHazardDebugTime = time;
+		BotDebug_Printf("^3[combat]^7 %s %s (move yaw %.0f, enemy yaw %.0f, range %.0f)\n",
+			self->client->pers.netname, why, VectorLengthSquared(chosen) > 0.0f ?
+				bs->navHazardYaw : -1.0f, enemyYaw, enemyDist);
 	}
 }
 
@@ -3419,12 +3649,50 @@ static void BotSFJ_DebugReject(bot_state_t *bs, const char *reason)
 		return;
 	bs->sfjDebugNextTime = level.time + 1000;
 	client = g_entities[bs->client].client;
-	Com_Printf("^5[SFJ]^7 %s: %s\n", client ? client->pers.netname : "bot", reason);
-	if (bot_strafejumps_debug.integer >= 3)
+	BotDebug_Printf("^5[SFJ]^7 %s: %s%s\n", client ? client->pers.netname : "bot",
+		bot_onlystrafes.integer ? "safe strafe preference: " : "", reason);
+}
+
+/*
+ * Bot debug output goes to the server console and to every client console, so
+ * listen-server and dedicated-server users both see it.
+ */
+static void QDECL BotDebug_Printf(const char *fmt, ...)
+{
+	va_list argptr;
+	char text[1000];
+	int i, len;
+
+	va_start(argptr, fmt);
+	Q_vsnprintf(text, sizeof(text) - 2, fmt, argptr);
+	va_end(argptr);
+	len = strlen(text);
+	if (!len)
+		return;
+	if (text[len - 1] != '\n')
 	{
-		trap->SendServerCommand(-1, va("print \"[SFJ] bot %i: %s%s\n\"",
-			bs->client, bot_onlystrafes.integer ? "safe strafe preference: " : "", reason));
+		text[len++] = '\n';
+		text[len] = 0;
 	}
+	Com_Printf("%s", text);
+	for (i = 0; i < len; i++)
+		if (text[i] == '"')
+			text[i] = '\'';
+	trap->SendServerCommand(-1, va("print \"%s\"", text));
+}
+
+/* Level 2+ strafe events; separate from the rejection limiter so they are not drowned out. */
+static void BotSFJ_DebugInfo(bot_state_t *bs, const char *text)
+{
+	gclient_t *client;
+
+	if (!bs || !text || bot_strafejumps_debug.integer < 2)
+		return;
+	if (bs->sfjDebugInfoTime > level.time && bs->sfjDebugInfoTime - level.time <= 250)
+		return;
+	bs->sfjDebugInfoTime = level.time + 250;
+	client = g_entities[bs->client].client;
+	BotDebug_Printf("^5[SFJ]^7 %s: %s\n", client ? client->pers.netname : "bot", text);
 }
 
 static qboolean BotSFJ_WaypointsLinked(const wpobject_t *from, int toIndex)
@@ -4055,7 +4323,7 @@ static qboolean BotSFJ_GetEnemyCorridor(bot_state_t *bs, const vec3_t moveDirect
  * single hints and waypoints; waypoints remain the fallback.
  */
 #define BOT_SFJ_MAX_ROUTE_HINTS 256
-#define BOT_SFJ_ROUTE_FILE_MAX 1048576
+#define BOT_SFJ_ROUTE_FILE_MAX (16 * 1024 * 1024)
 #define BOT_SFJ_TRACK_ROUTE_START_RADIUS 96.0f
 #define BOT_SFJ_TRACK_ROUTE_HEIGHT_TOLERANCE 64.0f
 /* cos(~45 deg): the first recorded landing must lie ahead of the bot's movement. */
@@ -4083,10 +4351,23 @@ typedef struct
 	int nodeSpeedActive[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeSpeedLevel[BOT_SFJ_TRACK_MAX_NODES];
 	int stat[4];
+	int sampleCount;	/* human replay samples in g_botSfjReplaySamples[route slot] */
+	int wallRunCount;
+	bot_sfj_replay_wallrun_t wallRun[BOT_SFJ_REPLAY_MAX_WALLRUNS];
 } bot_sfj_track_route_t;
 
 static bot_sfj_track_route_t g_botSfjTrackRoutes[BOT_SFJ_MAX_TRACK_ROUTES];
 static int g_botSfjTrackRouteCount;
+/* Indexed by route slot; filled while parsing the route that will occupy the slot. */
+static bot_sfj_replay_sample_t g_botSfjReplaySamples[BOT_SFJ_MAX_TRACK_ROUTES][BOT_SFJ_REPLAY_MAX_SAMPLES];
+
+static const bot_sfj_replay_sample_t *BotSFJ_RouteSamples(int routeIndex)
+{
+	if (routeIndex < 0 || routeIndex >= g_botSfjTrackRouteCount ||
+		g_botSfjTrackRoutes[routeIndex].sampleCount < 2)
+		return NULL;
+	return g_botSfjReplaySamples[routeIndex];
+}
 
 static const float *BotSFJ_TrackEntryPosition(const bot_sfj_track_route_t *route, int node)
 {
@@ -4275,6 +4556,43 @@ static void BotSFJ_ParseTrackRoute(const char **text, const char *path)
 			route.nodeStyle[route.nodeCount].firstSide = route.nodeSide[route.nodeCount];
 			route.nodeStyle[route.nodeCount].airMs = airMs;
 			route.nodeCount++;
+		}
+		else if (!Q_stricmp(token, "input"))
+		{
+			bot_sfj_replay_sample_t sample;
+
+			memset(&sample, 0, sizeof(sample));
+			if (COM_ParseInt(text, &sample.node) || COM_ParseInt(text, &sample.timeMs) ||
+				!BotSFJ_ParseRouteVector(text, sample.origin) || COM_ParseFloat(text, &sample.yaw) ||
+				COM_ParseFloat(text, &sample.velYaw) || COM_ParseFloat(text, &sample.speed) ||
+				COM_ParseInt(text, &sample.forward) || COM_ParseInt(text, &sample.right) ||
+				COM_ParseInt(text, &sample.up) || COM_ParseInt(text, &sample.flags) ||
+				!isfinite(sample.yaw) || !isfinite(sample.velYaw) || !isfinite(sample.speed))
+				continue;
+			if (g_botSfjTrackRouteCount < BOT_SFJ_MAX_TRACK_ROUTES &&
+				route.sampleCount < BOT_SFJ_REPLAY_MAX_SAMPLES)
+			{
+				sample.node = sample.node < 0 ? 0 : (sample.node >= BOT_SFJ_TRACK_MAX_NODES ?
+					BOT_SFJ_TRACK_MAX_NODES - 1 : sample.node);
+				g_botSfjReplaySamples[g_botSfjTrackRouteCount][route.sampleCount++] = sample;
+			}
+		}
+		else if (!Q_stricmp(token, "wallrun"))
+		{
+			bot_sfj_replay_wallrun_t run;
+
+			memset(&run, 0, sizeof(run));
+			if (COM_ParseInt(text, &run.node) || !BotSFJ_ParseRouteVector(text, run.origin) ||
+				COM_ParseFloat(text, &run.yaw) || COM_ParseInt(text, &run.airMs) ||
+				COM_ParseInt(text, &run.jumpOffMs) || COM_ParseInt(text, &run.exitKind) ||
+				COM_ParseInt(text, &run.inferred) || !isfinite(run.yaw))
+				continue;
+			if (route.wallRunCount < BOT_SFJ_REPLAY_MAX_WALLRUNS && run.node >= 0 &&
+				run.node < BOT_SFJ_TRACK_MAX_NODES)
+			{
+				run.jumpOffMs = run.jumpOffMs < 0 ? 0 : (run.jumpOffMs > 3000 ? 3000 : run.jumpOffMs);
+				route.wallRun[route.wallRunCount++] = run;
+			}
 		}
 		else if (!Q_stricmp(token, "node_speed"))
 		{
@@ -4482,8 +4800,18 @@ static void BotSFJ_ReadRouteFiles(void)
 		buffer[len] = '\0';
 		BotSFJ_ParseRouteHints(buffer, path);
 		free(buffer);
-		trap->Print("Loaded %i strafe-jump route hint(s) and %i recorded route(s) from %s\n",
-			g_botSfjRouteHintCount, g_botSfjTrackRouteCount, path);
+		{
+			int r, replayRoutes = 0, wallRuns = 0;
+
+			for (r = 0; r < g_botSfjTrackRouteCount; r++)
+			{
+				replayRoutes += g_botSfjTrackRoutes[r].sampleCount >= 2;
+				wallRuns += g_botSfjTrackRoutes[r].wallRunCount;
+			}
+			trap->Print("Loaded %i strafe-jump route hint(s) and %i recorded route(s) from %s "
+				"(%i with human replay samples, %i recorded wallruns)\n",
+				g_botSfjRouteHintCount, g_botSfjTrackRouteCount, path, replayRoutes, wallRuns);
+		}
 		if (g_botSfjRouteHintCount || g_botSfjTrackRouteCount)
 			return;
 	}
@@ -4752,6 +5080,15 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 	elapsed = level.time - bs->sfjRouteSampleTime;
 	if (elapsed <= 0)
 		return;
+	if (bs->sfjRouteWallStage || ps->legsAnim == BOTH_FORCEWALLRUNFLIP_START)
+	{
+		/* Stopping against the wall is the recorded wallrun, not a collision. */
+		VectorCopy(ps->origin, bs->sfjRouteSampleOrigin);
+		bs->sfjRouteSampleTime = level.time;
+		bs->sfjRouteSampleSpeed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
+		VectorCopy(ps->velocity, bs->sfjRouteSampleVelocity);
+		return;
+	}
 	distance = sqrtf(BotSFJ_Dist2DSq(ps->origin, bs->sfjRouteSampleOrigin));
 	speed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
 	reference = route->nodeSpeed[bs->sfjRouteNode < route->nodeCount ? bs->sfjRouteNode : route->nodeCount - 1];
@@ -5032,6 +5369,10 @@ static void BotSFJ_EndTrackRoute(bot_state_t *bs, const char *reason)
 	bs->sfjHopYawOffset = 0.0f;
 	bs->sfjTrialForceNode = 0;
 	bs->sfjNextRoute = 0;
+	bs->sfjReplayActive = qfalse;
+	bs->sfjReplaySample = -1;
+	bs->sfjReplayDeviation = 0.0f;
+	bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
 }
 
 static int BotSFJ_PlayerSpeedContext(const playerState_t *ps)
@@ -5644,7 +5985,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			level.time - routeDebugAt[bs->client] >= 1000)
 		{
 			routeDebugAt[bs->client] = level.time;
-			Com_Printf("^5[SFJ route]^7 %s goal=%s player=%s selected=%d entry=%d/%d chainNext=%d goalRoute=%d score=%.1f cost=%.1f goalGain=%.1f speed(start=%.0f avg=%.0f peak=%.0f end=%.0f) reliability=%.2f results=%d/%d stalls=%d alternative=%d(%.1f)\n",
+			BotDebug_Printf("^5[SFJ route]^7 %s goal=%s player=%s selected=%d entry=%d/%d chainNext=%d goalRoute=%d score=%.1f cost=%.1f goalGain=%.1f speed(start=%.0f avg=%.0f peak=%.0f end=%.0f) reliability=%.2f results=%d/%d stalls=%d alternative=%d(%.1f)\n",
 				g_entities[bs->client].client->pers.netname, goalName, targetName, best + 1,
 				entries[best], selected->nodeCount, bs->sfjNextRoute, destination + 1, bestScore,
 				cost[destination], bs->sfjTravelGoalValid ?
@@ -5657,12 +5998,12 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 				stat ? stat->completions : 0, stat ? stat->attempts : 0,
 				stat ? stat->stalls : 0, runnerUp >= 0 ? runnerUp + 1 : 0,
 				runnerUp >= 0 ? runnerUpScore : 0.0f);
-			Com_Printf("^5[SFJ reject]^7 entries: superseded=%d retry=%d unavailable=%d geometry=%d unsafeApproach=%d noGoalGain=%d\n",
+			BotDebug_Printf("^5[SFJ reject]^7 entries: superseded=%d retry=%d unavailable=%d geometry=%d unsafeApproach=%d noGoalGain=%d\n",
 				rejected[0], rejected[1], rejected[2], rejected[3], rejected[4], rejected[5]);
 			for (i = 0, node = 0; i < count && node < 3; i++)
 				if (replacements[i] >= 0)
 				{
-					Com_Printf("^5[SFJ route]^7 reject=%d replacement=%d newer, proven faster with at least as many jumps and no worse completion rate\n",
+					BotDebug_Printf("^5[SFJ route]^7 reject=%d replacement=%d newer, proven faster with at least as many jumps and no worse completion rate\n",
 						i + 1, replacements[i] + 1);
 					node++;
 				}
@@ -5687,7 +6028,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		level.time - routeDebugAt[bs->client] >= 1000)
 	{
 		routeDebugAt[bs->client] = level.time;
-		Com_Printf("^5[SFJ route]^7 %s no pick goal=%s; rejected entries: superseded=%d retry=%d unavailable=%d geometry=%d unsafeApproach=%d noGoalGain=%d; seeking safe route-start walk\n",
+		BotDebug_Printf("^5[SFJ route]^7 %s no pick goal=%s; rejected entries: superseded=%d retry=%d unavailable=%d geometry=%d unsafeApproach=%d noGoalGain=%d; seeking safe route-start walk\n",
 			g_entities[bs->client].client->pers.netname,
 			fleeFrom ? "retreat" : BotSFJ_GoalName(bs->sfjTravelGoalType),
 			rejected[0], rejected[1], rejected[2], rejected[3], rejected[4], rejected[5]);
@@ -5843,7 +6184,7 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 			g_botSfjTrackRoutes[bs->sfjWalkPath[0]].start);
 		bs->sfjWalkProgressTime = level.time;
 		if (bot_strafejumps_debug.integer >= 2)
-			Com_Printf("^5[SFJ walk]^7 %s seeking route=%d via %d safe route-start nodes goal=%s walkCost=%.0f\n",
+			BotDebug_Printf("^5[SFJ walk]^7 %s seeking route=%d via %d safe route-start nodes goal=%s walkCost=%.0f\n",
 				g_entities[bs->client].client->pers.netname, best + 1,
 				bs->sfjWalkCount, BotSFJ_GoalName(bs->sfjTravelGoalType), cost[best]);
 	}
@@ -6169,9 +6510,155 @@ static void BotSFJ_StartTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	bs->sfjRouteReferenceIntegral = 0.0f;
 	g_botSfjStats.routeStarts++;
 	BotSFJ_NoteRouteResult(bs, routeIndex);
+	BotSFJ_ResetReplay(bs, routeIndex, entry);
 	if (bot_strafejumps_debug.integer > 1)
-		BotSFJ_DebugReject(bs, va("%s recorded route %i (%i landings)", how, routeIndex,
-			g_botSfjTrackRoutes[routeIndex].nodeCount - entry));
+		BotSFJ_DebugInfo(bs, va("%s recorded route %i (%i landings, %s, %i wallruns)", how, routeIndex,
+			g_botSfjTrackRoutes[routeIndex].nodeCount - entry,
+			route->sampleCount >= 2 ? va("%i human replay samples", route->sampleCount) :
+				"no replay samples: approximate corners", route->wallRunCount));
+}
+
+/*
+ * Human replay tracking: match the bot to the recorded human path, measure how
+ * far off it is and whether it still has the human's momentum there.
+ */
+static void BotSFJ_UpdateReplay(bot_state_t *bs, const playerState_t *ps, const bot_sfj_track_route_t *route)
+{
+	const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+	float deviation = 0.0f, cross = 0.0f, fraction = 0.0f;
+	int match;
+
+	bs->sfjReplayActive = qfalse;
+	bs->sfjReplayBotSpeed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
+	if (!samples)
+	{
+		/* Old routes: distance from the straight segment toward the next landing. */
+		const int node = bs->sfjRouteNode < route->nodeCount ? bs->sfjRouteNode : route->nodeCount - 1;
+		const float *from = node > 0 ? route->node[node - 1] : route->start;
+
+		bs->sfjReplayCross = BotSFJ_ReplaySegmentOffset(from, route->node[node], ps->origin,
+			&fraction, &deviation);
+		bs->sfjReplayDeviation = deviation;
+		bs->sfjReplayHumanSpeed = route->nodeSpeed[node];
+		bs->sfjReplaySample = -1;
+		return;
+	}
+	match = BotSFJ_ReplayMatch(samples, route->sampleCount, bs->sfjReplayCursor, ps->origin,
+		&deviation, &cross, &fraction);
+	if (match < 0)
+	{
+		bs->sfjReplayDeviation = BOT_SFJ_REPLAY_HARD_DEVIATION + 1.0f;
+		bs->sfjReplaySample = -1;
+		return;
+	}
+	if (match > bs->sfjReplayCursor)
+		bs->sfjReplayCursor = match;
+	if (fraction > 0.5f && match + 1 < route->sampleCount)
+		match++;
+	bs->sfjReplaySample = match;
+	bs->sfjReplayDeviation = deviation;
+	bs->sfjReplayCross = cross;
+	bs->sfjReplayHumanSpeed = samples[match].speed;
+	bs->sfjReplayActive = qtrue;
+}
+
+static void BotSFJ_ResetReplay(bot_state_t *bs, int routeIndex, int entry)
+{
+	const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(routeIndex);
+	int i;
+
+	bs->sfjReplayActive = qfalse;
+	bs->sfjReplayCursor = 0;
+	bs->sfjReplaySample = -1;
+	bs->sfjReplayDeviation = 0.0f;
+	bs->sfjReplayCross = 0.0f;
+	bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+	bs->sfjRouteWallStage = 0;
+	bs->sfjRouteWallDone = 0;
+	if (samples)
+		for (i = 0; i < g_botSfjTrackRoutes[routeIndex].sampleCount; i++)
+			if (samples[i].node >= entry)
+			{
+				bs->sfjReplayCursor = i > 0 ? i - 1 : 0;
+				break;
+			}
+}
+
+/*
+ * Trust bounds: a bot that has clearly left the human's line, or lost the
+ * momentum the human kept here, ends its attempt. Ground repositioning for a
+ * new circle jump, approaches and recorded wallruns are exempt.
+ */
+static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *ps,
+	const bot_sfj_track_route_t *route)
+{
+	const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+	const qboolean grounded = ps->groundEntityNum != ENTITYNUM_NONE;
+	const int node = bs->sfjRouteNode < route->nodeCount ? bs->sfjRouteNode : route->nodeCount - 1;
+	const float *from = node > 0 ? route->node[node - 1] : route->start;
+	const float normal = ps->speed > 0 ? (float)ps->speed : 250.0f;
+	qboolean restart, repositioning, offCourse, slow;
+	int offMs, slowMs;
+
+	if (bs->sfjRouteApproach || bs->sfjRouteWallStage || !bs->sfjRouteAttemptActive)
+	{
+		bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+		return qtrue;
+	}
+	restart = route->nodeGroundMs[node] >= 0 &&
+		BotSFJ_GroundRestart(route->nodeGroundMs[node], Distance(from, route->nodeTakeoff[node]));
+	repositioning = (restart && grounded) || !bs->sfjRouteHopLaunched ||
+		(samples && bs->sfjReplaySample >= 0 &&
+			(samples[bs->sfjReplaySample].flags & (BOT_SFJ_REPLAY_FLAG_GROUNDED | BOT_SFJ_REPLAY_FLAG_WALLRUN)));
+	offMs = BotSFJ_ReplaySustain(bs->sfjReplayDeviation > (samples ? BOT_SFJ_REPLAY_SOFT_DEVIATION :
+		BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION), &bs->sfjReplayOffSince, level.time);
+	offCourse = !repositioning && BotSFJ_ReplayOffCourse(bs->sfjReplayDeviation, offMs, samples != NULL);
+	slowMs = BotSFJ_ReplaySustain(samples && bs->sfjReplaySample >= 0 &&
+		BotSFJ_ReplayMomentumLow(bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed, normal, repositioning),
+		&bs->sfjReplaySlowSince, level.time);
+	slow = slowMs >= BOT_SFJ_REPLAY_SLOW_MS;
+	if (!offCourse && !slow)
+		return qtrue;
+	BotSFJ_DebugInfo(bs, offCourse ?
+		va("off the human line on route %i node %i: %.0f units for %i ms; ending attempt",
+			bs->sfjRoute - 1, node, bs->sfjReplayDeviation, offMs) :
+		va("lost momentum on route %i node %i: %.0f vs human %.0f (normal %.0f) for %i ms; ending attempt",
+			bs->sfjRoute - 1, node, bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed, normal, slowMs));
+	BotSFJ_NoteHopFailure(bs, qfalse, qfalse);
+	BotSFJ_FinishTrackAttempt(bs, qfalse, qtrue);
+	BotSFJ_EndTrackRoute(bs, offCourse ? "clearly off the recorded human line" :
+		"lost the momentum the human kept here");
+	return qfalse;
+}
+
+static void BotSFJ_ReplayHeartbeat(bot_state_t *bs, const bot_sfj_track_route_t *route)
+{
+	const bot_sfj_replay_sample_t *samples;
+	gclient_t *client = g_entities[bs->client].client;
+
+	if (bot_strafejumps_debug.integer < 2 || level.time - bs->sfjDebugBeatTime < 1000)
+		return;
+	bs->sfjDebugBeatTime = level.time;
+	samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+	if (samples && bs->sfjReplaySample >= 0)
+	{
+		const bot_sfj_replay_sample_t *s = &samples[bs->sfjReplaySample];
+
+		BotDebug_Printf("^5[SFJ replay]^7 %s route=%d node=%d/%d sample=%d/%d dev=%.0f%s speed=%.0f human=%.0f "
+			"yaw bot=%.0f human=%.0f keys bot=%+d/%+d human=%+d/%+d%s%s\n",
+			client ? client->pers.netname : "bot", bs->sfjRoute - 1, bs->sfjRouteNode, route->nodeCount,
+			bs->sfjReplaySample, route->sampleCount, bs->sfjReplayDeviation,
+			bs->sfjReplayCross > 0.0f ? "L" : "R", bs->sfjReplayBotSpeed, s->speed,
+			bs->sfjReplayYaw, s->yaw, bs->sfjReplayForward, bs->sfjReplayRight,
+			BotSFJ_ReplaySign(s->forward), BotSFJ_ReplaySign(s->right),
+			(s->flags & BOT_SFJ_REPLAY_FLAG_GROUNDED) ? " human-ground" : "",
+			bs->sfjRouteWallStage ? va(" wallrun-stage=%d", bs->sfjRouteWallStage) : "");
+	}
+	else
+		BotDebug_Printf("^5[SFJ replay]^7 %s route=%d node=%d/%d approximate (no samples) dev=%.0f speed=%.0f "
+			"nodeSpeed=%.0f%s\n", client ? client->pers.netname : "bot", bs->sfjRoute - 1,
+			bs->sfjRouteNode, route->nodeCount, bs->sfjReplayDeviation, bs->sfjReplayBotSpeed,
+			bs->sfjReplayHumanSpeed, bs->sfjRouteApproach ? " approaching" : "");
 }
 
 /*
@@ -6444,12 +6931,36 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		BotSFJ_EndTrackRoute(bs, "recorded route node not reached in time, back to waypoints");
 		return qfalse;
 	}
+	BotSFJ_UpdateReplay(bs, ps, route);
+	BotSFJ_ReplayHeartbeat(bs, route);
+	if (!BotSFJ_ReplayWithinBounds(bs, ps, route))
+		return qfalse;
 	VectorSubtract(route->node[bs->sfjRouteNode], ps->origin, toNode);
 	toNode[2] = 0.0f;
 	if (VectorNormalize(toNode) <= 0.0f)
 		return qfalse;
 	VectorCopy(toNode, direction);
 	VectorCopy(route->node[bs->sfjRouteNode], destination);
+	if (bs->sfjReplayActive && bs->sfjReplaySample >= 0)
+	{
+		/* Follow the human's own travel direction a little ahead, not a fixed corner blend. */
+		const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+		const int ahead = bs->sfjReplaySample + 2 < route->sampleCount ?
+			bs->sfjReplaySample + 2 : route->sampleCount - 1;
+		const bot_sfj_replay_sample_t *target = &samples[ahead];
+
+		if (!grounded && target->speed >= 50.0f)
+		{
+			const float yaw = (target->velYaw - BotSFJ_ReplayClamp(bs->sfjReplayCross * 0.15f, 20.0f)) *
+				0.017453292519943295f;
+
+			direction[0] = cosf(yaw);
+			direction[1] = sinf(yaw);
+			direction[2] = 0.0f;
+			bs->sfjCornerWishCap = BOT_SFJ_WISH_OFFSET_MAX;
+			return qtrue;
+		}
+	}
 	if (bs->sfjRouteNode + 1 < route->nodeCount)
 	{
 		const int node = bs->sfjRouteNode;
@@ -7066,6 +7577,10 @@ static qboolean BotSFJ_RouteHopTrusted(const bot_state_t *bs, const vec3_t route
 	if (bs->sfjRouteNode < 0 || bs->sfjRouteNode >= route->nodeCount ||
 		Distance(routeDestination, route->node[bs->sfjRouteNode]) > 1.0f)
 		return qfalse;
+	/* Off the human's line, the human's hop no longer vouches for this arc. */
+	if (bs->sfjReplayDeviation > (route->sampleCount >= 2 ? BOT_SFJ_REPLAY_SOFT_DEVIATION :
+		BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION))
+		return qfalse;
 	if (bs->sfjRouteStat < 0 || bs->sfjRouteStat >= g_botSfjRouteStatCount)
 		return qtrue;
 	stat = &g_botSfjRouteStats[bs->sfjRouteStat];
@@ -7228,7 +7743,8 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		bs->sfjArcSafe = qtrue;
 		bs->sfjArcTrusted = qtrue;
 		if (bot_strafejumps_debug.integer > 1)
-			BotSFJ_DebugReject(bs, "trusting recorded human hop over predicted contact");
+			BotSFJ_DebugInfo(bs, va("trusting recorded human hop %i over predicted contact (deviation %.0f, speed %.0f vs human %.0f)",
+				bs->sfjRouteNode, bs->sfjReplayDeviation, bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed));
 	}
 	bs->sfjArcHazard = hazard;
 	bs->sfjArcCheckedTime = time;
@@ -7462,7 +7978,7 @@ static void BotSFJ_ManageRouteSpeed(bot_state_t *bs)
 	trap->EA_ForcePower(bs->client);
 	bs->sfjSpeedPressTime = level.time;
 	if (bot_strafejumps_debug.integer > 1)
-		BotSFJ_DebugReject(bs, active ? "switching off non-route Force Speed on a route recorded without it" :
+		BotSFJ_DebugInfo(bs, active ? "switching off non-route Force Speed on a route recorded without it" :
 			"switching on Force Speed for a route recorded with it");
 }
 
@@ -7795,7 +8311,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		bs->sfjArcCheckedTime = 0;
 		return;
 	}
-	if (airborneJump && purpose == BOT_SFJ_INTENT_NAVIGATION &&
+	/* Human replay already supplies the human's own travel direction; no corner rule. */
+	if (airborneJump && purpose == BOT_SFJ_INTENT_NAVIGATION && !bs->sfjReplayActive &&
 		BotSFJ_IntentIsFresh(level.time, bs->sfjIntentTime))
 	{
 		const float yaw = BotSFJ_SteerYaw(vectoyaw(bs->sfjIntentDirection),
@@ -7891,7 +8408,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		g_botSfjStats.starts++;
 		if (bot_strafejumps_debug.integer > 1)
 		{
-			BotSFJ_DebugReject(bs, purpose == BOT_SFJ_INTENT_RETREAT ? "start escape" :
+			BotSFJ_DebugInfo(bs, purpose == BOT_SFJ_INTENT_RETREAT ? "start escape" :
 				purpose == BOT_SFJ_INTENT_PURSUIT ? "start chase" : "start navigation");
 		}
 	}
@@ -7951,6 +8468,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	float viewYaw;
 	float yawRate;
 	float escapeTargetYaw = 0.0f;
+	qboolean replaying = qfalse;
 
 	if (!bs || !bi)
 		return;
@@ -7959,6 +8477,9 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		BotSFJ_Clear(bs);
 		return;
 	}
+	/* A recorded wallrun replay owns the input until the bot leaves the wall. */
+	if (bs->sfjRouteWallStage >= 2)
+		return;
 	if (!g_entities[bs->client].client)
 	{
 		BotSFJ_Abort(bs, time);
@@ -8308,12 +8829,39 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			}
 		}
 	}
+	/*
+	 * Human replay: copy the human's yaw (relative to velocity) and movement keys
+	 * at this exact point of the route, so every corner is taken the way the
+	 * human took it. Circle-jump preparation and backward escapes keep their
+	 * own controllers.
+	 */
+	if (bs->sfjRoute > 0 && bs->sfjReplayActive && bs->sfjReplaySample >= 0 && !circleJump && !backward &&
+		(!grounded || bs->sfjPhase == BOT_SFJ_PHASE_TAKEOFF || bs->sfjPhase == BOT_SFJ_PHASE_REJUMP))
+	{
+		const bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
+		const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+
+		if (samples)
+		{
+			const bot_sfj_replay_sample_t *s = &samples[bs->sfjReplaySample];
+			const bot_sfj_replay_sample_t *ahead = &samples[bs->sfjReplaySample + 2 < route->sampleCount ?
+				bs->sfjReplaySample + 2 : route->sampleCount - 1];
+
+			replaying = qtrue;
+			forwardMove = BotSFJ_ReplaySign(s->forward) * 127;
+			rightMove = BotSFJ_ReplaySign(s->right) * 127;
+			targetView = BotSFJ_ReplayViewYaw(s->yaw, s->velYaw, s->speed, ahead->velYaw,
+				horizontalSpeed > 1.0f ? vectoyaw(ps->velocity) : s->velYaw, horizontalSpeed,
+				bs->sfjReplayCross);
+			commandYaw = targetView - BotSFJ_AxesYaw(forwardMove, rightMove);
+		}
+	}
 	viewYaw = targetView;
 	/* Human-shaped aim: flick on the ground, settle after takeoff, then track slowly. */
 	if (!bs->sfjOwnsInput || !bs->sfjViewTime || time < bs->sfjViewTime ||
 		time - bs->sfjViewTime > 250)
 		bs->sfjViewYaw = ps->viewangles[YAW];
-	yawRate = BotSFJ_ViewYawRate(bs->settings.skill, grounded || circleJump,
+	yawRate = replaying ? 0.0f : BotSFJ_ViewYawRate(bs->settings.skill, grounded || circleJump,
 		bs->sfjAirSince ? time - bs->sfjAirSince : 0, hopStyle.takeoffRate, hopStyle.airRate);
 	if (yawRate > 0.0f)
 	{
@@ -8357,12 +8905,17 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 && ps->fd.forcePower > 0,
 			grounded, ps->origin[2] - ps->fd.forceJumpZStart, ps->velocity[2]))
 		candidate.actionflags |= ACTION_JUMP;	/* copy the human's force jump on this hop */
-	if (!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
-		DotProduct(effectiveDirection, bs->sfjIntentDirection) < 0.25f)
+	if (replaying ? (BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) &&
+			DotProduct(effectiveDirection, bs->sfjIntentDirection) < -0.1f) :
+		(!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
+			DotProduct(effectiveDirection, bs->sfjIntentDirection) < 0.25f))
 	{
 		BotSFJ_Abort(bs, time);
 		return;
 	}
+	bs->sfjReplayYaw = candidate.viewangles[YAW];
+	bs->sfjReplayForward = forwardMove > 0 ? 1 : (forwardMove < 0 ? -1 : 0);
+	bs->sfjReplayRight = rightMove > 0 ? 1 : (rightMove < 0 ? -1 : 0);
 	if (grounded && !circleJump && !BotSFJ_JumpPressed(bs->sfjPhase, grounded) &&
 		(BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination) ?
 			BotSFJ_GroundWishHazard(bs, ps, commandYaw, commandMsec) :
@@ -8427,6 +8980,166 @@ static qboolean BotSFJ_WallRunReturnSafe(bot_state_t *bs, const playerState_t *p
 	return qfalse;
 }
 
+/*
+ * Replay of a human vertical wallrun recorded on the current route: run up the
+ * wall where the human did, stay on it for the human's wall time, then press
+ * jump a second time to leave it (or ride it to the ledge flip / drop like the
+ * human). Stages: 1 trigger, 2 waiting for the wall anim, 3 on the wall,
+ * 4 leaving the wall.
+ */
+static void BotSFJ_RouteWallRunEnd(bot_state_t *bs, int time, const char *why)
+{
+	if (bs->sfjRouteWallStage && bs->sfjRouteWallIndex >= 0 && bs->sfjRouteWallIndex < 32)
+		bs->sfjRouteWallDone |= 1 << bs->sfjRouteWallIndex;
+	bs->sfjRouteWallStage = 0;
+	bs->sfjRouteTime = time;
+	bs->sfjArcCheckedTime = 0;
+	bs->sfjPhaseTime = time;
+	bs->sfjAirSince = 0;
+	bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+	if (why)
+		BotSFJ_DebugInfo(bs, why);
+}
+
+static void BotSFJ_ApplyRouteWallRun(bot_state_t *bs, bot_input_t *bi, int time)
+{
+	gentity_t *self = &g_entities[bs->client];
+	playerState_t *ps;
+	vec3_t forward, end, angles;
+	trace_t tr;
+	int onWallMs;
+
+	if (!self->client)
+		return;
+	ps = &self->client->ps;
+	if (bs->sfjRouteWallStage && (self->health <= 0 || ps->pm_type != PM_NORMAL ||
+		ps->forceHandExtend != HANDEXTEND_NONE || ps->fd.forceGripBeingGripped > time ||
+		bs->saberDefenseActive || bs->saberTechniqueOwnsInputs || time >= bs->sfjRouteWallUntil ||
+		!bot_strafejumps.integer))
+	{
+		BotSFJ_RouteWallRunEnd(bs, time, "recorded wallrun interrupted or timed out");
+		return;
+	}
+	if (!bs->sfjRouteWallStage)
+	{
+		const bot_sfj_track_route_t *route;
+		const bot_sfj_replay_wallrun_t *run = NULL;
+		const qboolean levitation = bot_forcepowers.integer &&
+			!(g_forcePowerDisable.integer & (1 << FP_LEVITATION)) &&
+			(ps->fd.forcePowersKnown & (1 << FP_LEVITATION)) &&
+			ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_2 && ps->fd.forcePower > 0 &&
+			!(ps->stats[STAT_RESTRICTIONS] & (JAPRO_RESTRICT_BHOP | JAPRO_RESTRICT_SUPERJUMP)) &&
+			!(self->client->saber[0].saberFlags & SFL_NO_WALL_RUNS) &&
+			!(self->client->saber[1].saberFlags & SFL_NO_WALL_RUNS) &&
+			BG_CanUseFPNow(level.gametype, ps, time, FP_LEVITATION);
+		int i;
+
+		if (!bot_strafejumps.integer || bs->sfjRoute <= 0 || bs->sfjRoute > g_botSfjTrackRouteCount ||
+			bs->sfjRouteApproach || ps->groundEntityNum != ENTITYNUM_NONE || !levitation ||
+			bs->saberDefenseActive || bs->saberTechniqueOwnsInputs ||
+			(ps->legsAnim != BOTH_JUMP1 && ps->legsAnim != BOTH_INAIR1))
+			return;
+		route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
+		for (i = 0; i < route->wallRunCount; i++)
+		{
+			const bot_sfj_replay_wallrun_t *candidate = &route->wallRun[i];
+
+			if ((bs->sfjRouteWallDone & (1 << i)) || candidate->node < bs->sfjRouteNode - 1 ||
+				candidate->node > bs->sfjRouteNode || !BotSFJ_RouteWallRunInReach(ps->origin, candidate))
+				continue;
+			run = candidate;
+			bs->sfjRouteWallIndex = i;
+			break;
+		}
+		if (!run)
+			return;
+		/* The engine needs a wall within 32 units straight along the view yaw. */
+		VectorSet(angles, 0.0f, run->yaw, 0.0f);
+		AngleVectors(angles, forward, NULL, NULL);
+		VectorMA(ps->origin, 40.0f, forward, end);
+		JP_Trace(&tr, ps->origin, self->r.mins, self->r.maxs, end, bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
+		if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f || tr.entityNum != ENTITYNUM_WORLD ||
+			fabsf(tr.plane.normal[2]) > 0.2f || DotProduct(forward, tr.plane.normal) > -0.7f)
+			return;
+		bs->sfjRouteWallStage = 1;
+		bs->sfjRouteWallUntil = time + 300;
+		bs->sfjRouteWallJumpOffMs = run->jumpOffMs;
+		bs->sfjRouteWallExit = run->exitKind;
+		bs->sfjWallRunYaw = run->yaw;
+		BotSFJ_DebugInfo(bs, va("replaying recorded%s wallrun %d at node %d: wall time %d ms before the %s",
+			run->inferred ? " (inferred)" : "", bs->sfjRouteWallIndex, run->node,
+			run->jumpOffMs, run->exitKind == 1 ? "second jump off the wall" :
+				run->exitKind == 2 ? "ledge flip" : "drop off"));
+	}
+	bs->sfjOwnsInput = qtrue;
+	bi->viewangles[YAW] = bs->sfjWallRunYaw;
+	bs->viewangles[YAW] = bs->ideal_viewangles[YAW] = bs->sfjWallRunYaw;
+	VectorClear(bi->dir);
+	bi->speed = 400.0f;
+	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT |
+		ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_CROUCH | ACTION_WALK);
+	bi->actionflags |= ACTION_MOVEFORWARD;
+	switch (bs->sfjRouteWallStage)
+	{
+	case 1:
+		/* A fresh jump press starts the run; release first if jump is still held. */
+		if (!(ps->pm_flags & PMF_JUMP_HELD))
+		{
+			bi->actionflags |= ACTION_JUMP;
+			bs->sfjRouteWallStage = 2;
+			bs->sfjRouteWallUntil = time + 250;
+		}
+		break;
+	case 2:
+		if (ps->legsAnim == BOTH_FORCEWALLRUNFLIP_START)
+		{
+			bs->sfjRouteWallStage = 3;
+			bs->sfjRouteWallStart = time;
+			bs->sfjRouteWallUntil = time + (bs->sfjRouteWallJumpOffMs > BOT_SFJ_WALLRUN_MIN_ON_WALL_MS ?
+				bs->sfjRouteWallJumpOffMs : BOT_SFJ_WALLRUN_MIN_ON_WALL_MS) + 1500;
+		}
+		break;
+	case 3:
+		if (ps->legsAnim != BOTH_FORCEWALLRUNFLIP_START)
+		{
+			BotSFJ_RouteWallRunEnd(bs, time, va("left the wall after %d ms (human %d ms)",
+				time - bs->sfjRouteWallStart, bs->sfjRouteWallJumpOffMs));
+			return;
+		}
+		onWallMs = time - bs->sfjRouteWallStart;
+		if (bs->sfjRouteWallExit == 1 && BotSFJ_RouteWallRunJumpOffDue(onWallMs, bs->sfjRouteWallJumpOffMs))
+		{
+			vec3_t back;
+
+			VectorSet(angles, 0.0f, ps->viewangles[YAW], 0.0f);
+			AngleVectors(angles, back, NULL, NULL);
+			VectorScale(back, -1.0f, back);
+			if (BotNav_CheckInstantDeathHazardSample(bs, back, 96.0f, 512.0f) ||
+				BotNav_CheckInstantDeathHazardSample(bs, back, 192.0f, 512.0f))
+			{
+				bs->sfjRouteWallExit = 0;
+				BotSFJ_DebugInfo(bs, "recorded wallrun jump-off lands on a hazard; riding the wall instead");
+			}
+			else if (!(ps->pm_flags & PMF_JUMP_HELD))
+			{
+				bi->actionflags |= ACTION_JUMP;
+				bs->sfjRouteWallStage = 4;
+				bs->sfjRouteWallUntil = time + 300;
+				BotSFJ_DebugInfo(bs, va("second jump off the wall after %d ms (human %d ms)",
+					onWallMs, bs->sfjRouteWallJumpOffMs));
+			}
+		}
+		break;
+	case 4:
+		if (ps->legsAnim != BOTH_FORCEWALLRUNFLIP_START)
+			BotSFJ_RouteWallRunEnd(bs, time, NULL);
+		break;
+	default:
+		bs->sfjRouteWallStage = 0;
+		break;
+	}
+}
+
 static void BotSFJ_ApplyWallRun(bot_state_t *bs, bot_input_t *bi, int time)
 {
 	gentity_t *self = &g_entities[bs->client];
@@ -8437,7 +9150,7 @@ static void BotSFJ_ApplyWallRun(bot_state_t *bs, bot_input_t *bi, int time)
 	int i;
 	qboolean nearbyEnemy = qfalse;
 
-	if (!self->client)
+	if (!self->client || bs->sfjRouteWallStage)
 		return;
 	ps = &self->client->ps;
 	if (!bs->sfjWallRunStage && (!bot_strafejumps.integer ||
@@ -8518,7 +9231,7 @@ static void BotSFJ_ApplyWallRun(bot_state_t *bs, bot_input_t *bi, int time)
 		bs->sfjWallRunYaw = vectoyaw(forward);
 		BotSFJ_EndTrackRoute(bs, "wallrun recovery");
 		if (bot_strafejumps_debug.integer >= 2)
-			Com_Printf("^5[SFJ wall]^7 %s short vertical run; safe return arc; no nearby opponents\n",
+			BotDebug_Printf("^5[SFJ wall]^7 %s short vertical run; safe return arc; no nearby opponents\n",
 				self->client->pers.netname);
 	}
 	bs->sfjOwnsInput = qfalse;
@@ -18125,7 +18838,7 @@ static int NewBotAI_ChooseWallEscape(bot_state_t *bs, const vec3_t wallNormal)
 	bs->wallEscapeYaw = vectoyaw(wallNormal) + 180.0f;
 	if (bot_learning_debug.integer)
 	{
-		Com_Printf("^3[wall escape]^7 %s: %s (weight %d of %d, learned %+d)\n",
+		BotDebug_Printf("^3[wall escape]^7 %s: %s (weight %d of %d, learned %+d)\n",
 			g_entities[bs->client].client->pers.netname, NewBotAI_WallEscapeName(option),
 			weights[option], total, bonuses[option]);
 	}
@@ -21271,7 +21984,7 @@ static void NewBotAI_DebugMotorPreference(bot_state_t *bs, int kind,
 	if (!bot_combatdebug.integer || level.time - printedAt[bs->client][slot] < 1000)
 		return;
 	printedAt[bs->client][slot] = level.time;
-	Com_Printf("^3[combat]^7 %s %s source=aggregate humans>=3 successful=%d/%d hold=%dms yaw=%.1f pitch=%.1f deg/s; legal phase/safety first, no raw replay\n",
+	BotDebug_Printf("^3[combat]^7 %s %s source=aggregate humans>=3 successful=%d/%d hold=%dms yaw=%.1f pitch=%.1f deg/s; legal phase/safety first, no raw replay\n",
 		g_entities[bs->client].client->pers.netname, action, profile->successes,
 		profile->samples, profile->holdMs, profile->yawRate, profile->pitchRate);
 }
@@ -21548,7 +22261,7 @@ static void NewBotAI_RecordSaberThrowDecision(bot_state_t *bs, int heldMs, qbool
 		debugged[bs->client].enemy = bs->currentEnemy->s.number;
 		debugged[bs->client].at = level.time;
 		Q_strncpyz(debugged[bs->client].note, note, sizeof(debugged[bs->client].note));
-		Com_Printf("^3[combat]^7 %s saber throw %s enemy=%s held=%dms phase=%d reason=%s\n",
+		BotDebug_Printf("^3[combat]^7 %s saber throw %s enemy=%s held=%dms phase=%d reason=%s\n",
 			g_entities[bs->client].client->pers.netname, hold ? "hold" : "recall",
 			bs->currentEnemy->client->pers.netname, heldMs, bs->saberThrowPhase, reason);
 	}
@@ -24049,7 +24762,7 @@ static int NewBotAI_GetForceDecisionBonus(bot_state_t *bs, int response)
 				BOTLEARN_TOK_KICK : BOTLEARN_TOK_NONE, bs->settings.skill,
 			&humanSamples, &botSamples, &baseline);
 		learnedDebugAt[bs->client][index] = level.time;
-		Com_Printf("^3[combat]^7 %s force %s prior=%d learned=%+d mixed=%d source=aggregate weightedSamples(human=%.1f bot=%.1f)%s bias=%.1f aggression=%.1f\n",
+		BotDebug_Printf("^3[combat]^7 %s force %s prior=%d learned=%+d mixed=%d source=aggregate weightedSamples(human=%.1f bot=%.1f)%s bias=%.1f aggression=%.1f\n",
 			g_entities[bs->client].client->pers.netname,
 			response == BOTLEARN_TOK_PULL ? "pull" : response == BOTLEARN_TOK_PUSH ? "push" :
 			response == BOTLEARN_TOK_GRIP ? "grip" : "drain",
@@ -24092,7 +24805,7 @@ static void NewBotAI_DebugForceChoice(bot_state_t *bs, const int *scores, int ch
 	if (!bot_combatdebug.integer || level.time - lastDebugAt[bs->client] < 1000)
 		return;
 	lastDebugAt[bs->client] = level.time;
-	Com_Printf("^3[combat]^7 %s %s-force choice=%s scores(%s=%d %s=%d %s=%d %s=%d %s=%d throw=%d) range=%.0f aggression=%.1f biases(PTK=%.1f grip=%.1f drain=%.1f throw=%.1f)\n",
+	BotDebug_Printf("^3[combat]^7 %s %s-force choice=%s scores(%s=%d %s=%d %s=%d %s=%d %s=%d throw=%d) range=%.0f aggression=%.1f biases(PTK=%.1f grip=%.1f drain=%.1f throw=%.1f)\n",
 		g_entities[bs->client].client->pers.netname, side ? "light" : "dark", chosen,
 		names[0], scores[0], names[1], scores[1], names[2], scores[2],
 		names[3], scores[3], names[4], scores[4], scores[5],
@@ -24940,7 +25653,7 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 				G_BotLearnBonusSources(&g_entities[bs->client], bs->currentEnemy,
 					bs->saberLearnedStimulus, BOTLEARN_TOK_SWING, bs->saberLearnedFollow,
 					bs->settings.skill, &humanSamples, &botSamples, &baseline);
-			Com_Printf("^3[combat]^7 %s saber accepted move=%d family=%d enemy=%s range=%.0f appliedPreference=%+d fanBias=%.1f source=aggregate weightedSamples(human=%.1f bot=%.1f) baseline=%d; engine acceptance/recovery first\n",
+			BotDebug_Printf("^3[combat]^7 %s saber accepted move=%d family=%d enemy=%s range=%.0f appliedPreference=%+d fanBias=%.1f source=aggregate weightedSamples(human=%.1f bot=%.1f) baseline=%d; engine acceptance/recovery first\n",
 				g_entities[bs->client].client->pers.netname, ps->saberMove,
 				bs->saberTechniqueFamily, bs->currentEnemy->client->pers.netname,
 				bs->frame_Enemy_Len, bs->saberLearnedPreference,
@@ -25001,7 +25714,7 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 		if (bot_combatdebug.integer && level.time - printedAt[bs->client] >= 1000)
 		{
 			printedAt[bs->client] = level.time;
-			Com_Printf("^3[combat]^7 %s saber recipe=%d weight=%d prior=%+d learned=%+d source=map-local-bot-outcomes fanBias=%.1f aggression=%.1f; legal recipe candidates only\n",
+			BotDebug_Printf("^3[combat]^7 %s saber recipe=%d weight=%d prior=%+d learned=%+d source=map-local-bot-outcomes fanBias=%.1f aggression=%.1f; legal recipe candidates only\n",
 				g_entities[bs->client].client->pers.netname, selected, weights[selected],
 				priors[selected], bonuses[selected], fanBias, aggression);
 		}
@@ -29198,6 +29911,33 @@ int BotAIStartFrame(int time) {
 	}
 
 	G_CheckBotSpawn();
+
+	{
+		static int lastSfjDebug = -1, lastCombatDebug = -1;
+
+		/* Confirm the debug cvars in every console so silence means "nothing to report". */
+		if (bot_strafejumps_debug.integer != lastSfjDebug)
+		{
+			int r, replayRoutes = 0, wallRuns = 0;
+
+			lastSfjDebug = bot_strafejumps_debug.integer;
+			for (r = 0; r < g_botSfjTrackRouteCount; r++)
+			{
+				replayRoutes += g_botSfjTrackRoutes[r].sampleCount >= 2;
+				wallRuns += g_botSfjTrackRoutes[r].wallRunCount;
+			}
+			if (lastSfjDebug > 0)
+				BotDebug_Printf("^5[SFJ]^7 bot_strafejumps_debug %d: routes=%d with human replay=%d recorded wallruns=%d (1 rejects, 2 route/replay/wallrun info, 3 hop trace)\n",
+					lastSfjDebug, g_botSfjTrackRouteCount, replayRoutes, wallRuns);
+		}
+		if (bot_combatdebug.integer != lastCombatDebug)
+		{
+			lastCombatDebug = bot_combatdebug.integer;
+			if (lastCombatDebug)
+				BotDebug_Printf("^3[combat]^7 bot_combatdebug %d: force/saber choices, hazard detours, push/pull exposure, 2s heartbeat per bot with an enemy\n",
+					lastCombatDebug);
+		}
+	}
 
 	//rww - addl bot frame functions
 	if (gBotEdit)

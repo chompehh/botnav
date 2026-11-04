@@ -11611,6 +11611,7 @@ botroutes/<map>.botroute so bots start using them.
 #define STRAFETRACK_ROUTES_PER_MAP 256
 #define STRAFETRACK_EXPORT_CANDIDATES 4096
 #define STRAFETRACK_COVERAGE_SPACING 192.0f
+#define STRAFETRACK_ROUTE_FILE_MAX (16 * 1024 * 1024)
 #define STRAFETRACK_BEGIN_MARKER "// BEGIN recorded strafe routes (exportStrafeTrack)"
 #define STRAFETRACK_END_MARKER "// END recorded strafe routes"
 
@@ -11626,6 +11627,7 @@ typedef struct
 	unsigned char grounded;
 	unsigned char jumpHeld;
 	unsigned char forceJump;
+	unsigned char wallRun;
 	int speedActive;
 	int speedLevel;
 	float yaw;
@@ -11938,6 +11940,7 @@ static qboolean G_EnsureStrafeTrackSchema(sqlite3 *db)
 		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN speed_level INTEGER",
 		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN speed_active INTEGER",
 		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN speed_level INTEGER",
+		"ALTER TABLE LocalStrafeRouteInput ADD COLUMN wall_run INTEGER",
 		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN takeoff_x REAL",
 		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN takeoff_y REAL",
 		"ALTER TABLE LocalStrafeRouteNode ADD COLUMN takeoff_z REAL",
@@ -12011,7 +12014,7 @@ static qboolean G_StrafeTrackSaveInputs(strafetrack_client_t *track, int maxRows
 		end = track->inputCount;
 	if (sqlite3_prepare_v2(db, "INSERT INTO LocalStrafeRouteInput(route_id, frame, time_ms, msec, forwardmove, "
 		"rightmove, upmove, yaw, yaw_delta, x, y, z, speed, grounded, cmd_time, pitch, vel_x, vel_y, jump_held, "
-		"force_jump, speed_active, speed_level) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+		"force_jump, speed_active, speed_level, wall_run) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
 		-1, &stmt, NULL) == SQLITE_OK)
 	{
 		for (i = track->pendingInput; ok && i < end; i++)
@@ -12041,6 +12044,7 @@ static qboolean G_StrafeTrackSaveInputs(strafetrack_client_t *track, int maxRows
 			sqlite3_bind_int(stmt, 20, in->forceJump ? 1 : 0);
 			sqlite3_bind_int(stmt, 21, in->speedActive);
 			sqlite3_bind_int(stmt, 22, in->speedLevel);
+			sqlite3_bind_int(stmt, 23, in->wallRun ? 1 : 0);
 			if (sqlite3_step(stmt) != SQLITE_DONE)
 				ok = qfalse;
 		}
@@ -12384,6 +12388,7 @@ void G_StrafeTrackCommand(gentity_t *ent)
 	in.speed = sqrtf(in.velocity[0] * in.velocity[0] + in.velocity[1] * in.velocity[1]);
 
 	in.forceJump = (client->ps.fd.forcePowersActive & (1 << FP_LEVITATION)) ? 1 : 0;
+	in.wallRun = client->ps.legsAnim == BOTH_FORCEWALLRUNFLIP_START ? 1 : 0;
 	G_StrafeTrackSpeedState(&client->ps, &in.speedActive, &in.speedLevel);
 
 	/* Per-hop human style: reset at liftoff, measured in the air, finished on landing. */
@@ -12791,6 +12796,121 @@ static int G_StrafeTrackCompareScore(const void *a, const void *b)
 }
 
 //Writes botroutes/<map>.botroute keeping any hand-written blocks outside the recorded section.
+/*
+ * Human replay for one route: decimated per-command samples (yaw, velocity
+ * yaw, keys) and vertical wallruns with the time until the second jump that
+ * left the wall. Wallruns in routes recorded before wall_run existed are
+ * inferred from movement and marked as such.
+ */
+static void G_StrafeTrackAppendReplay(sqlite3 *db, strafetrack_text_t *text, sqlite3_int64 routeId,
+	int *samplesOut, int *wallsOut)
+{
+	sqlite3_stmt *stmt = NULL;
+	bot_sfj_replay_sample_t *rows = NULL, *grown, *kept = NULL;
+	bot_sfj_replay_wallrun_t walls[BOT_SFJ_REPLAY_MAX_WALLRUNS];
+	int nodeTimes[BOT_SFJ_TRACK_MAX_NODES];
+	int nodeCount = 0, count = 0, capacity = 0, keptCount = 0, wallCount, i, node;
+
+	if (sqlite3_prepare_v2(db, "SELECT time_ms FROM LocalStrafeRouteNode WHERE route_id = ? ORDER BY node_index",
+		-1, &stmt, NULL) != SQLITE_OK)
+		return;
+	sqlite3_bind_int64(stmt, 1, routeId);
+	while (sqlite3_step(stmt) == SQLITE_ROW && nodeCount < BOT_SFJ_TRACK_MAX_NODES)
+		nodeTimes[nodeCount++] = sqlite3_column_int(stmt, 0);
+	sqlite3_finalize(stmt);
+	stmt = NULL;
+	if (nodeCount <= 0)
+		return;
+	if (sqlite3_prepare_v2(db, "SELECT time_ms, x, y, z, yaw, vel_x, vel_y, speed, forwardmove, rightmove, "
+		"upmove, grounded, jump_held, force_jump, wall_run FROM LocalStrafeRouteInput "
+		"WHERE route_id = ? AND time_ms >= 0 ORDER BY frame", -1, &stmt, NULL) != SQLITE_OK)
+		return;
+	sqlite3_bind_int64(stmt, 1, routeId);
+	while (sqlite3_step(stmt) == SQLITE_ROW)
+	{
+		bot_sfj_replay_sample_t *row;
+
+		if (count >= capacity)
+		{
+			capacity = capacity ? capacity * 2 : 1024;
+			grown = (bot_sfj_replay_sample_t *)realloc(rows, sizeof(*rows) * capacity);
+			if (!grown)
+				break;
+			rows = grown;
+		}
+		row = &rows[count];
+		memset(row, 0, sizeof(*row));
+		row->timeMs = sqlite3_column_int(stmt, 0);
+		row->origin[0] = (float)sqlite3_column_double(stmt, 1);
+		row->origin[1] = (float)sqlite3_column_double(stmt, 2);
+		row->origin[2] = (float)sqlite3_column_double(stmt, 3);
+		row->yaw = AngleNormalize360((float)sqlite3_column_double(stmt, 4));
+		row->speed = (float)sqlite3_column_double(stmt, 7);
+		if (sqlite3_column_type(stmt, 5) != SQLITE_NULL && sqlite3_column_type(stmt, 6) != SQLITE_NULL &&
+			row->speed > 1.0f)
+			row->velYaw = AngleNormalize360(RAD2DEG(atan2(sqlite3_column_double(stmt, 6),
+				sqlite3_column_double(stmt, 5))));
+		else if (count > 0 && (row->origin[0] != rows[count - 1].origin[0] ||
+			row->origin[1] != rows[count - 1].origin[1]))
+			row->velYaw = AngleNormalize360(RAD2DEG(atan2(row->origin[1] - rows[count - 1].origin[1],
+				row->origin[0] - rows[count - 1].origin[0])));
+		else
+			row->velYaw = count > 0 ? rows[count - 1].velYaw : row->yaw;
+		row->forward = sqlite3_column_int(stmt, 8);
+		row->right = sqlite3_column_int(stmt, 9);
+		row->up = sqlite3_column_int(stmt, 10);
+		if (sqlite3_column_int(stmt, 11))
+			row->flags |= BOT_SFJ_REPLAY_FLAG_GROUNDED;
+		if (sqlite3_column_int(stmt, 12))
+			row->flags |= BOT_SFJ_REPLAY_FLAG_JUMP;
+		if (sqlite3_column_int(stmt, 13))
+			row->flags |= BOT_SFJ_REPLAY_FLAG_FORCEJUMP;
+		if (sqlite3_column_type(stmt, 14) != SQLITE_NULL)
+		{
+			row->flags |= BOT_SFJ_REPLAY_FLAG_WALLKNOWN;
+			if (sqlite3_column_int(stmt, 14))
+				row->flags |= BOT_SFJ_REPLAY_FLAG_WALLRUN;
+		}
+		for (node = 0; node < nodeCount - 1 && nodeTimes[node] < row->timeMs; node++)
+			;
+		row->node = node;
+		count++;
+	}
+	sqlite3_finalize(stmt);
+	if (count < 2)
+	{
+		free(rows);
+		return;
+	}
+	wallCount = BotSFJ_ReplayScanWallRuns(rows, count, walls, BOT_SFJ_REPLAY_MAX_WALLRUNS);
+	kept = (bot_sfj_replay_sample_t *)malloc(sizeof(*kept) * count);
+	if (kept)
+	{
+		for (i = 0; i < count; i++)
+			if (BotSFJ_ReplayKeepSample(keptCount ? &kept[keptCount - 1] : NULL, &rows[i]) || i == count - 1)
+				kept[keptCount++] = rows[i];
+		for (i = 0; i < BOT_SFJ_REPLAY_MAX_SAMPLES && i < keptCount; i++)
+		{
+			const bot_sfj_replay_sample_t *r = &kept[keptCount > BOT_SFJ_REPLAY_MAX_SAMPLES ?
+				(int)((long long)i * (keptCount - 1) / (BOT_SFJ_REPLAY_MAX_SAMPLES - 1)) : i];
+
+			G_StrafeTrackAppend(text, va("\tinput %i %i %.1f %.1f %.1f %.1f %.1f %.0f %i %i %i %i\n",
+				r->node, r->timeMs, r->origin[0], r->origin[1], r->origin[2], r->yaw, r->velYaw, r->speed,
+				r->forward, r->right, r->up, r->flags));
+		}
+		if (samplesOut)
+			*samplesOut += i;
+		free(kept);
+	}
+	for (i = 0; i < wallCount; i++)
+		G_StrafeTrackAppend(text, va("\twallrun %i %.1f %.1f %.1f %.1f %i %i %i %i\n",
+			walls[i].node, walls[i].origin[0], walls[i].origin[1], walls[i].origin[2], walls[i].yaw,
+			walls[i].airMs, walls[i].jumpOffMs, walls[i].exitKind, walls[i].inferred));
+	if (wallsOut)
+		*wallsOut += wallCount;
+	free(rows);
+}
+
 static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qboolean quiet)
 {
 	static sqlite3_int64 candidateIds[STRAFETRACK_EXPORT_CANDIDATES];
@@ -12818,7 +12938,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	fileHandle_t f;
 	char path[MAX_QPATH];
 	char mapname[MAX_QPATH];
-	int len, written = 0, candidates = 0, c;
+	int len, written = 0, candidates = 0, c, replaySamples = 0, replayWalls = 0;
 
 	if (!mapnameIn || !mapnameIn[0] || strstr(mapnameIn, "..") || strchr(mapnameIn, '\\') || strchr(mapnameIn, ':') ||
 		mapnameIn[0] == '/')
@@ -12840,14 +12960,14 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	text.data[0] = '\0';
 
 	len = trap->FS_Open(path, &f, FS_READ);
-	if (f && (len < 0 || len >= 4 * 1024 * 1024))
+	if (f && (len < 0 || len >= STRAFETRACK_ROUTE_FILE_MAX))
 	{
 		trap->Print("exportStrafeTrack: cannot preserve existing route file %s; not overwritten.\n", path);
 		trap->FS_Close(f);
 		free(text.data);
 		return -1;
 	}
-	if (f && len > 0 && len < 4 * 1024 * 1024)
+	if (f && len > 0 && len < STRAFETRACK_ROUTE_FILE_MAX)
 	{
 		char *old = (char *)malloc(len + 1);
 
@@ -13037,6 +13157,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 					G_StrafeTrackAppend(&text, va("\tnode_speed %i %i\n",
 						sqlite3_column_int(nodes, 13), sqlite3_column_int(nodes, 14)));
 			}
+			G_StrafeTrackAppendReplay(db, &text, sortedIds[c], &replaySamples, &replayWalls);
 			G_StrafeTrackAppend(&text, "}\n");
 			written++;
 		}
@@ -13069,7 +13190,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	trap->FS_Close(f);
 	free(text.data);
 	if (!quiet || candidates > written)
-		trap->Print("Wrote %i of %i recorded strafe route(s) to %s\n", written, candidates, path);
+		trap->Print("Wrote %i of %i recorded strafe route(s) to %s (%i human replay samples, %i wallruns)\n",
+			written, candidates, path, replaySamples, replayWalls);
 	return written;
 }
 
@@ -13183,7 +13305,7 @@ void Svcmd_ExportStrafeTrack_f(void)
 		dbDir, pathSep, safePrefix, exportSuffix);
 	G_ExportTrackedTable(db, qtrue, "SELECT route_id, frame, time_ms, msec, forwardmove, rightmove, upmove, yaw, "
 		"yaw_delta, x, y, z, speed, grounded, cmd_time, pitch, vel_x, vel_y, jump_held, force_jump, "
-		"speed_active, speed_level FROM LocalStrafeRouteInput ORDER BY route_id, frame", "inputs",
+		"speed_active, speed_level, wall_run FROM LocalStrafeRouteInput ORDER BY route_id, frame", "inputs",
 		dbDir, pathSep, safePrefix, exportSuffix);
 	g_trackedExportKind = "dueltrack";
 

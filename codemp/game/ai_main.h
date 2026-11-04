@@ -658,6 +658,34 @@ typedef struct bot_state_s
 	int					sfjWallRunStage;
 	int					sfjWallRunRetryUntil;
 	float				sfjWallRunYaw;
+	int					sfjDebugInfoTime;	// level 2 strafe event limiter
+	int					sfjDebugBeatTime;	// level 2 strafe heartbeat
+	int					combatDebugBeatTime;	// bot_combatdebug heartbeat
+	qboolean			sfjReplayActive;	// matched a recorded human sample this frame
+	int					sfjReplayCursor;	// monotonic sample cursor on the current route
+	int					sfjReplaySample;	// matched sample index (-1 none)
+	float				sfjReplayDeviation;	// distance from the human path
+	float				sfjReplayCross;		// signed distance, positive = left of the human path
+	float				sfjReplayBotSpeed;
+	float				sfjReplayHumanSpeed;
+	float				sfjReplayYaw;		// last view yaw taken from the human replay
+	int					sfjReplayForward;
+	int					sfjReplayRight;
+	int					sfjReplayOffSince;
+	int					sfjReplaySlowSince;
+	int					sfjRouteWallStage;	// recorded wallrun replay: 0 idle, 1 trigger, 2 on wall, 3 exit
+	int					sfjRouteWallIndex;
+	int					sfjRouteWallStart;
+	int					sfjRouteWallUntil;
+	int					sfjRouteWallDone;	// bitmask of wallruns already used this attempt
+	int					sfjRouteWallJumpOffMs;	// human wall time before the second jump (0 = no jump-off)
+	int					sfjRouteWallExit;	// 1 jumped off, 2 ledge flip, 0 dropped off
+	float				navHazardYaw;		// combat hazard detour move yaw
+	int					navHazardUntil;
+	int					navHazardDebugTime;
+	int					navPushCheckTime;
+	qboolean			navPushExposed;
+	vec3_t				navPushSafeDir;
 	vec3_t				sfjLedgeDirection;
 	int					sfjLedgeUntil;
 	int					sfjTravelPlanTime;
