@@ -12593,14 +12593,15 @@ void G_StrafeTrackFrame(gentity_t *ent)
 			if (!isBot || bot_strafetrack.integer >= 2)
 			{
 				trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
-				trap->Print("Strafe route (session #%i) began: %s%s %s on %s at (%.0f %.0f %.0f), speed %.0f\n",
+				trap->Print("Strafe route (session #%i) began: %s%s %s on %s at (%.0f %.0f %.0f), speed %.0f%s\n",
 					track->routeNum, isBot ? "bot " : "", client->pers.netname,
 					isBot ? "strafe-jumped" : "circle-jumped", mapname,
-					track->start[0], track->start[1], track->start[2], speed);
+					track->start[0], track->start[1], track->start[2], speed,
+					track->speedActive == 1 ? va(", Force Speed %i route", track->speedLevel) : "");
 			}
 			if (!isBot)
-				trap->SendServerCommand(clientNum, va("print \"Recording strafe route (session #%i, circle jump at %.0f ups).\n\"",
-					track->routeNum, speed));
+				trap->SendServerCommand(clientNum, va("print \"Recording %sstrafe route (session #%i, circle jump at %.0f ups).\n\"",
+					track->speedActive == 1 ? "Force Speed " : "", track->routeNum, speed));
 		}
 	}
 	else
@@ -12620,7 +12621,12 @@ void G_StrafeTrackFrame(gentity_t *ent)
 			G_StrafeTrackTakeoffSpeed(&client->ps, track, &track->hopSpeedActive, &track->hopSpeedLevel);
 		}
 		track->slowSince = BotSFJ_TrackSlowSince(track->slowSince, level.time, grounded, speed, groundSpeed);
-		if (BotSFJ_TrackShouldEnd(track->slowSince, level.time))
+		/* Speed and normal routes are recorded separately: a Speed toggle closes the route. */
+		if (track->speedActive >= 0 && BotSFJ_TrackSpeedToggled(track->speedActive,
+			(client->ps.fd.forcePowersActive & (1 << FP_SPEED)) ? 1 : 0))
+			G_StrafeTrackFinish(ent, track, track->speedActive ? "Force Speed ended" :
+				"Force Speed switched on", qfalse, speed);
+		else if (BotSFJ_TrackShouldEnd(track->slowSince, level.time))
 			G_StrafeTrackFinish(ent, track, "back to ground speed", qfalse, speed);
 		else if (track->inputCount >= STRAFETRACK_MAX_INPUTS)
 			G_StrafeTrackFinish(ent, track, "too long", qfalse, speed);

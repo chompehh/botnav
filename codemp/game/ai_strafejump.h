@@ -256,11 +256,34 @@ static inline int BotSFJ_TrackSpeedUsable(int recordedActive, int recordedLevel,
 		(recordedActive == 1 && !active && activatable);
 }
 
-/* Bot-held Speed that did not come from a Speed route is turned off on a normal route. */
+/*
+ * Force Speed routes and normal routes are kept completely apart: a hop recorded
+ * with Speed is followed only with Speed on (or switched on now), and a hop
+ * recorded without Speed (or unknown) only with Speed off, or when the bot may
+ * switch its Speed off first. Speed changes the physics too much to share routes.
+ */
+static inline int BotSFJ_TrackSpeedMatches(int recordedActive, int recordedLevel,
+	int active, int level, int activatable, int droppable)
+{
+	if (recordedActive == 1)
+		return active ? (recordedLevel < 0 || level >= recordedLevel) : activatable;
+	return !active || droppable;
+}
+
+/*
+ * Bot-held Speed is turned off on a normal route. Speed kept from a Speed route
+ * is always dropped; Speed the bot chose in a fight is kept while the enemy is visible.
+ */
 static inline int BotSFJ_TrackSpeedShouldDrop(int routeRecordedActive, int speedActive,
 	int speedFromRoute, int enemyVisible)
 {
-	return routeRecordedActive != 1 && speedActive && !speedFromRoute && !enemyVisible;
+	return routeRecordedActive != 1 && speedActive && (speedFromRoute || !enemyVisible);
+}
+
+/* Human recordings are split whenever Force Speed switches on or off mid-route. */
+static inline int BotSFJ_TrackSpeedToggled(int startActive, int active)
+{
+	return (startActive ? 1 : 0) != (active ? 1 : 0);
 }
 
 /*
@@ -897,6 +920,7 @@ static inline float BotSFJ_OptimalWishOffset(float speed, float wishSpeed,
 
 #define BOT_SFJ_HUMAN_EXTRA_MAX 12.0f
 #define BOT_SFJ_WISH_OFFSET_MAX 74.0f
+#define BOT_SFJ_CORNER_OFFSET_MAX 90.0f
 #define BOT_SFJ_ROUTE_CLAMP 74.0f
 /* Frame time of the strafetrack sample the human offsets were measured at. */
 #define BOT_SFJ_HUMAN_SAMPLE_SECONDS 0.033f
@@ -931,12 +955,18 @@ static inline float BotSFJ_CommandYawCapped(float routeYaw, float velocityX, flo
 		extra = BOT_SFJ_HUMAN_EXTRA_MAX;
 	if (extra > 0.0f)
 		offset += extra;
-	wishCap = BotSFJ_ClampSetting(wishCap, BOT_SFJ_WISH_OFFSET_MAX, 110.0f);
-	/* Recorded corners deliberately trade acceleration for turning/braking. */
+	wishCap = BotSFJ_ClampSetting(wishCap, BOT_SFJ_WISH_OFFSET_MAX, BOT_SFJ_CORNER_OFFSET_MAX);
+	/*
+	 * Recorded corners trade a little acceleration for turning, but never past
+	 * 90 degrees (beyond that the wish only brakes, it does not turn faster)
+	 * and never further than the remaining turn (that overshoots the corner).
+	 */
 	velocityYaw = atan2f(velocityY, velocityX) * radiansToDegrees;
 	if (wishCap > BOT_SFJ_WISH_OFFSET_MAX)
 	{
 		float turn = BotSFJ_AngleDelta(routeYaw, velocityYaw) * (side < 0 ? -1.0f : 1.0f);
+		if (turn > wishCap)
+			turn = wishCap;
 		if (turn > offset)
 			offset = turn;
 	}
@@ -958,12 +988,39 @@ static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float vel
 		airAccelerate, commandSeconds, side, BOT_SFJ_WISH_OFFSET_MAX);
 }
 
-static inline float BotSFJ_CornerWishCap(int trusted, float turn, float yawRate)
+/*
+ * Wish offset a corner actually needs. PM_Accelerate rotates the velocity at
+ * airAccel * wishSpeed * sin(offset) / speed rad/s, so the offset that turns
+ * `turn` degrees over `travel` units is asin(rate * speed / (airAccel * wishSpeed)).
+ * Clamped to [74, 90]: more than 90 degrees brakes without turning faster.
+ */
+static inline float BotSFJ_CornerRequiredOffset(float turn, float travel, float speed,
+	float wishSpeed, float airAccel)
+{
+	float rate;
+	float sine;
+
+	turn = fabsf(turn);
+	if (turn < 1.0f)
+		return BOT_SFJ_WISH_OFFSET_MAX;
+	if (speed < 32.0f || wishSpeed <= 0.0f || airAccel <= 0.0f)
+		return BOT_SFJ_CORNER_OFFSET_MAX;
+	if (travel < 16.0f)
+		travel = 16.0f;
+	rate = turn * 0.017453292519943295f * speed / travel;
+	sine = rate * speed / (airAccel * wishSpeed);
+	if (sine >= 1.0f)
+		return BOT_SFJ_CORNER_OFFSET_MAX;
+	return BotSFJ_ClampSetting(asinf(sine) * 57.29577951308232f,
+		BOT_SFJ_WISH_OFFSET_MAX, BOT_SFJ_CORNER_OFFSET_MAX);
+}
+
+static inline float BotSFJ_CornerWishCap(int trusted, float turn, float travel, float speed,
+	float wishSpeed, float airAccel)
 {
 	if (!trusted)
 		return BOT_SFJ_WISH_OFFSET_MAX;
-	return BotSFJ_ClampSetting(BOT_SFJ_WISH_OFFSET_MAX +
-		fabsf(turn) * 0.4f + fabsf(yawRate) * 0.08f, BOT_SFJ_WISH_OFFSET_MAX, 110.0f);
+	return BotSFJ_CornerRequiredOffset(turn, travel, speed, wishSpeed, airAccel);
 }
 static inline int BotSFJ_SelectSide(float routeYaw, float velocityX, float velocityY,
 	int fallbackSide)
@@ -1231,6 +1288,35 @@ static inline int BotSFJ_HopSide(float routeYaw, float velocityX, float velocity
  * route has drifted more than 10 degrees to the other side of the velocity.
  */
 #define BOT_SFJ_AIR_SWITCH_DEG 10.0f
+
+/*
+ * velYawRate (deg/s) and leadSeconds predict where the velocity will point by
+ * the time the switched keys take effect, so the side flips before the
+ * velocity has already swung past the route (which reads as an over-turn).
+ */
+static inline int BotSFJ_AirSideSwitchLead(int side, float routeYaw, float velocityX, float velocityY,
+	int airMs, int recordedAirMs, int switchPct, int *switched, float velYawRate, float leadSeconds)
+{
+	const float speed = sqrtf(velocityX * velocityX + velocityY * velocityY);
+	float delta;
+	float lead;
+
+	if (speed < 32.0f)
+		return side;
+	if (!*switched && switchPct > 0 && switchPct < 100 && recordedAirMs > 0 &&
+		airMs * 100 >= recordedAirMs * switchPct)
+	{
+		*switched = 1;
+		side = -side;
+	}
+	lead = BotSFJ_ClampSetting(velYawRate * leadSeconds, -30.0f, 30.0f);
+	delta = BotSFJ_AngleDelta(routeYaw, atan2f(velocityY, velocityX) * 57.29577951308232f + lead);
+	if (side > 0 && delta < -BOT_SFJ_AIR_SWITCH_DEG)
+		return -1;
+	if (side < 0 && delta > BOT_SFJ_AIR_SWITCH_DEG)
+		return 1;
+	return side;
+}
 
 static inline int BotSFJ_AirSideSwitch(int side, float routeYaw, float velocityX, float velocityY,
 	int airMs, int recordedAirMs, int switchPct, int *switched)
@@ -2089,6 +2175,7 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 #define BOT_SFJ_REPLAY_MATCH_WINDOW 32
 #define BOT_SFJ_REPLAY_MATCH_HEIGHT 128.0f
 #define BOT_SFJ_REPLAY_YAW_CORRECTION 10.0f
+#define BOT_SFJ_REPLAY_YAW_DEADBAND 3.0f
 #define BOT_SFJ_REPLAY_CROSS_GAIN 0.08f
 #define BOT_SFJ_REPLAY_CROSS_MAX 6.0f
 #define BOT_SFJ_REPLAY_HARD_DEVIATION 160.0f
@@ -2250,6 +2337,9 @@ static inline float BotSFJ_ReplayViewYaw(float humanYaw, float humanVelYaw, floa
 		return humanYaw;
 	correction = 0.5f * BotSFJ_AngleDelta(targetVelYaw, botVelYaw) -
 		BotSFJ_ReplayClamp(crossTrack * BOT_SFJ_REPLAY_CROSS_GAIN, BOT_SFJ_REPLAY_CROSS_MAX);
+	/* Small heading errors fix themselves; chasing them every frame over-turns. */
+	if (fabsf(correction) < BOT_SFJ_REPLAY_YAW_DEADBAND)
+		correction = 0.0f;
 	correction = BotSFJ_ReplayClamp(correction, BOT_SFJ_REPLAY_YAW_CORRECTION);
 	return botVelYaw + BotSFJ_AngleDelta(humanYaw, humanVelYaw) + correction;
 }
@@ -2264,6 +2354,21 @@ static inline int BotSFJ_ReplayOffCourse(float deviation, int deviatingMs, int h
 	if (deviation > hard)
 		return 1;
 	return deviation > soft && deviatingMs >= softMs;
+}
+
+/*
+ * Trusted human hops get twice the soft deviation / slow-momentum time before
+ * the attempt ends; the hard deviation still ends it at once.
+ */
+static inline int BotSFJ_ReplayOffCourseTrusted(float deviation, int deviatingMs, int haveSamples,
+	int trusted)
+{
+	return BotSFJ_ReplayOffCourse(deviation, trusted ? deviatingMs / 2 : deviatingMs, haveSamples);
+}
+
+static inline int BotSFJ_ReplaySlowLimitMs(int trusted)
+{
+	return trusted ? BOT_SFJ_REPLAY_SLOW_MS * 2 : BOT_SFJ_REPLAY_SLOW_MS;
 }
 
 /*
@@ -2431,6 +2536,200 @@ static inline int BotSFJ_CombatHazardCandidates(float moveYaw, float enemyYaw, f
 		n++;
 	}
 	return n;
+}
+
+/* ---- Strafe-jump debug levels and colours (bot_strafejumps_debug) ---- */
+#define BOT_SFJ_DEBUG_DECISION 1	/* decisions, rejections, route ends: every level */
+#define BOT_SFJ_DEBUG_ROUTE 2		/* route planning/following: level 2 only */
+#define BOT_SFJ_DEBUG_MOTION 3		/* yaw, arc, hazard and edge execution: level 3 */
+
+static inline int BotSFJ_DebugShows(int level, int category)
+{
+	if (level <= 0)
+		return 0;
+	if (category <= BOT_SFJ_DEBUG_DECISION)
+		return 1;
+	if (category == BOT_SFJ_DEBUG_ROUTE)
+		return level == 2;
+	return level >= 3;
+}
+
+/* Separate limiters per kind, so one busy kind never hides another. */
+#define BOT_SFJ_DEBUG_KIND_YAW 0
+#define BOT_SFJ_DEBUG_KIND_EDGE 1
+#define BOT_SFJ_DEBUG_KIND_HAZARD 2
+#define BOT_SFJ_DEBUG_KIND_GOAL 3
+#define BOT_SFJ_DEBUG_KIND_APPROACH 4
+#define BOT_SFJ_DEBUG_KIND_TRUST 5
+#define BOT_SFJ_DEBUG_KIND_SPEED 6
+#define BOT_SFJ_DEBUG_KIND_MISC 7
+
+#define BOT_SFJ_TONE_PLAN 0		/* ^5 cyan: goals and plans */
+#define BOT_SFJ_TONE_GOOD 1		/* ^2 green: start, success, trust */
+#define BOT_SFJ_TONE_FAIL 2		/* ^3 yellow: route end, failure, reject */
+#define BOT_SFJ_TONE_HAZARD 3	/* ^1 red: hazard veto, death */
+#define BOT_SFJ_TONE_YAW 4		/* ^6 magenta: yaw and corners */
+#define BOT_SFJ_TONE_EDGE 5		/* ^8 orange: ledges and edges */
+
+static inline const char *BotSFJ_DebugToneColor(int tone)
+{
+	switch (tone)
+	{
+	case BOT_SFJ_TONE_GOOD:
+		return "^2";
+	case BOT_SFJ_TONE_FAIL:
+		return "^3";
+	case BOT_SFJ_TONE_HAZARD:
+		return "^1";
+	case BOT_SFJ_TONE_YAW:
+		return "^6";
+	case BOT_SFJ_TONE_EDGE:
+		return "^8";
+	default:
+		return "^5";
+	}
+}
+
+static inline int BotSFJ_DebugTextHas(const char *text, const char *word)
+{
+	int i, j;
+
+	if (!text || !word || !word[0])
+		return 0;
+	for (i = 0; text[i]; i++)
+	{
+		for (j = 0; word[j]; j++)
+		{
+			char a = text[i + j];
+
+			if (a >= 'A' && a <= 'Z')
+				a = (char)(a - 'A' + 'a');
+			if (a != word[j])
+				break;
+		}
+		if (!word[j])
+			return 1;
+	}
+	return 0;
+}
+
+/* Colour class of a free-text strafe debug message. */
+static inline int BotSFJ_DebugTextTone(const char *text, int fallback)
+{
+	static const char *const hazard[] = {"hazard", "lava", "slime", "nodrop", "hurt", "lethal",
+		"death", "deadly", "fatal", "died", "fall"};
+	static const char *const edge[] = {"ledge", "edge"};
+	static const char *const yaw[] = {"yaw", "corner"};
+	static const char *const fail[] = {"ending", "off the", "lost", "reject", "blocked", "stalled",
+		"collision", "expired", "unsafe", "waiting", "ran out", "disabled", "unsupported", "no pick",
+		"missing", "exhausted", "resuming", "without"};
+	static const char *const good[] = {"trust", "start", "began", "replaying", "switching on",
+		"second jump", "recorded route"};
+	unsigned i;
+
+	for (i = 0; i < sizeof(hazard) / sizeof(hazard[0]); i++)
+		if (BotSFJ_DebugTextHas(text, hazard[i]))
+			return BOT_SFJ_TONE_HAZARD;
+	for (i = 0; i < sizeof(edge) / sizeof(edge[0]); i++)
+		if (BotSFJ_DebugTextHas(text, edge[i]))
+			return BOT_SFJ_TONE_EDGE;
+	for (i = 0; i < sizeof(yaw) / sizeof(yaw[0]); i++)
+		if (BotSFJ_DebugTextHas(text, yaw[i]))
+			return BOT_SFJ_TONE_YAW;
+	for (i = 0; i < sizeof(fail) / sizeof(fail[0]); i++)
+		if (BotSFJ_DebugTextHas(text, fail[i]))
+			return BOT_SFJ_TONE_FAIL;
+	for (i = 0; i < sizeof(good) / sizeof(good[0]); i++)
+		if (BotSFJ_DebugTextHas(text, good[i]))
+			return BOT_SFJ_TONE_GOOD;
+	return fallback;
+}
+
+/* ---- Trusting human routes ---- */
+/* A trusted human hop survives one momentum collision; the second ends it. */
+static inline int BotSFJ_CollisionEndsRoute(int trusted, int collisions)
+{
+	return collisions >= (trusted ? 2 : 1);
+}
+
+#define BOT_SFJ_APPROACH_BLOCK_MS 250
+#define BOT_SFJ_APPROACH_BLOCK_TRUSTED_MS 600
+
+/* A blocked walk to a route start ends only once the block has lasted. */
+static inline int BotSFJ_ApproachBlockEnds(int trusted, int blockedSince, int now)
+{
+	return blockedSince > 0 && now - blockedSince >=
+		(trusted ? BOT_SFJ_APPROACH_BLOCK_TRUSTED_MS : BOT_SFJ_APPROACH_BLOCK_MS);
+}
+
+/* ---- Precise route starts ---- */
+#define BOT_SFJ_APPROACH_SLOW_RADIUS 96.0f
+#define BOT_SFJ_APPROACH_FACE_RADIUS 48.0f
+
+/* Walk speed toward the exact start: full speed until close, then settle on it. */
+static inline float BotSFJ_ApproachArrivalSpeed(float distance)
+{
+	return 400.0f * BotSFJ_ClampSetting(distance / BOT_SFJ_APPROACH_SLOW_RADIUS, 0.35f, 1.0f);
+}
+
+/* ---- Forward progress over backtracking ---- */
+/*
+ * Extra seed cost for a route start that lies behind the bot's forward
+ * heading (goal direction, else travel). Starts within ~100 degrees are free.
+ */
+static inline float BotSFJ_BacktrackCost(float startDistance, float alignment, float speed)
+{
+	float behind;
+
+	if (alignment > -0.17f || startDistance <= 32.0f)
+		return 0.0f;
+	behind = -alignment;
+	if (behind > 1.0f)
+		behind = 1.0f;
+	return startDistance * behind * 1.5f + (speed > 0.0f ? speed * 0.5f : 0.0f);
+}
+
+/* ---- Edge dancing ---- */
+#define BOT_NAV_EDGE_STALL_WINDOW_MS 4000
+#define BOT_NAV_EDGE_STALL_RADIUS 96.0f
+#define BOT_NAV_EDGE_STALL_ESCAPES 3
+
+/* Count ledge escapes made close together in time and space. */
+static inline int BotNav_EdgeStallCount(int count, int lastTime, float distanceFromLast, int now)
+{
+	if (lastTime <= 0 || now - lastTime > BOT_NAV_EDGE_STALL_WINDOW_MS ||
+		distanceFromLast > BOT_NAV_EDGE_STALL_RADIUS)
+		return 1;
+	return count + 1;
+}
+
+/* Prefer the escape that also leads toward where the bot wants to go. */
+static inline float BotNav_EdgeEscapeScore(float clearance, float targetAlignment, int haveTarget)
+{
+	return clearance + (haveTarget ? targetAlignment * 64.0f : 0.0f);
+}
+
+/* ---- Combat edges ---- */
+#define BOT_NAV_COMBAT_FALL_MARGIN 30
+
+/* How far ahead combat movement checks for a lethal drop at this speed. */
+static inline float BotNav_CombatLookahead(float speed)
+{
+	return BotSFJ_ClampSetting(speed * 0.4f, 96.0f, 256.0f);
+}
+
+/* Horizontal distance covered by a normal jump before landing at the same height. */
+static inline float BotNav_JumpLandingDistance(float horizontalSpeed, float jumpVelocity, float gravity)
+{
+	if (gravity <= 0.0f || jumpVelocity <= 0.0f)
+		return 0.0f;
+	return (horizontalSpeed > 0.0f ? horizontalSpeed : 0.0f) * 2.0f * jumpVelocity / gravity;
+}
+
+/* Combat keeps a margin of health over the fall damage it would take. */
+static inline int BotNav_CombatFallTooCostly(int damage, int health)
+{
+	return damage > 0 && damage >= health - BOT_NAV_COMBAT_FALL_MARGIN;
 }
 
 #endif
