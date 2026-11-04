@@ -3450,6 +3450,7 @@ void ClientThink_real( gentity_t *ent ) {
 	pmove_t		pmove;
 	int			oldEventSequence;
 	int			msec;
+	int			commandTimeBefore;
 	usercmd_t	*ucmd;
 	qboolean	isNPC = qfalse;
 	qboolean	controlledByPlayer = qfalse;
@@ -5232,7 +5233,10 @@ void ClientThink_real( gentity_t *ent ) {
 #endif
 	}
 
+	commandTimeBefore = ent->client->ps.commandTime;
 	Pmove (&pmove);
+	G_RecordTrackedResolvedCommand(ent, &pmove.cmd,
+		ent->client->ps.commandTime - commandTimeBefore);
 
 	if ( !isNPC )
 		G_StrafeTrackCommand( ent );

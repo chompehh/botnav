@@ -12,6 +12,92 @@ BOOST_AUTO_TEST_SUITE( bot_ai )
 
 BOOST_AUTO_TEST_SUITE( tuning )
 
+BOOST_AUTO_TEST_CASE( strafe_flag_goals_prioritize_scoring_and_closer_recovery )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(1, 1, 100, 50), BOT_SFJ_GOAL_FLAG_SCORE );
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(0, 0, 100, 50), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(0, 1, 100, 200), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(0, 1, 200, 100), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(0, 1, 100, -1), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(0, 1, -1, 100), BOT_SFJ_GOAL_FLAG_ATTACK );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_speed_rating_rewards_sustained_speed_not_circle_start )
+{
+	BOOST_CHECK( BotSFJ_RouteSpeedRating(600, 800) > BotSFJ_RouteSpeedRating(300, 900) );
+	BOOST_CHECK( BotSFJ_RouteSpeedRating(600, 900) > BotSFJ_RouteSpeedRating(600, 800) );
+	BOOST_CHECK_EQUAL( BotSFJ_RouteSpeedRating(-1, 800), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_RouteSpeedRating(std::numeric_limits<float>::quiet_NaN(), 800), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_replacements_require_newer_proven_speed_and_completions )
+{
+	BOOST_CHECK( BotSFJ_RouteSupersedes(1, 20, 40, 1, 10, 9, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(0, 20, 40, 1, 10, 9, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 40, 0, 10, 9, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 40, 1, 3, 3, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 40, 1, 10, 7, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 40, 1, 10, 9, 10, 8, 525, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 40, 1, 10, 9, 10, 8, 600, 500, 3, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 97, 40, 1, 10, 9, 10, 8, 600, 500, 5, 4) );
+	BOOST_CHECK( !BotSFJ_RouteSupersedes(1, 20, 193, 1, 10, 9, 10, 8, 600, 500, 5, 4) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_walk_graph_keeps_the_complete_goal_path )
+{
+	const float edges[16] = { -1, 100, -1, -1, -1, -1, 100, -1,
+		-1, -1, -1, 100, -1, -1, -1, -1 };
+	const float seed[4] = { 20, -1, -1, -1 };
+	float cost[4];
+	int first[4], parent[4], path[4];
+	BotSFJ_RoutePathsWithParents(4, edges, seed, cost, first, parent);
+	BOOST_CHECK_EQUAL( cost[3], 320.0f );
+	BOOST_CHECK_EQUAL( first[3], 0 );
+	BOOST_REQUIRE_EQUAL( BotSFJ_WalkPath(3, parent, 4, path, 4), 4 );
+	for (int i = 0; i < 4; ++i)
+		BOOST_CHECK_EQUAL( path[i], i );
+	BOOST_CHECK_EQUAL( BotSFJ_WalkPath(3, parent, 4, path, 3), 0 );
+	parent[0] = 3;
+	BOOST_CHECK_EQUAL( BotSFJ_WalkPath(3, parent, 4, path, 4), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_WalkPath(4, parent, 4, path, 4), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_recorded_corners_allow_bounded_braking_with_both_sides )
+{
+	const float cap = BotSFJ_CornerWishCap(1, 100, 120);
+	BOOST_CHECK_EQUAL( cap, 110.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(0, 100, 120), BOT_SFJ_WISH_OFFSET_MAX );
+	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(1, 0, 0), BOT_SFJ_WISH_OFFSET_MAX );
+	const float left = BotSFJ_CommandYawCapped(100, 600, 0, 250, 1, 0.033f, 1, cap);
+	const float right = BotSFJ_CommandYawCapped(-100, 600, 0, 250, 1, 0.033f, -1, cap);
+	BOOST_CHECK_CLOSE( left, 100.0f, 0.001f );
+	BOOST_CHECK_CLOSE( right, -100.0f, 0.001f );
+	BOOST_CHECK( cosf(left * 0.01745329252f) < 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_CommandYawCapped(20, 600, 0, 250, 1, 0.033f, 1, 74),
+		BotSFJ_CommandYaw(20, 600, 0, 250, 1, 0.033f, 1) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_wall_runs_preserve_legality_combat_and_retry_gates )
+{
+	BOOST_CHECK( BotSFJ_WallRunAllows(1, 1, 0, 3, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(0, 1, 0, 3, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 0, 0, 3, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 1, 3, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 2, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 4, 1, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 3, 0, 5, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 3, 1, 4, 0, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 3, 1, 5, 1, 1) );
+	BOOST_CHECK( !BotSFJ_WallRunAllows(1, 1, 0, 3, 1, 5, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_ledge_escape_never_overrides_airborne_or_exclusive_inputs )
+{
+	BOOST_CHECK( BotSFJ_LedgeRecoveryAllows(1, 0) );
+	BOOST_CHECK( !BotSFJ_LedgeRecoveryAllows(0, 0) );
+	BOOST_CHECK( !BotSFJ_LedgeRecoveryAllows(1, 1) );
+}
+
 BOOST_AUTO_TEST_CASE( merc_ranged_modes_respect_ammo_and_forced_fire )
 {
 	BOOST_CHECK( BotCombat_ModeUsable( 1, 5, 5, 0, 0 ) );

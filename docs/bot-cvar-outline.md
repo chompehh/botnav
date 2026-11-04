@@ -74,6 +74,7 @@ Chance weights are clamped to 0-100 by `BotGetChanceBiasPercent()`. Legacy attac
 | `bot_learningminsamples` | `4` | Minimum recorded samples before a context/response entry influences choices. Below this the bot pools similar contexts (neighbouring HP+armor/force buckets, see Learned Sequences), then falls back to the coarse (force/range only) context, then to the baked baseline (`bot_learningbaseline`), then to built-in weights. |
 | `bot_learningbaseline` | `1` | Strength (`0` disables) of the built-in baseline baked from the last exported learning (`dueltrack_learned.csv`). It applies only where live learned data has fewer than `bot_learningminsamples` samples, so a `resetlearningtrack` no longer drops bots back to unlearned choices. Pools every context of a duel mode (saber-only vs full force) per stimulus/response/follow-up, and is withheld while the bot's own defense is broken/knocked down/lost, in return recovery or airborne. Works independently of `bot_learning`. |
 | `bot_learning_debug` | `0` | `1` prints the top learned responses per context to the console after each map load (only at map load or `botlearn reload`). Use the `botlearn` server command to print the table at any time. While set, it also prints each retreat wall-escape choice and `-4` duel stalemate break-ups. |
+| `bot_combatdebug` | `0` | `1` prints rate-limited combat decision details: weighted force candidates, accepted saber moves/recipe weights, category biases, learned human/bot sample contributions where available, bounded motor preferences, and saber-throw hold/recall reasons. Pooled sources are explicitly aggregate; map-local recipe feedback is labeled separately. |
 
 Discretionary built-in and learned preferences share existing technique categories: saber techniques
 use `bot_fanbias`, throws use `bot_saberthrowbias`, drain-denial pressure also uses
@@ -100,13 +101,15 @@ Steerable throws use launch, bypass, rear placement, cut-through and recall phas
 
 ### Human throw evidence
 
-Run `python3 scripts/dueltrack_report.py . --throw-evidence` from the repository root.
+Download the `dueltracks` release exports outside the checkout, then run
+`python3 scripts/dueltrack_report.py /path/to/duel-release --throw-evidence`.
 This standard-library report prints its exact SQL alongside every result, preserves source batches,
 excludes conflicting event identities, and pairs only adjacent throw-start/end boundaries within
 the same duel, participant and opponent. `--release-dir PATH` keeps a separately downloaded capture
 in its own batch. The `flights` table is constructed by the report, not a persisted game table.
 
-The shipped repository exports produced the following airtime result:
+The November 4 `dueltracks` release produces the following airtime result.
+All renamed download parts (`.2.csv`, `.1.csv`, etc.) are included:
 
 ```sql
 SELECT batch, count(*) AS complete_flights, round(avg(flight_ms),1) AS mean_airtime_ms,
@@ -119,7 +122,7 @@ FROM flights GROUP BY 1;
 
 | Batch | Complete flights | Mean ms | Min ms | Max ms | ≥1500ms | ≥3000ms | Damaging ≥3000ms |
 |-------|------------------|---------|--------|--------|---------|---------|-----------------|
-| repository | 900 | 836.8 | 225 | 6633 | 59 | 6 | 0 |
+| release capture | 1,582 | 901.5 | 231 | 5,907 | 161 | 16 | 4 |
 
 Airtime includes return travel and is **not** alt-input hold duration. There are no recorded
 input-end events. The report separately measures sampled alt-button observations and forward input,
@@ -129,6 +132,15 @@ do not prove an uninterrupted hold. Sampled cumulative yaw is not proof of a del
 denial. The observations support occasional longer commitments and forward pressure, not a universal
 long-hold rule or a demonstrated spin/hold/flipkick motor recipe. The longest recorded airtime can
 exceed the engine's six-second outbound limit because return travel is included.
+
+There are 22,002 sampled attack observations within these flights; 17,776 have alt
+held and 12,584 have both alt and forward held. Held observations span at least
+1,500ms in 93 flights and 3,000ms in nine. Geometry covers all 1,582 flights:
+38 accumulate at least 360 degrees of sampled yaw; 487 overlap an opponent drain,
+267 of those close by more than 32 units, and seven both turn and close. None of
+those seven also have the report's nearby melee-damage event. These correlations
+do not establish a successful spin/flipkick recipe. In particular, a sampled
+THROW outcome bonus is not evidence for a specific hold duration.
 
 Historical saber tuning (dueltracks2, capture v8; newer recovery/aim/throw behavior is described above):
 - Fan chain (`bot_fanbias`): the pause between L2R/R2L swings shrinks with skill and fan bias and reaches zero at skill 7+. The next swing is linked on the last frames of the current swing (strafe direction flips together with the swing direction), so the engine chains it immediately, as in the long human fan sessions. The chain runs past 3s (up to 6s) while swings keep landing within 700ms. While a horizontal swing is active the aim sweeps through the swing (up to ±80° half-arc at close range, scaled by skill/fan bias, faded out by 200u) instead of a slow fixed turn.
@@ -190,7 +202,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; the jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe as soon as they land after an engagement. Navigation strafes with a visible enemy are still held back inside close-combat range (~384 units) or when the enemy is closing fast. |
 | `bot_strafetrack` | `1` | Records human strafe-jump routes. `0` off, `1` record (the console prints when a route begins on a circle jump and when it ends), `2` also prints each landing with its hop style. Spectators are never recorded; bots only with `bot_strafetrack_bots`. See "Recorded strafe routes" below. |
 | `bot_strafetrack_bots` | `0` | Comparison mode: `1` also records bot strafe jumps (from the bot's own takeoff) into the same tables with `bot = 1` and the player name prefixed `[bot] `, so bot and human keys/yaw can be compared command by command after `exportStrafeTrack`. Bot recordings never go into `.botroute` files and are quiet unless `bot_strafetrack 2`. |
-| `bot_strafejumps_debug` | `0` | `1` prints rejection reasons to the server console; `2` also reports starts; `3+` also broadcasts diagnostics to connected clients. All are rate-limited to once per second per bot. Includes initiation waits, final-input conflicts, and waypoint-skip rejection reasons. |
+| `bot_strafejumps_debug` | `0` | `1` prints rejection reasons to the server console; `2` also reports starts and selected recorded-route explanations (goal, chosen/next-best route, entry, speed summary, reliability and prior results); `3+` also broadcasts rejection diagnostics to connected clients. Diagnostics are rate-limited to once per second per bot. Includes initiation waits, final-input conflicts, and waypoint-skip rejection reasons. |
 | `bot_hopfrequency` | `0` | Deprecated but retained for existing configurations. Controls ambient and discretionary combat hops only; leave `0` to disable them. Emergency jumps, kicks and required map traversal are separate. Use `bot_strafejumpfrequency` for navigation strafe initiation. |
 | `bot_waypointskip` | `2` | Waypoint goal distance, in trail points, clamped 0–256 (`0` = legacy one-point-at-a-time). Out of visible combat the bot picks a goal this many points ahead along its trail direction, follows the points in between (taking the farthest directly reachable one, with a clear grounded hull path and safe floor, up to 8 points at a time), and chains a new goal in the same direction on arrival. The goal stops at flagged waypoints and the destination, which are still visited. When the next trail point fails, the bot looks for a visible unvisited point closer to the goal and only reverses direction after 750 ms without progress. Re-acquiring a lost waypoint also prefers points toward the goal instead of the nearest one, which is often behind. A visible enemy clears the goal. |
 | `bot_redirectcooldown` | `800` | Cooldown (ms) after a wall-triggered redirect reaction. During this window the bot keeps the chosen redirect heading instead of immediately rerolling another wall reaction, reducing tight-space spin loops and repeated reaction hopping. |
@@ -198,6 +210,70 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 `bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
 
 Recorded human routes are considered before improvised waypoint corridors. Circle starts can be approached from up to 3,072 units away along a swept, floor-checked path, even when a legacy waypoint is closer or points elsewhere; mid-route joins still require forward alignment. Routes can cross fatal drops: a validated jump is checked along its flight path and at its landing, not against the empty ground or hazards underneath the gap. Grounded approaches, circle preparation, and cancelled-jump walking never receive that exemption. Live flight hazards and landing checks remain active both in and out of combat. Required mover interactions remain barriers. Ordinary walking treats a wall or a small ledge riser ahead as an obstacle, not a pit: the floor is probed where the bot can actually reach, so it keeps walking (and jumping obstacles) instead of freezing. Grounded route connections may climb or drop single steps. Lava, slime, nodrop, trigger_hurt and lethal drops are still refused.
+
+### Goal-aware route acquisition and recovery
+
+CTF/CTY goals work without a legacy waypoint file. Carrying a flag selects the
+home base; otherwise a stolen/dropped own flag is preferred when its estimated
+travel cost is no greater than the enemy flag's. A safe own flag selects enemy
+flag attack; an allied carrier selects escort. Nearby visible combat still takes
+input priority. Other modes pursue the current visible/recently seen enemy, or
+use a map objective/free-run goal; defensive routes must increase separation.
+`bot_strafejumps_debug 2` names the goal and player, selected entry, next chain
+route, destination route, goal gain, travel cost, alternative, mean/peak/end speed,
+completion history and rejection categories.
+
+Route starts also form a bounded walking graph: up to eight nearby safe links
+per start (1,024 units each), acquired within 3,072 units and at most 12,000 units
+of walking. Complete paths of up to 16 starts are followed; overlong paths are
+rejected, never truncated. Every leg is swept/floor/hazard checked, refreshed
+while walking, and final commands retain the immediate ground-safety check.
+Unreachable/distant starts fall back to ordinary navigation. Progress timeouts
+discard stalled plans. Walking acquisition does not depend on a queued legacy
+movement direction and never treats a walk connector as a jump permission.
+
+Whole-route scoring combines 65% mean and 35% peak speed, with completion,
+per-hop reliability and measured performance. New exports include `max_speed`
+and `average_speed` (distance / elapsed time); older files use all landing-node
+speeds, not just circle-start speed. Chain edge costs also favor faster routes.
+A newer recording supersedes a nearby matching route only after both have four
+resolved attempts, the newer has at least three completions, more than 5% better
+measured speed, no fewer jumps, no worse smoothed completion rate/deaths/unsafe
+results, and an available, safely reachable approach. `route_id`/`recorded_at`
+keep recording identities distinct in version-6 route statistics; old statistics
+remain readable but are not silently credited to a new recording.
+
+Trusted recorded corners can trade acceleration for turning/braking, widening
+the wish/velocity angle from 74 up to 110 degrees and anticipating the next
+segment near its landing. Predictor and command generation use the same cap.
+Full, side-only/half-beat, W-only transition and inverse retreat keys preserve
+the intended world-space wish direction rather than changing side accidentally.
+Hazard, endpoint and actual-landing gates remain unchanged.
+
+Blocked grounded navigation tries a safe back/diagonal/side step for 400ms,
+rechecking the actual command, rather than endlessly renewing a stationary ledge
+pause. With no opponent within the navigation guard distance, a level-3
+levitation bot contacting a tall wall can attempt a short vertical run using
+fresh jump/release/jump inputs, then release forward after 160ms. This requires
+legal powers, no exclusive combat movement, headroom, a clear rear floor lane
+and a nonlethal swept return arc; it has a three-second cooldown. Lower-level
+wall flips and unverified forward vaults are deliberately not substituted.
+
+Reproduce the `Strafetracks4` input comparison:
+
+```sh
+python3 scripts/strafetrack_report.py /path/to/strafe-release
+```
+
+The script prints file hashes and exact SQL. Of 1,120 routes, 1,071 are human
+routes on eight maps: mean start/peak/end speeds are 294.3/571.7/114.4 u/s, and
+1,066 have a peak above the circle start. Across 313,415 human airborne samples
+with recorded velocity and yaw rate at least 45 degrees/s, 17.1% exceed a
+74-degree wish/velocity offset (90th percentile 80.0 degrees). Another 27,606
+such samples require displacement-estimated velocity; they are reported
+separately (20.3%, p90 82.3 degrees). These are post-pmove observations, not exact
+pre-acceleration motor templates. The earlier unverified 34%/94-degree estimate
+is not used. Missing hop style values remain unknown rather than becoming zero.
 
 Arc validation performs bounded swept player-hull integration at the command's pmove slice size until a real static, walkable contact; unresolved falls are rejected rather than vertically probing for a floor. Ceilings, dynamic blockers, lava, slime, no-drop/void areas, and instant-kill `trigger_hurt` volumes along the full arc reject the intent. Landing-corridor slack uses `bot_strafe_tolerance` instead of requiring exact waypoint landings. Cached checks are reused only for matching route/input choices; every takeoff/rejump is refreshed, and meaningful airborne heading changes require revalidation. Instant-kill triggers are cached per map instead of being queried with an area search for every sample. Selection and final command ownership both require the AI's own queued movement to be aligned with the corridor.
 
@@ -650,11 +726,45 @@ Tracked duel data access:
 - Every exported CSV is capped below 25MB so it can be uploaded to GitHub. A larger export is split into `<name>.csv`, `<name>_part2.csv`, `<name>_part3.csv`, ...; each part repeats the header row and whole rows are never split across files. Leftover parts from an earlier, larger export are removed.
 - `capture_version` and `capture_revision` identify the recording implementation and build revision for each session, also included in event and participant exports. Imported/historical sessions without provenance remain `0`/blank; an export schema version alone does not establish recording provenance.
 - `input_start` records an attack-button request, not a successful swing; historical `attack_start` records retain their original meaning. `swing_start` records an accepted saber attack animation, and `attack_chain` marks accepted continuations through legal transitions, including same-direction links, already counted by `swing_start`. `swing_end` preserves measured signed yaw sweep, and `swing_damage` records confirmed in-hand saber damage. Count distinct swings containing hits, not raw hit events. `damage_dealt`/`damage` record actual attributed resource loss; `damage_source` is the engine means-of-death value (`MOD_*`), and `damage_attacker_key` identifies the actual attacker. Environmental damage must not be credited as opponent saber damage.
+- Version 14 adds continuous resolved-command streams and correlated action spans; see [Combat sequence recording](combat-sequence-recording.md). A future versioned decision ID could additionally link every decision candidate to its exact resulting command and hit/miss. Adjacency alone still does not establish causality.
 - New event diagnostics distinguish controller enablement from actual ownership: `controller_enabled` records `g_newBotAI`, `controller_candidate` identifies a bot routed toward the technique controller, and `controller_owns_inputs` records actual ownership. Candidate `1` with ownership `0` identifies refused ownership. `controller_family` identifies the selected family (`0` basic, `1` horizontal, `2` diagonal/vertical, `3` counter-entry, `4` finish, `5` burst). `controller_fanbias`, `controller_mistakebias` and `controller_skill` record configured biases and raw bot skill. Humans/no bot state have family/skill `-1` and candidate/ownership `0`; migrated old diagnostic fields are unknown (`-1`).
 
 - `python3 scripts/dueltrack_report.py [csv_dir] [--revision REV]` (needs `pip install duckdb`) prints the tuning figures (swing-start footing, chains per swing, roll-stab use, learned sequences per mode) together with the SQL that produced each one. It handles the latin-1 bytes, the differing column sets of the parts, and duplicate rows. Use `--revision` to measure one build's capture.
 
-### Comparing repository and release captures
+### Current capture distribution
+
+Old root `dueltrack*.csv` files, including learned/evidence snapshots, are removed
+from source control and ignored. Obtain current captures from Releases, keep
+each download in its own directory, and pass that directory to the report.
+The repository's compiled baseline and server databases are not removed or
+reset. This cleanup does not rewrite Git history.
+
+`Shades_FF_Document.pdf` at the repository root is the manual used for this
+review. Its throw-steering, late angle changes and resource-aware drain guidance
+support contextual holds/aim changes and bounded commitments, not unconditional
+long throws or blind drain holds. The existing bypass/rear/cut-through controller
+already implements the relevant steering structure. Engine legality, recovery,
+resource budgets and collision checks take precedence over manual anecdotes;
+through-wall throws and claimed invulnerability are not imported as rules.
+
+For resource-conditioned review, run
+`python3 scripts/dueltrack_report.py /path/to/duel-release --saber-evidence`.
+The "Accepted swing resource contexts" query groups confirmed damage by capture
+version, participant kind, HP+armor and relative FP. The "Within-player
+resource/choice comparisons" query separately groups each batch-local anonymous
+actor, stance, attack family and resource state, requiring four starts per cell.
+For example, capture 13's low-HP/even-FP bot cell contains 403 starts and 58
+confirmed damaging starts; the account-human cell has only 18/3 and the
+guest-human cell 249/37. These are annotated swing outcomes, not wins or proof
+that a choice caused success. Sparse per-player cells and differing opponents
+do not justify unconditional drain, grip or throw thresholds. Prefer
+confidence-gated contextual timing over replaying a single successful sequence.
+
+### Historical repository/release comparison
+
+The figures below describe older captures, not the current release and not files
+still shipped in the checkout. Recover those exact snapshots from Git history
+to reproduce their comparison; do not substitute the current release.
 
 Keep the [Dueltracks1 release attachments](https://github.com/chompehh/botnav/releases/tag/Dueltracks)
 outside the checkout, in a separate batch directory. These attachments are not a ZIP
@@ -700,7 +810,7 @@ print("routes:", len(a), len(b), "exact overlap:", len(keys(a) & keys(b)))
 ```
 
 These counts describe file scope, not proof of improved combat or bot chain
-completion. Strafe routes record humans only. A human multi-hop route proves that
+completion. Filter routes on `bot=0` for human evidence. A human multi-hop route proves that
 the route was demonstrated, not that the bot reproduced it.
 
 The extended report uses only Python's standard library in evidence mode:
@@ -864,7 +974,7 @@ At the end of every tracked duel, each participant's events are broken into shor
 
 - Context key: HP+armor and force buckets (four each) for both sides, range bucket (<128u, <384u, beyond) and stance at the start of the sequence, so similar (not identical) HP/AP/FP/range snapshots already share a key. When the exact key has fewer than `bot_learningminsamples` samples, contexts up to two bucket steps away in HP+armor/force (same range, stances and safety dimensions) are pooled with weight 0.5 per step (1 step 0.5, 2 steps 0.25). A coarse key drops health buckets but retains both force buckets, range, stances and safety dimensions.
 - Outcome: net damage (dealt − taken) over the 2s after the response, plus whether the participant won the duel.
-- Storage: `LocalBotLearnedSequence` in `dueltracks.db`, keyed by source kind (human/bot), skill band (human, bot 1–3, 4–5, 6–7, 8–10), context and token sequence. Rows accumulate samples, wins, net damage and response time. `resetdueltrack` preserves both these aggregates and `LocalBotLearnedEvidence`; only `resetlearningtrack` clears learning.
+- Storage: `LocalBotLearnedSequence` in `dueltracks.db`, keyed by source kind (human/bot), skill band (human, bot 1–3, 4–5, 6–7, 8–10), context and token sequence. Rows accumulate samples, wins, net damage and response time. `resetdueltrack` preserves these aggregates, `LocalBotLearnedEvidence` and version-14 `LocalBotLearnedMotor`; only `resetlearningtrack` clears learning. A learning reset also prevents re-extraction from retained raw motor streams.
 - Map load: rows are loaded into memory, filtered by `bot_learninghumansonly` (bot rows are weighted ×0.25). Each context/response gets a confidence-weighted score based mainly on net damage; wins only count relative to the source's usual win rate (humans win most tracked duels, so a raw win rate would inflate every human row). With few samples the score is pulled towards zero, and the learned bonus only approaches its ±30 cap once a context has many samples (half strength at 20).
 - Server command `botlearn` (or `botlearn print [lines]`) prints learned responses without a map restart. Finished duels mark the cache for automatic refresh between duels; `botlearn reload` also defers if a duel is active, so weights do not change halfway through an exchange.
 - In game: the same lookup feeds force reactions, combo follow-ups (e.g. pull→kick), the saber-throw decision and fan entry. The technique controller consults capped initiative/counter/chain preferences at selection boundaries and records the bonus when its requested attack is accepted. Learned preferences never override legal-action, movement-safety or defense-recovery gates.
@@ -888,7 +998,7 @@ Through `G_BotLearnBonus` the baseline reaches fan entry (saber-only fan chains 
 
 ### Recent exported learning: interpretation
 
-The checked-in `dueltrack_learned.csv` contains 13,250 aggregate rows, but only 2,311 rows (2,418 samples) satisfy the current safety/footing compatibility filter. Those samples comprise 1,336 human examples and 1,082 bot examples. Most exact sequences are sparse: the most sampled compatible row has only five samples. Neighbor/coarse pooling can supply confidence, but must retain safety dimensions.
+The historical `dueltrack_learned.csv` used for the baked-baseline analysis contained 13,250 aggregate rows, but only 2,311 rows (2,418 samples) satisfied the current safety/footing compatibility filter. Those samples comprised 1,336 human examples and 1,082 bot examples. Most exact sequences were sparse: the most sampled compatible row had only five samples. Neighbor/coarse pooling can supply confidence, but must retain safety dimensions. This obsolete CSV has been removed from source control; the compiled baseline remains.
 
 | Response | Human samples / mean net damage | Bot samples / mean net damage |
 |----------|---------------------------------|-------------------------------|
@@ -914,8 +1024,10 @@ Duel capture version 9:
 - `force` events whose power could only be guessed from the selected power (force lost to an enemy drain, or the cost of a saber throw) carry the note `selected_fallback`. Leaving the ground with jump held and upward velocity is noted `jump` instead of `airborne`. Learning ignores both guessed force spends and non-jump launches, so victims are not credited with actions they never took.
 - `LocalDuelTrackAggregate` rows carry `capture_version` and `capture_revision` of the latest update (aggregate export format 3).
 
-Current duel capture:
-- Bounded attack/throw/recovery windows add `attack_sample` events at a minimum 50ms interval (limited by server frame cadence). Samples are low-priority during compaction; damage and defensive transitions retain higher priority. This is not unlimited, continuous motion capture.
+Current duel capture (version 14):
+- Every resolved Pmove command in an active tracked duel adds `command_sample`, including idle commands. Actual post-Pmove yaw/pitch, command duration, buttons and movement preserve observed hold/release timing. `span_start`/`span_end` correlate saber, flight and force windows. Recording remains bounded by the existing event budget; dropped streams never become motor-learning evidence.
+- Bounded attack/throw/recovery windows also retain the older `attack_sample` events at a minimum 50ms interval (limited by server frame cadence). Samples are low-priority during compaction; damage and defensive transitions retain higher priority.
+- `LocalBotLearnedMotor` stores complete human timing/rate examples with individual provenance, exported as `dueltrack_learned_motor.csv`. Confidence-gated aggregate profiles can extend throw completion by at most 250ms and adjust throw/saber aim rates by bounded amounts. They do not replay arbitrary keys or override legality, recovery, force or movement safety. Old release aggregates cannot fabricate these profiles; sufficient new version-14 human recordings are required.
 - Event telemetry adds self/opponent pitch, target-relative yaw/pitch errors, saber position when valid and the live view-trace endpoint. Historical release-offset and cumulative-sweep fields retain their meanings.
 - Saber defense is classified separately from absorb/protect buffs: none, ordinary parry, attack bounce, broken parry, knockdown or lost saber. Raw `saberBlocked` is also exported, and normal return-animation recovery is separate.
 - Self/opponent footing identifies actual movement independently of the legacy relative-speed label. It is an execution context, not proof of deliberate movement intent.

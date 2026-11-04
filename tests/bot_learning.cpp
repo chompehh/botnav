@@ -1,6 +1,8 @@
 #include <string>
+#include <limits>
 #include "g_bot_learning.h"
 #include "g_account.h"
+#include "g_duel_command_capture.h"
 #include "ai_combat_tuning.h"
 
 #include <boost/test/unit_test.hpp>
@@ -69,6 +71,48 @@ namespace
 		sqlite3 *db = NULL;
 	};
 
+	struct MotorDatabase : LearningDatabase
+	{
+		MotorDatabase()
+		{
+			Execute(g_botLearnMotorSchema);
+			Execute("ALTER TABLE LocalDuelTrackSummary ADD capture_version INTEGER DEFAULT 14;"
+				"ALTER TABLE LocalDuelTrackParticipant ADD participant_kind INTEGER DEFAULT 1;"
+				"ALTER TABLE LocalDuelTrackParticipant ADD event_dropped INTEGER DEFAULT 0;"
+				"ALTER TABLE LocalDuelTrackParticipant ADD motor_extracted INTEGER DEFAULT 0;"
+				"DELETE FROM LocalDuelTrackEvent;"
+				"ALTER TABLE LocalDuelTrackEvent ADD event_type TEXT;"
+				"ALTER TABLE LocalDuelTrackEvent ADD command_time INTEGER;"
+				"ALTER TABLE LocalDuelTrackEvent ADD command_msec INTEGER DEFAULT 33;"
+				"ALTER TABLE LocalDuelTrackEvent ADD buttons INTEGER DEFAULT 0;"
+				"ALTER TABLE LocalDuelTrackEvent ADD command_yaw REAL DEFAULT 0;"
+				"ALTER TABLE LocalDuelTrackEvent ADD command_pitch REAL DEFAULT 0;"
+				"ALTER TABLE LocalDuelTrackEvent ADD span_id INTEGER DEFAULT 1;"
+				"ALTER TABLE LocalDuelTrackEvent ADD span_kind INTEGER DEFAULT 2;"
+				"ALTER TABLE LocalDuelTrackEvent ADD learned_context INTEGER DEFAULT 123;"
+				"ALTER TABLE LocalDuelTrackEvent ADD saber_stance INTEGER DEFAULT 2;"
+				"ALTER TABLE LocalDuelTrackEvent ADD amount INTEGER DEFAULT 3;"
+				"ALTER TABLE LocalDuelTrackEvent ADD damage_source INTEGER DEFAULT 0;"
+				"ALTER TABLE LocalDuelTrackEvent ADD damage_attacker_key TEXT DEFAULT 'enemy';"
+				"ALTER TABLE LocalDuelTrackEvent ADD opponent_key TEXT DEFAULT 'enemy';"
+				"ALTER TABLE LocalDuelTrackEvent ADD span_outcome INTEGER DEFAULT 1;"
+				"ALTER TABLE LocalDuelTrackEvent ADD duel_start_time INTEGER DEFAULT 10;"
+				"ALTER TABLE LocalDuelTrackEvent ADD event_index INTEGER;"
+				"ALTER TABLE LocalDuelTrackEvent ADD event_capture_version INTEGER DEFAULT 14;"
+				"ALTER TABLE LocalDuelTrackEvent ADD command_source INTEGER DEFAULT 1;"
+				"INSERT INTO LocalDuelTrackEvent(summary_id,participant_key,session_id,event_index,"
+				"event_type,command_time,buttons,command_yaw,amount,damage_source) VALUES"
+				"(1,'human','old-session',1,'command_sample',1000,0,358,3,0),"
+				"(1,'human','old-session',2,'command_sample',1033,128,359,3,0),"
+				"(1,'human','old-session',3,'command_sample',1066,128,0,3,0),"
+				"(1,'human','old-session',4,'command_sample',1099,128,1,3,0),"
+				"(1,'human','old-session',5,'command_sample',1132,0,2,3,0),"
+				"(1,'human','old-session',6,'damage_dealt',1132,0,2,30,7),"
+				"(1,'human','old-session',7,'damage',1132,0,2,10,7),"
+				"(1,'human','old-session',8,'span_end',1132,0,2,20,7);");
+		}
+	};
+
 	int ProgressDrainStep(void *data)
 	{
 		DrainJob *job = static_cast<DrainJob *>(data);
@@ -103,6 +147,229 @@ namespace
 }
 
 BOOST_AUTO_TEST_SUITE( bot_learning )
+
+BOOST_AUTO_TEST_CASE(resolved_motor_evidence_requires_complete_short_holds_and_repeated_examples)
+{
+	botlearn_motor_provenance_t aggregate = {
+		BOTLEARN_MOTOR_ATTRIBUTION_AGGREGATE, BOTLEARN_COMMAND_SOURCE_HUMAN, 0, NULL, 12, 3
+	};
+	botlearn_motor_provenance_t namedParticipant = {
+		BOTLEARN_MOTOR_ATTRIBUTION_PARTICIPANT, BOTLEARN_COMMAND_SOURCE_HUMAN, 42, "human-key", 4, 1
+	};
+	BOOST_CHECK_EQUAL(BotLearn_CommandSpanTransition(0, 0), 0);
+	BOOST_CHECK_EQUAL(BotLearn_CommandSpanTransition(0, 1), BOTLEARN_SPAN_OPEN);
+	BOOST_CHECK_EQUAL(BotLearn_CommandSpanTransition(1, 1), 0);
+	BOOST_CHECK_EQUAL(BotLearn_CommandSpanTransition(1, 0), BOTLEARN_SPAN_CLOSE);
+	BOOST_CHECK_EQUAL(BotLearn_CommandSpanTransition(1, 2),
+		BOTLEARN_SPAN_CLOSE | BOTLEARN_SPAN_OPEN);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 180, 5, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 80);
+	BOOST_CHECK_EQUAL(BotLearn_ThrowHoldEvidence(100, 180, 5, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 80);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 180, 2, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 0);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 180, 5, 0, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 0);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 180, 5, 1, 0,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 0);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 3101, 20, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 0);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldEvidence(100, 180, 5, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_BOT), 0);
+	BOOST_CHECK(BotLearn_MotorProvenanceValid(&aggregate));
+	BOOST_CHECK_EQUAL(std::string(BotLearn_MotorAttributionName(aggregate.attribution)), "aggregate");
+	BOOST_CHECK(BotLearn_MotorPreferenceSupported(&aggregate, 3, 5));
+	BOOST_CHECK(BotLearn_ThrowAimPreferenceSupported(&aggregate, 3, 5));
+	BOOST_CHECK(BotLearn_ThrowAimStepEvidence(30.0f, -10.0f, 20));
+	BOOST_CHECK(!BotLearn_ThrowAimStepEvidence(46.0f, 0.0f, 20));
+	BOOST_CHECK(!BotLearn_ThrowAimStepEvidence(0.0f, 31.0f, 20));
+	BOOST_CHECK(!BotLearn_ThrowAimStepEvidence(0.0f, 0.0f, 101));
+	BOOST_CHECK(!BotLearn_ThrowAimStepEvidence(std::numeric_limits<float>::quiet_NaN(), 0, 20));
+	BOOST_CHECK(!BotLearn_MotorPreferenceSupported(&aggregate, 2, 5));
+	BOOST_CHECK(!BotLearn_MotorPreferenceSupported(&aggregate, 3, 4));
+	BOOST_CHECK(!BotLearn_MotorPreferenceSupported(&aggregate, 6, 5));
+	BOOST_CHECK(!BotLearn_ThrowAimPreferenceSupported(&aggregate, 2, 5));
+	BOOST_CHECK(BotLearn_MotorProvenanceValid(&namedParticipant));
+	BOOST_CHECK(!BotLearn_MotorPreferenceSupported(&namedParticipant, 3, 5));
+	aggregate.participantKey = "unknown";
+	BOOST_CHECK(!BotLearn_MotorProvenanceValid(&aggregate));
+	aggregate.participantKey = NULL;
+	aggregate.commandSource = BOTLEARN_COMMAND_SOURCE_BOT;
+	BOOST_CHECK(!BotLearn_MotorProvenanceValid(&aggregate));
+}
+
+BOOST_AUTO_TEST_CASE(command_motor_holds_preserve_launch_edges_release_and_yaw_wrap)
+{
+	botlearn_motor_hold_t hold = {};
+	botlearn_command_sample_t previous = {1000, 33, 0, 0, 0, 123, 2, 3, 179, 0};
+	botlearn_command_sample_t sample = previous;
+	for (int i = 1; i <= 4; ++i)
+	{
+		sample.time = 1000 + i * 33;
+		sample.buttons = 128;
+		sample.kind = i > 1 ? BOTLEARN_SPAN_KIND_THROW : BOTLEARN_SPAN_KIND_SABER;
+		sample.span = i > 1 ? 5 : 4;
+		sample.yaw = i == 1 ? -179 : -179 + (i - 1) * 2;
+		BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+		previous = sample;
+	}
+	sample.time += 33;
+	sample.buttons = 0;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_REQUIRE(hold.eligible && hold.released);
+	BOOST_CHECK_EQUAL(hold.span, 5);
+	BOOST_CHECK_EQUAL(hold.commands, 4);
+	BOOST_CHECK_CLOSE(hold.yawSum, 8.0f, 0.001f);
+	BOOST_CHECK_EQUAL(BotLearn_ThrowHoldEvidence(hold.start, hold.end, hold.commands,
+		hold.eligible, hold.released, BOTLEARN_COMMAND_SOURCE_HUMAN), 132);
+	BOOST_CHECK_EQUAL(BotLearn_ThrowHoldEvidence(0, 4500, 100, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 4500);
+	BOOST_CHECK_EQUAL(BotLearn_ThrowHoldEvidence(0, 6001, 100, 1, 1,
+		BOTLEARN_COMMAND_SOURCE_HUMAN), 0);
+	previous = sample;
+	sample.time += 66;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_CHECK(!hold.eligible);
+}
+
+BOOST_AUTO_TEST_CASE(command_motor_holds_reject_unknown_press_edges_gaps_and_changed_spans)
+{
+	botlearn_motor_hold_t hold = {};
+	botlearn_command_sample_t sample = {1033, 33, 128, 1,
+		BOTLEARN_SPAN_KIND_THROW, 123, 2, 3, 0, 0};
+	BotLearn_MotorCommand(&hold, &sample, NULL, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_CHECK(!hold.eligible);
+	botlearn_command_sample_t previous = sample;
+	previous.time = 1000;
+	previous.buttons = 0;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_REQUIRE(hold.eligible);
+	previous = sample;
+	sample.time += 66;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_CHECK(!hold.eligible);
+	hold = {};
+	previous.time = 1000;
+	previous.buttons = 0;
+	sample.time = 1033;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	previous = sample;
+	sample.time += 33;
+	sample.span = 2;
+	BotLearn_MotorCommand(&hold, &sample, &previous, 128, BOTLEARN_SPAN_KIND_THROW);
+	BOOST_CHECK(!hold.eligible);
+}
+
+BOOST_AUTO_TEST_CASE(motor_preferences_require_success_diversity_and_bounded_influence)
+{
+	BOOST_CHECK(BotLearn_MotorPreferenceReliable(5, 3, 3));
+	BOOST_CHECK(!BotLearn_MotorPreferenceReliable(10, 3, 3));
+	BOOST_CHECK(!BotLearn_MotorPreferenceReliable(5, 3, 2));
+	BOOST_CHECK(!BotLearn_MotorPreferenceReliable(0, 0, 3));
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldExtension(1500, 6000, 1), 1750);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldExtension(1500, 1200, 1), 1500);
+	BOOST_CHECK_EQUAL(BotLearn_MotorHoldExtension(1500, 6000, 0), 1500);
+	BOOST_CHECK_CLOSE(BotLearn_MotorStrength(1, 0, 10), 0.5f, 0.001f);
+	BOOST_CHECK_EQUAL(BotLearn_MotorStrength(0, 100, 10), 0.0f);
+	BOOST_CHECK_EQUAL(BotLearn_MotorStrength(1, 100, 2), 0.0f);
+	BOOST_CHECK_CLOSE(BotLearn_MotorRate(360, 1000, 1), 432.0f, 0.001f);
+	BOOST_CHECK_CLOSE(BotLearn_MotorRate(360, 0, 1), 288.0f, 0.001f);
+	BOOST_CHECK_EQUAL(BotLearn_MotorRate(360, 0, 0), 360.0f);
+}
+
+BOOST_AUTO_TEST_CASE(motor_evidence_survives_duel_cleanup_but_respects_learning_reset)
+{
+	LearningDatabase database;
+	database.Execute(g_botLearnMotorSchema);
+	database.Execute("ALTER TABLE LocalDuelTrackParticipant ADD motor_extracted INTEGER DEFAULT 0;"
+		"INSERT INTO LocalBotLearnedMotor(session_id,duel_start,summary_id,participant_key,span_id,kind)"
+		"VALUES('session',10,1,'human',1,2);");
+	int rows = 0;
+	BOOST_REQUIRE_EQUAL(G_ResetTrackingTables(database.db, 0, &rows), SQLITE_OK);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedMotor"), 1);
+	database.Execute("INSERT OR IGNORE INTO LocalBotLearnedMotor(session_id,duel_start,summary_id,"
+		"participant_key,span_id,kind) VALUES('session',10,1,'human',1,2);"
+		"INSERT INTO LocalBotLearnedMotor(session_id,duel_start,summary_id,participant_key,span_id,kind)"
+		"VALUES('session',11,1,'human',1,2);"
+		"INSERT INTO LocalDuelTrackParticipant(id,motor_extracted) VALUES(1,0);");
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedMotor"), 2);
+	BOOST_REQUIRE_EQUAL(G_ResetTrackingTables(database.db, 1, &rows), SQLITE_OK);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedMotor"), 0);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT motor_extracted FROM LocalDuelTrackParticipant"), 1);
+}
+
+BOOST_AUTO_TEST_CASE(motor_extraction_reconstructs_real_sql_rows_and_is_idempotent)
+{
+	MotorDatabase database;
+	int loaded = 0;
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT hold_ms FROM LocalBotLearnedMotor"), 99);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT net_damage FROM LocalBotLearnedMotor"), 20);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT CAST(yaw_rate AS INTEGER) FROM LocalBotLearnedMotor"), 30);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT motor_extracted FROM LocalDuelTrackParticipant"), 1);
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	int rows = 0;
+	BOOST_REQUIRE_EQUAL(G_ResetTrackingTables(database.db, 1, &rows), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedMotor"), 0);
+}
+
+BOOST_AUTO_TEST_CASE(motor_extraction_rejects_lost_or_legacy_commands_and_rolls_back_errors)
+{
+	MotorDatabase database;
+	int loaded = 0;
+	database.Execute("UPDATE LocalDuelTrackParticipant SET event_dropped=1");
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	database.Execute("UPDATE LocalDuelTrackParticipant SET event_dropped=0;"
+		"UPDATE LocalDuelTrackSummary SET capture_version=13");
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	database.Execute("UPDATE LocalDuelTrackSummary SET capture_version=14;"
+		"CREATE TRIGGER deny_motor BEFORE INSERT ON LocalBotLearnedMotor "
+		"BEGIN SELECT RAISE(ABORT,'test failure'); END");
+	BOOST_CHECK_NE(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT motor_extracted FROM LocalDuelTrackParticipant"), 0);
+	BOOST_CHECK_EQUAL(sqlite3_get_autocommit(database.db), 1);
+	database.Execute("DROP TRIGGER deny_motor");
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 1);
+}
+
+BOOST_AUTO_TEST_CASE(motor_extraction_advances_past_the_latest_batch)
+{
+	MotorDatabase database;
+	database.Execute("WITH RECURSIVE n(x) AS (SELECT 2 UNION ALL SELECT x+1 FROM n WHERE x<65)"
+		"INSERT INTO LocalDuelTrackSummary(id,capture_version) SELECT x,14 FROM n;"
+		"INSERT INTO LocalDuelTrackParticipant(id,summary_id,participant_key)"
+		"SELECT id,id,'human' FROM LocalDuelTrackSummary WHERE id>1;");
+	int loaded = 0;
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT SUM(motor_extracted) FROM LocalDuelTrackParticipant"), 64);
+	BOOST_CHECK_EQUAL(loaded, 0);
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, 64, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT SUM(motor_extracted) FROM LocalDuelTrackParticipant"), 65);
+	BOOST_CHECK_EQUAL(loaded, 1);
+}
+
+BOOST_AUTO_TEST_CASE(motor_extraction_retains_negative_outcomes_and_rejects_missing_release)
+{
+	MotorDatabase database;
+	database.Execute("UPDATE LocalDuelTrackEvent SET amount=5 WHERE event_type='damage_dealt'");
+	int loaded = 0;
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, -1, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT net_damage FROM LocalBotLearnedMotor"), -5);
+	database.Execute("DELETE FROM LocalBotLearnedMotor;"
+		"UPDATE LocalDuelTrackParticipant SET motor_extracted=0;"
+		"DELETE FROM LocalDuelTrackEvent WHERE event_index=5");
+	BOOST_REQUIRE_EQUAL(G_ExtractLearnedMotor(database.db, -1, 1, 128, 7, &loaded), SQLITE_OK);
+	BOOST_CHECK_EQUAL(loaded, 0);
+}
 
 BOOST_AUTO_TEST_CASE(duel_reset_preserves_learning_and_distinguishes_reused_summary_ids)
 {
