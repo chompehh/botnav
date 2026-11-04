@@ -97,6 +97,114 @@ typedef struct
 static botlearn_saber_entry_t g_botLearnSaberCache[BOTLEARN_SABER_CACHE_SIZE];
 static botlearn_saber_attempt_t g_botLearnSaberAttempts[MAX_CLIENTS];
 
+#define BOTLEARN_MOTOR_CACHE_SIZE 512
+typedef struct
+{
+	int used, context, kind, stance, throwLevel, samples, successes, humans;
+	unsigned int human[3];
+	float holdSum, yawSum, pitchSum;
+} botlearn_motor_entry_t;
+
+static botlearn_motor_entry_t g_botLearnMotorCache[BOTLEARN_MOTOR_CACHE_SIZE];
+
+void G_BotLearnMotorCacheClear(void)
+{
+	memset(g_botLearnMotorCache, 0, sizeof(g_botLearnMotorCache));
+}
+
+static botlearn_motor_entry_t *G_BotLearnMotorFind(int context, int kind,
+	int stance, int throwLevel, qboolean create)
+{
+	unsigned int slot = ((unsigned int)context * 2654435761u +
+		(unsigned int)kind * 31u + (unsigned int)stance * 131u +
+		(unsigned int)throwLevel * 397u) & (BOTLEARN_MOTOR_CACHE_SIZE - 1);
+	int i;
+
+	for (i = 0; i < BOTLEARN_MOTOR_CACHE_SIZE; i++)
+	{
+		botlearn_motor_entry_t *entry = &g_botLearnMotorCache[slot];
+		if (!entry->used)
+		{
+			if (!create)
+				return NULL;
+			entry->used = 1;
+			entry->context = context;
+			entry->kind = kind;
+			entry->stance = stance;
+			entry->throwLevel = throwLevel;
+			return entry;
+		}
+		if (entry->context == context && entry->kind == kind &&
+			entry->stance == stance && entry->throwLevel == throwLevel)
+			return entry;
+		slot = (slot + 1) & (BOTLEARN_MOTOR_CACHE_SIZE - 1);
+	}
+	return NULL;
+}
+
+void G_BotLearnMotorCacheAdd(int context, int kind, int stance, int throwLevel,
+	unsigned int human, int holdMs, float yawRate, float pitchRate, int netDamage)
+{
+	int keys[2], k, i;
+
+	if (!BotLearn_BaselineContextAllowed(context) || holdMs <= 0 ||
+		!isfinite(yawRate) || !isfinite(pitchRate))
+		return;
+	keys[0] = context;
+	keys[1] = BotLearn_CoarseKey(context);
+	for (k = 0; k < 2; k++)
+	{
+		botlearn_motor_entry_t *entry = G_BotLearnMotorFind(keys[k], kind, stance, throwLevel, qtrue);
+		if (!entry)
+			continue;
+		entry->samples++;
+		if (netDamage <= 0)
+			continue;
+		entry->successes++;
+		entry->holdSum += holdMs;
+		entry->yawSum += yawRate;
+		entry->pitchSum += pitchRate;
+		for (i = 0; i < entry->humans; i++)
+			if (entry->human[i] == human)
+				break;
+		if (i == entry->humans && entry->humans < 3)
+			entry->human[entry->humans++] = human;
+	}
+}
+
+qboolean G_BotLearnMotorProfile(gentity_t *self, gentity_t *enemy, int kind,
+	float skill, botlearn_motor_profile_t *profile)
+{
+	botlearn_motor_entry_t *entry;
+	int context, stance, throwLevel;
+
+	memset(profile, 0, sizeof(*profile));
+	if (!bot_learning.integer || bot_learningstrength.value <= 0.0f || skill <= 2 ||
+		!self || !self->client || !enemy || !enemy->client)
+		return qfalse;
+	context = G_BotLearnLiveContextKey(self, enemy);
+	if (!BotLearn_BaselineContextAllowed(context))
+		return qfalse;
+	stance = self->client->ps.fd.saberAnimLevel;
+	throwLevel = kind == BOTLEARN_SPAN_KIND_THROW ?
+		self->client->ps.fd.forcePowerLevel[FP_SABERTHROW] : 0;
+	entry = G_BotLearnMotorFind(context, kind, stance, throwLevel, qfalse);
+	if (!entry || !BotLearn_MotorPreferenceReliable(entry->samples, entry->successes, entry->humans))
+		entry = G_BotLearnMotorFind(BotLearn_CoarseKey(context), kind, stance, throwLevel, qfalse);
+	if (!entry)
+		return qfalse;
+	if (!BotLearn_MotorPreferenceReliable(entry->samples, entry->successes, entry->humans) ||
+		entry->samples < (bot_learningminsamples.integer > 5 ? bot_learningminsamples.integer : 5))
+		return qfalse;
+	profile->holdMs = (int)(entry->holdSum / entry->successes);
+	profile->yawRate = entry->yawSum / entry->successes;
+	profile->pitchRate = entry->pitchSum / entry->successes;
+	profile->samples = entry->samples;
+	profile->successes = entry->successes;
+	profile->humans = entry->humans;
+	return qtrue;
+}
+
 void G_BotLearnSaberReset(void)
 {
 	/* Map lifecycle reset only. Reloading persistent action preferences between
@@ -398,6 +506,8 @@ typedef struct
 	int response;
 	int follow1;
 	float samples;		// source-weighted sample count
+	float humanSamples;
+	float botSamples;
 	float excessWins;	// wins above the source's baseline win rate (weighted)
 	float netDamage;	// weighted
 } botlearn_cache_entry_t;
@@ -446,6 +556,7 @@ static botlearn_cache_entry_t *G_BotLearnCacheFind(int contextKey, int stimulus,
 
 void G_BotLearnCacheClear(void)
 {
+	G_BotLearnMotorCacheClear();
 	memset(g_botLearnCache, 0, sizeof(g_botLearnCache));
 	g_botLearnCacheCount = 0;
 }
@@ -455,21 +566,25 @@ int G_BotLearnCacheCount(void)
 	return g_botLearnCacheCount;
 }
 
-static void G_BotLearnCacheAccumulate(int contextKey, int stimulus, int response, int follow1,
-	float samples, float excessWins, float netDamage)
+static void G_BotLearnCacheAccumulate(int sourceKind, int contextKey, int stimulus,
+	int response, int follow1, float samples, float excessWins, float netDamage)
 {
 	botlearn_cache_entry_t *e = G_BotLearnCacheFind(contextKey, stimulus, response, follow1, qtrue);
 
 	if (!e)
 		return;
 	e->samples += samples;
+	if (sourceKind == BOTLEARN_SOURCE_BOT)
+		e->botSamples += samples;
+	else
+		e->humanSamples += samples;
 	e->excessWins += excessWins;
 	e->netDamage += netDamage;
 }
 
 // samples/excessWins/netDamage are already weighted by source (BotLearn_SourceWeight) and
 // excessWins is relative to the source's baseline win rate (BotLearn_ExcessWins).
-void G_BotLearnCacheAdd(int contextKey, int stimulus, int response, int follow1,
+void G_BotLearnCacheAdd(int sourceKind, int contextKey, int stimulus, int response, int follow1,
 	float samples, float excessWins, float netDamage)
 {
 	const int coarseKey = BotLearn_CoarseKey(contextKey);
@@ -477,15 +592,21 @@ void G_BotLearnCacheAdd(int contextKey, int stimulus, int response, int follow1,
 	if (samples <= 0.0f || stimulus <= BOTLEARN_TOK_NONE || stimulus >= BOTLEARN_TOK_COUNT ||
 		!BotLearn_IsResponseToken(response))
 		return;
+	if (sourceKind != BOTLEARN_SOURCE_BOT)
+		sourceKind = BOTLEARN_SOURCE_HUMAN;
 	if (follow1 < BOTLEARN_TOK_NONE || follow1 >= BOTLEARN_TOK_COUNT)
 		follow1 = BOTLEARN_TOK_NONE;
 
 	//Each row feeds the exact context and the coarse (force/range/stance-only) fallback,
 	//both for its specific follow-up and for "any follow-up".
-	G_BotLearnCacheAccumulate(contextKey, stimulus, response, BOTLEARN_FOLLOW_ANY, samples, excessWins, netDamage);
-	G_BotLearnCacheAccumulate(coarseKey, stimulus, response, BOTLEARN_FOLLOW_ANY, samples, excessWins, netDamage);
-	G_BotLearnCacheAccumulate(contextKey, stimulus, response, follow1, samples, excessWins, netDamage);
-	G_BotLearnCacheAccumulate(coarseKey, stimulus, response, follow1, samples, excessWins, netDamage);
+	G_BotLearnCacheAccumulate(sourceKind, contextKey, stimulus, response,
+		BOTLEARN_FOLLOW_ANY, samples, excessWins, netDamage);
+	G_BotLearnCacheAccumulate(sourceKind, coarseKey, stimulus, response,
+		BOTLEARN_FOLLOW_ANY, samples, excessWins, netDamage);
+	G_BotLearnCacheAccumulate(sourceKind, contextKey, stimulus, response, follow1,
+		samples, excessWins, netDamage);
+	G_BotLearnCacheAccumulate(sourceKind, coarseKey, stimulus, response, follow1,
+		samples, excessWins, netDamage);
 }
 
 static int G_BotLearnMinSamples(void)
@@ -568,11 +689,31 @@ static qboolean G_BotLearnPoolSimilar(int contextKey, int stimulus, int response
 					if (!e)
 						continue;
 					out->samples += e->samples * weight;
+					out->humanSamples += e->humanSamples * weight;
+					out->botSamples += e->botSamples * weight;
 					out->excessWins += e->excessWins * weight;
 					out->netDamage += e->netDamage * weight;
 				}
 	out->used = out->samples > 0.0f;
 	return out->used ? qtrue : qfalse;
+}
+
+static const botlearn_cache_entry_t *G_BotLearnFindBonusEntry(int contextKey, int stimulus,
+	int response, int followKey, int minSamples, qboolean live, botlearn_cache_entry_t *pooled)
+{
+	const botlearn_cache_entry_t *entry = NULL;
+
+	if (!live)
+		return NULL;
+	entry = G_BotLearnCacheFind(contextKey, stimulus, response, followKey, qfalse);
+	if ((!entry || entry->samples < minSamples) &&
+		G_BotLearnPoolSimilar(contextKey, stimulus, response, followKey, pooled) &&
+		pooled->samples >= minSamples)
+		entry = pooled;
+	if (!entry || entry->samples < minSamples)
+		entry = G_BotLearnCacheFind(BotLearn_CoarseKey(contextKey), stimulus, response,
+			followKey, qfalse);
+	return entry && entry->samples >= minSamples ? entry : NULL;
 }
 
 // Additive learned weight for choosing `response` (and optionally `follow1`, or
@@ -601,16 +742,8 @@ int G_BotLearnBonus(gentity_t *self, gentity_t *enemy, int stimulus, int respons
 	if (((contextKey >> 16) & 3) >= 2)
 		return 0;
 
-	if (live)
-	{
-		e = G_BotLearnCacheFind(contextKey, stimulus, response, followKey, qfalse);
-		if ((!e || e->samples < minSamples) &&
-			G_BotLearnPoolSimilar(contextKey, stimulus, response, followKey, &pooled) &&
-			pooled.samples >= minSamples)
-			e = &pooled;
-		if (!e || e->samples < minSamples)
-			e = G_BotLearnCacheFind(BotLearn_CoarseKey(contextKey), stimulus, response, followKey, qfalse);
-	}
+	e = G_BotLearnFindBonusEntry(contextKey, stimulus, response, followKey,
+		minSamples, live, &pooled);
 	if (e && e->samples >= minSamples)
 	{
 		bonus = BotLearn_WeightBonus(BotLearn_ScoreRelative(e->samples, e->excessWins, e->netDamage), e->samples,
@@ -627,6 +760,44 @@ int G_BotLearnBonus(gentity_t *self, gentity_t *enemy, int stimulus, int respons
 	if (noise > 0)
 		bonus += Q_irand(-noise, noise);
 	return Com_Clampi(-BOTLEARN_BONUS_CAP, BOTLEARN_BONUS_CAP, bonus);
+}
+
+void G_BotLearnBonusSources(gentity_t *self, gentity_t *enemy, int stimulus, int response,
+	int follow1, float skill, float *humanSamples, float *botSamples, qboolean *baseline)
+{
+	const int followKey = (follow1 > BOTLEARN_TOK_NONE && follow1 < BOTLEARN_TOK_COUNT) ?
+		follow1 : BOTLEARN_FOLLOW_ANY;
+	const int minSamples = G_BotLearnMinSamples();
+	const qboolean live = (bot_learning.integer && bot_learningstrength.value > 0.0f &&
+		g_botLearnCacheCount) ? qtrue : qfalse;
+	const botlearn_cache_entry_t *entry;
+	botlearn_cache_entry_t pooled;
+	int contextKey;
+
+	if (humanSamples)
+		*humanSamples = 0.0f;
+	if (botSamples)
+		*botSamples = 0.0f;
+	if (baseline)
+		*baseline = qfalse;
+	if (stimulus <= BOTLEARN_TOK_NONE)
+		stimulus = BOTLEARN_TOK_IDLE;
+	contextKey = G_BotLearnLiveContextKey(self, enemy);
+	if (contextKey < 0 || ((contextKey >> 16) & 3) >= 2)
+		return;
+	entry = G_BotLearnFindBonusEntry(contextKey, stimulus, response, followKey,
+		minSamples, live, &pooled);
+	if (entry)
+	{
+		if (humanSamples)
+			*humanSamples = entry->humanSamples;
+		if (botSamples)
+			*botSamples = entry->botSamples;
+	}
+	else if (baseline && bot_learningbaseline.value > 0.0f &&
+		BotLearn_BaselineBonus(contextKey, stimulus, response, followKey,
+			bot_learningbaseline.value, skill))
+		*baseline = qtrue;
 }
 
 // Debug: best scoring responses per (coarse context, stimulus) with enough samples.

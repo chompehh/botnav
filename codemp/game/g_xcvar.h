@@ -430,6 +430,9 @@ XCVAR_DEF( bot_learningstrength,		"1",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( bot_learninghumansonly,		"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( bot_learningminsamples,		"4",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( bot_learning_debug,			"0",			NULL,				CVAR_ARCHIVE,									qtrue )
+// Prints rate-limited per-choice combat diagnostics, including force weights,
+// learned source counts, and saber-throw hold/recall reasons.
+XCVAR_DEF( bot_combatdebug,				"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 // Strength (0 disables) of the built-in baseline baked from the last exported learning
 // (dueltrack_learned.csv). Used only where live learned data is below bot_learningminsamples,
 // so bots keep their learned saber/force preferences after a learning reset.

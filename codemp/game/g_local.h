@@ -30,6 +30,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "bg_public.h"
 #include "bg_vehicles.h"
 #include "g_public.h"
+#include "g_duel_command_capture.h"
 #include "qcommon/q_version.h"
 
 typedef struct gentity_s gentity_t;
@@ -1910,6 +1911,7 @@ void G_SetStats (gentity_t *ent);
 void DeathmatchScoreboardMessage (gentity_t *client);
 void G_StartTrackedDuel(gentity_t *first, gentity_t *second, int duelType);
 void G_UpdateTrackedDuelFrame(gentity_t *ent);
+void G_RecordTrackedResolvedCommand(gentity_t *ent, const usercmd_t *cmd, int commandMsec);
 void G_FinishTrackedDuel(gentity_t *winner, gentity_t *loser, int duelType, qboolean draw);
 void G_TrackedPersistFrame(void);
 void G_TrackedPersistShutdown(void);
@@ -1932,10 +1934,17 @@ int G_BotLearnLastTokenTime(int clientNum, int token);
 qboolean G_BotLearnRecentToken(int clientNum, int token, int maxAgeMs);
 int G_BotLearnLatestToken(int clientNum, int maxAgeMs);
 void G_BotLearnCacheClear(void);
+void G_BotLearnMotorCacheClear(void);
+void G_BotLearnMotorCacheAdd(int context, int kind, int stance, int throwLevel,
+	unsigned int human, int holdMs, float yawRate, float pitchRate, int netDamage);
+qboolean G_BotLearnMotorProfile(gentity_t *self, gentity_t *enemy, int kind,
+	float skill, botlearn_motor_profile_t *profile);
 int G_BotLearnCacheCount(void);
-void G_BotLearnCacheAdd(int contextKey, int stimulus, int response, int follow1, float samples, float excessWins, float netDamage);
+void G_BotLearnCacheAdd(int sourceKind, int contextKey, int stimulus, int response, int follow1, float samples, float excessWins, float netDamage);
 int G_BotLearnLiveContextKey(gentity_t *self, gentity_t *enemy);
 int G_BotLearnBonus(gentity_t *self, gentity_t *enemy, int stimulus, int response, int follow1, float skill);
+void G_BotLearnBonusSources(gentity_t *self, gentity_t *enemy, int stimulus, int response, int follow1,
+	float skill, float *humanSamples, float *botSamples, qboolean *baseline);
 void G_BotLearnDecision(gentity_t *self, gentity_t *enemy, int stimulus, int response, int follow1, int learnedBonus);
 int G_BotLearnDuelMode(gentity_t *self);
 int G_BotLearnDefenseState(gentity_t *self);

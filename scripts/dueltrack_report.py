@@ -6,7 +6,7 @@ numbers. The general report requires duckdb; --saber-evidence uses stdlib CSV/SQ
 
 Usage: python3 scripts/dueltrack_report.py [csv_dir] [--revision REV]
        python3 scripts/dueltrack_report.py . --saber-evidence --release-dir PATH
-       python3 scripts/dueltrack_report.py . --throw-evidence
+       python3 scripts/dueltrack_report.py /path/to/release --throw-evidence
 
 Loading rules (see docs/bot-cvar-outline.md, "Duel tracking"):
 - Some export parts contain latin-1 bytes; files are re-encoded to UTF-8 first.
@@ -54,16 +54,23 @@ def csv_provenance(path):
 	return digest.hexdigest(), "utf-8-sig" if valid_utf8 else "latin-1"
 
 
+def export_family(path):
+	"""Ignore download duplicate suffixes, not the capture/source batch."""
+	name = os.path.basename(path)
+	name = re.sub(r"(?:\.[0-9]+| \([0-9]+\))(?=\.csv$)", "", name)
+	return re.sub(r"_part[0-9]+(?=\.csv$)", "", name)
+
+
 def print_batch_inventory(batch, directory):
 	"""Detect internal split gaps; absent trailing parts need an exporter manifest."""
-	print(json.dumps({"batch": batch, "provenance":
-		"https://github.com/chompehh/botnav/releases/tag/Dueltracks"
-		if batch == "Dueltracks1" else "repository-local export; not superseded by release"}))
+	print(json.dumps({"batch": batch, "directory": os.path.abspath(directory),
+		"provenance": "separate local capture; see file hashes and release download manifest"}))
 	families = ["dueltrack_" + name for name in
 		("events", "geometry", "aggregate", "learned", "learned_evidence", "participants", "sessions")]
 	families += ["strafetrack_" + name for name in ("inputs", "nodes", "routes")]
 	for family in families:
-		pattern = re.compile(re.escape(family) + r"(?:_part([0-9]+))?\.csv$")
+		pattern = re.compile(re.escape(family) +
+			r"(?:_part([0-9]+))?(?:\.[0-9]+| \([0-9]+\))?\.csv$")
 		parts = set()
 		for path in glob.glob(os.path.join(directory, family + "*.csv")):
 			match = pattern.fullmatch(os.path.basename(path))
@@ -75,8 +82,9 @@ def print_batch_inventory(batch, directory):
 			"trailing_completeness": "unknown without exporter manifest"}))
 	required = ["dueltrack_" + name + ".csv" for name in
 		("aggregate", "learned", "learned_evidence", "participants", "sessions")]
+	present = {export_family(path) for path in glob.glob(os.path.join(directory, "*.csv"))}
 	print(json.dumps({"batch": batch, "missing_support_files":
-		[name for name in required if not os.path.isfile(os.path.join(directory, name))]}))
+		[name for name in required if name not in present]}))
 
 
 def saber_evidence(batches, throws_only=False):
@@ -90,7 +98,8 @@ def saber_evidence(batches, throws_only=False):
 		"amount", "attack_elapsed_ms", "grounded", "range_bucket", "forwardmove", "rightmove",
 		"upmove", "self_footing", "enemy_stance", "buttons", "power", "damage_source",
 		"saber_defense_state",
-		"enemy_saber_defense_state", "recovery", "enemy_recovery", "controller_owns_inputs"]
+		"enemy_saber_defense_state", "recovery", 		"enemy_recovery", "controller_owns_inputs", "self_hp", "self_armor", "self_force",
+		"enemy_hp", "enemy_armor", "enemy_force"]
 	con.execute("CREATE TABLE raw(batch TEXT, filename TEXT, identity TEXT, payload TEXT, observation TEXT, " +
 		", ".join(f"{f} TEXT" for f in fields) + ")")
 	con.execute("""CREATE TABLE learned(batch TEXT, source TEXT, ctx_key INTEGER,
@@ -141,7 +150,7 @@ def saber_evidence(batches, throws_only=False):
 		for path in sorted(glob.glob(os.path.join(directory, "*.csv"))):
 			if os.path.basename(path).startswith("dueltrack_events"):
 				continue
-			family = re.sub(r"_part[0-9]+(?=\.csv$)", "", os.path.basename(path))
+			family = export_family(path)
 			digest, encoding = csv_provenance(path)
 			with open(path, encoding=encoding, newline="") as src:
 				reader = csv.DictReader(src)
@@ -323,6 +332,37 @@ SELECT batch, participant_kind, count(*) AS basic_starts,
 FROM events WHERE event_type = 'swing_start' AND note = 'accepted'
  AND CAST(saber_move AS INTEGER) BETWEEN 4 AND 10
 GROUP BY 1,2 ORDER BY 1,2"""),
+		("Accepted swing resource contexts and confirmed damage (not causal win rates)", """
+SELECT batch, capture_version, participant_kind,
+ CASE WHEN CAST(self_hp AS INTEGER)+CAST(self_armor AS INTEGER)<=50 THEN 'low'
+  WHEN CAST(self_hp AS INTEGER)+CAST(self_armor AS INTEGER)<=100 THEN 'mid'
+  ELSE 'high' END hp_armor,
+ CASE WHEN CAST(self_force AS INTEGER)-CAST(enemy_force AS INTEGER)<=-20 THEN 'behind'
+  WHEN CAST(self_force AS INTEGER)-CAST(enemy_force AS INTEGER)>=20 THEN 'ahead'
+  ELSE 'even' END force_advantage,
+ count(DISTINCT participant_key) actors, count(*) starts,
+ sum(confirmed_damage>0) confirmed_damaging_starts,
+ round(avg(confirmed_damage),2) mean_confirmed_damage
+FROM swing_outcomes WHERE self_hp!='' AND self_armor!='' AND self_force!=''
+ AND enemy_force!='' AND note='accepted'
+GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5"""),
+		("Within-player resource/choice comparisons (batch-local anonymous actor numbers)", """
+WITH actors AS (
+ SELECT *, dense_rank() OVER (PARTITION BY batch ORDER BY participant_key) actor
+ FROM swing_outcomes WHERE self_hp!='' AND self_armor!='' AND self_force!=''
+ AND enemy_force!='' AND note='accepted')
+SELECT batch, actor, participant_kind, capture_version, saber_stance,
+ CASE WHEN saber_move IN ('5','8') THEN 'horizontal' WHEN saber_move='10' THEN 'vertical'
+  ELSE 'diagonal' END choice,
+ CASE WHEN CAST(self_hp AS INTEGER)+CAST(self_armor AS INTEGER)<=50 THEN 'low'
+  WHEN CAST(self_hp AS INTEGER)+CAST(self_armor AS INTEGER)<=100 THEN 'mid'
+  ELSE 'high' END hp_armor,
+ CASE WHEN CAST(self_force AS INTEGER)-CAST(enemy_force AS INTEGER)<=-20 THEN 'behind'
+  WHEN CAST(self_force AS INTEGER)-CAST(enemy_force AS INTEGER)>=20 THEN 'ahead'
+  ELSE 'even' END force_advantage,
+ count(*) starts, sum(confirmed_damage>0) confirmed_damaging_starts,
+ round(avg(confirmed_damage),2) mean_confirmed_damage
+FROM actors GROUP BY 1,2,3,4,5,6,7,8 HAVING count(*)>=4 ORDER BY 1,2,4,5,6,7,8"""),
 		("Human adjacent accepted starts within 1000ms (and explicit accepted_link annotations)", """
 WITH attacks AS (
  SELECT *, lag(saber_move) OVER w AS previous_move,
@@ -492,7 +532,8 @@ WITH steps AS (
  WINDOW w AS (PARTITION BY f.batch,f.identity ORDER BY g.rel_time)),
  turns AS (
  SELECT batch,identity,count(*) AS samples,
-  sum(abs((self_yaw-previous_yaw+540) % 360 - 180)) AS cumulative_turn,
+  sum(abs(self_yaw-previous_yaw+540 -
+   360*CAST((self_yaw-previous_yaw+540)/360 AS INTEGER) - 180)) AS cumulative_turn,
   max(first_distance-last_distance) AS closed_distance FROM steps GROUP BY 1,2),
  context AS (
  SELECT f.batch,f.identity,
@@ -627,7 +668,7 @@ def main():
 		help="stdlib CSV/SQLite batch provenance and saber evidence (prints exact SQL)")
 	parser.add_argument("--throw-evidence", action="store_true",
 		help="stdlib CSV/SQLite human throw airtime, sampled inputs and movement (prints exact SQL)")
-	parser.add_argument("--release-dir", help="separately downloaded Dueltracks1 CSV directory")
+	parser.add_argument("--release-dir", help="separately downloaded release CSV directory")
 	args = parser.parse_args()
 
 	if args.saber_evidence or args.throw_evidence:
@@ -635,9 +676,14 @@ def main():
 			parser.error("choose either --saber-evidence or --throw-evidence")
 		if args.revision:
 			parser.error("--revision is for the general report; evidence reports preserve every capture revision")
-		batches = [("repository", args.csv_dir)]
+		batches = [("capture", args.csv_dir)] if glob.glob(
+			os.path.join(args.csv_dir, "dueltrack_events*.csv")) else []
 		if args.release_dir:
-			batches.append(("Dueltracks1", args.release_dir))
+			if not glob.glob(os.path.join(args.release_dir, "dueltrack_events*.csv")):
+				parser.error("--release-dir contains no dueltrack_events*.csv")
+			batches.append(("release", args.release_dir))
+		if not batches:
+			parser.error("no dueltrack_events*.csv; download a release and pass its directory")
 		saber_evidence(batches, throws_only=args.throw_evidence)
 		return
 	try:

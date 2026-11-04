@@ -20,6 +20,75 @@
 /* Held force jumps need a longer horizon than ordinary hops. */
 #define BOT_SFJ_MAX_ARC_STEPS 4096
 #define BOT_SFJ_MAX_CORRIDOR_POINTS 513
+#define BOT_SFJ_WALK_PATH_MAX 16
+#define BOT_SFJ_WALK_LINK_DISTANCE 1024.0f
+
+typedef enum
+{
+	BOT_SFJ_GOAL_NONE,
+	BOT_SFJ_GOAL_ROUTE,
+	BOT_SFJ_GOAL_ENEMY,
+	BOT_SFJ_GOAL_FLAG_ATTACK,
+	BOT_SFJ_GOAL_FLAG_RECOVER,
+	BOT_SFJ_GOAL_FLAG_SCORE,
+	BOT_SFJ_GOAL_ESCORT,
+	BOT_SFJ_GOAL_OBJECTIVE
+} bot_sfj_goal_t;
+
+static inline const char *BotSFJ_GoalName(int goal)
+{
+	switch (goal)
+	{
+	case BOT_SFJ_GOAL_ROUTE: return "route-end";
+	case BOT_SFJ_GOAL_ENEMY: return "enemy";
+	case BOT_SFJ_GOAL_FLAG_ATTACK: return "enemy-flag";
+	case BOT_SFJ_GOAL_FLAG_RECOVER: return "recover-own-flag";
+	case BOT_SFJ_GOAL_FLAG_SCORE: return "score-flag";
+	case BOT_SFJ_GOAL_ESCORT: return "escort";
+	case BOT_SFJ_GOAL_OBJECTIVE: return "map-objective";
+	default: return "free-run";
+	}
+}
+
+static inline int BotSFJ_FlagGoal(int carrying, int ownUnsafe, float ownCost, float enemyCost)
+{
+	if (carrying)
+		return BOT_SFJ_GOAL_FLAG_SCORE;
+	if (ownUnsafe && ownCost >= 0.0f && (enemyCost < 0.0f || ownCost <= enemyCost))
+		return BOT_SFJ_GOAL_FLAG_RECOVER;
+	return BOT_SFJ_GOAL_FLAG_ATTACK;
+}
+
+static inline int BotSFJ_WallRunAllows(int navigation, int grounded, int nearbyEnemy,
+	int level, int forceAllowed, int force, int conflict, int retryReady)
+{
+	return navigation && grounded && !nearbyEnemy && level == 3 &&
+		forceAllowed && force >= 5 && !conflict && retryReady;
+}
+
+static inline int BotSFJ_LedgeRecoveryAllows(int grounded, int exclusiveMovement)
+{
+	return grounded && !exclusiveMovement;
+}
+
+/* Preserve sustained speed; a single exceptional sample must not dominate. */
+static inline float BotSFJ_RouteSpeedRating(float average, float peak)
+{
+	if (!isfinite(average) || !isfinite(peak) || average < 0.0f || peak < 0.0f)
+		return 0.0f;
+	return average * 0.65f + peak * 0.35f;
+}
+
+static inline int BotSFJ_RouteSupersedes(int newer, float startGap, float endGap,
+	int sameSpeedContext, int attempts, int completions, int oldAttempts,
+	int oldCompletions, float speed, float oldSpeed, int jumps, int oldJumps)
+{
+	return newer && sameSpeedContext && startGap <= 96.0f && endGap <= 192.0f &&
+		attempts >= 4 && oldAttempts >= 4 && completions >= 3 && jumps >= oldJumps &&
+		speed > oldSpeed * 1.05f &&
+		((float)completions + 1.0f) / (attempts + 2.0f) >=
+			((float)oldCompletions + 1.0f) / (oldAttempts + 2.0f);
+}
 
 static inline float BotSFJ_ClampSetting(float value, float minimum, float maximum)
 {
@@ -433,6 +502,26 @@ static inline void BotSFJ_RoutePaths(int count, const float *edges,
 	BotSFJ_RoutePathsWithParents(count, edges, seed, cost, first, NULL);
 }
 
+/* Never return a truncated path: its last point would not be the destination. */
+static inline int BotSFJ_WalkPath(int destination, const int *parent, int count,
+	int *path, int maximum)
+{
+	int reversed[BOT_SFJ_MAX_TRACK_ROUTES];
+	int used = 0, node = destination, i;
+
+	while (node >= 0)
+	{
+		if (node >= count || used >= count || used >= maximum ||
+			used >= BOT_SFJ_MAX_TRACK_ROUTES)
+			return 0;
+		reversed[used++] = node;
+		node = parent[node];
+	}
+	for (i = 0; i < used; i++)
+		path[i] = reversed[used - 1 - i];
+	return used;
+}
+
 /* Interrupted attempts are not collision failures. Unknown measurements stay neutral. */
 static inline float BotSFJ_TrackPerformance(float distance, float durationMs,
 	float speedIntegral, float referenceIntegral)
@@ -819,8 +908,8 @@ static inline float BotSFJ_OptimalWishOffset(float speed, float wishSpeed,
  * and clamp toward the route. side > 0 turns left (wish left of velocity).
  * Command axes get their own view-yaw compensation below.
  */
-static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float velocityY,
-	float wishSpeed, float airAccelerate, float commandSeconds, int side)
+static inline float BotSFJ_CommandYawCapped(float routeYaw, float velocityX, float velocityY,
+	float wishSpeed, float airAccelerate, float commandSeconds, int side, float wishCap)
 {
 	const float radiansToDegrees = 57.29577951308232f;
 	float speed = sqrtf(velocityX * velocityX + velocityY * velocityY);
@@ -842,8 +931,17 @@ static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float vel
 		extra = BOT_SFJ_HUMAN_EXTRA_MAX;
 	if (extra > 0.0f)
 		offset += extra;
-	if (offset > BOT_SFJ_WISH_OFFSET_MAX)
-		offset = BOT_SFJ_WISH_OFFSET_MAX;
+	wishCap = BotSFJ_ClampSetting(wishCap, BOT_SFJ_WISH_OFFSET_MAX, 110.0f);
+	/* Recorded corners deliberately trade acceleration for turning/braking. */
+	velocityYaw = atan2f(velocityY, velocityX) * radiansToDegrees;
+	if (wishCap > BOT_SFJ_WISH_OFFSET_MAX)
+	{
+		float turn = BotSFJ_AngleDelta(routeYaw, velocityYaw) * (side < 0 ? -1.0f : 1.0f);
+		if (turn > offset)
+			offset = turn;
+	}
+	if (offset > wishCap)
+		offset = wishCap;
 	velocityYaw = atan2f(velocityY, velocityX) * radiansToDegrees;
 	yaw = velocityYaw + (side < 0 ? -offset : offset);
 	if (BotSFJ_AngleDelta(yaw, routeYaw) > BOT_SFJ_ROUTE_CLAMP)
@@ -853,6 +951,20 @@ static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float vel
 	return yaw;
 }
 
+static inline float BotSFJ_CommandYaw(float routeYaw, float velocityX, float velocityY,
+	float wishSpeed, float airAccelerate, float commandSeconds, int side)
+{
+	return BotSFJ_CommandYawCapped(routeYaw, velocityX, velocityY, wishSpeed,
+		airAccelerate, commandSeconds, side, BOT_SFJ_WISH_OFFSET_MAX);
+}
+
+static inline float BotSFJ_CornerWishCap(int trusted, float turn, float yawRate)
+{
+	if (!trusted)
+		return BOT_SFJ_WISH_OFFSET_MAX;
+	return BotSFJ_ClampSetting(BOT_SFJ_WISH_OFFSET_MAX +
+		fabsf(turn) * 0.4f + fabsf(yawRate) * 0.08f, BOT_SFJ_WISH_OFFSET_MAX, 110.0f);
+}
 static inline int BotSFJ_SelectSide(float routeYaw, float velocityX, float velocityY,
 	int fallbackSide)
 {
