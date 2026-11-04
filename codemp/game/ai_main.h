@@ -660,6 +660,21 @@ typedef struct bot_state_s
 	float				sfjWallRunYaw;
 	int					sfjDebugInfoTime;	// level 2 strafe event limiter
 	int					sfjDebugBeatTime;	// level 2 strafe heartbeat
+	int					sfjDebugKindTime[8];	// per-kind limiter for categorised strafe debug
+	int					sfjDebugLineTime;	// level 3 in-game goal/start lines
+	int					sfjRouteCollisions;	// momentum collisions in this attempt
+	int					sfjRouteCollisionTime;
+	int					sfjApproachBlockedSince;	// sustained blocked walk to a route start
+	float				sfjVelYawPrev;		// velocity yaw tracking for early side switches
+	int					sfjVelYawTime;
+	float				sfjVelYawRate;
+	int					sfjEdgeStallCount;	// ledge escapes close together (edge dancing)
+	int					sfjEdgeStallTime;
+	vec3_t				sfjEdgeStallOrigin;
+	vec3_t				navLastSafeOrigin;	// last grounded spot with no lethal drop nearby
+	int					navLastSafeTime;
+	int					combatDebugTime;	// decision-first combat debug limiter
+	char				combatDebugLast[32];
 	int					combatDebugBeatTime;	// bot_combatdebug heartbeat
 	qboolean			sfjReplayActive;	// matched a recorded human sample this frame
 	int					sfjReplayCursor;	// monotonic sample cursor on the current route

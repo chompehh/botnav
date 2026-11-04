@@ -1,4 +1,5 @@
 #include <cstring>
+#include <string>
 #include <math.h>
 #include <limits>
 #include <cstdlib>
@@ -63,17 +64,26 @@ BOOST_AUTO_TEST_CASE( strafe_walk_graph_keeps_the_complete_goal_path )
 	BOOST_CHECK_EQUAL( BotSFJ_WalkPath(4, parent, 4, path, 4), 0 );
 }
 
-BOOST_AUTO_TEST_CASE( strafe_recorded_corners_allow_bounded_braking_with_both_sides )
+BOOST_AUTO_TEST_CASE( strafe_recorded_corners_turn_without_overshoot )
 {
-	const float cap = BotSFJ_CornerWishCap(1, 100, 120);
-	BOOST_CHECK_EQUAL( cap, 110.0f );
-	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(0, 100, 120), BOT_SFJ_WISH_OFFSET_MAX );
-	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(1, 0, 0), BOT_SFJ_WISH_OFFSET_MAX );
+	/* A sharp corner at speed needs the full 90 degrees, never more (more only brakes). */
+	const float cap = BotSFJ_CornerWishCap(1, 100, 200, 600, 250, 1);
+	BOOST_CHECK_EQUAL( cap, BOT_SFJ_CORNER_OFFSET_MAX );
+	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(0, 100, 200, 600, 250, 1), BOT_SFJ_WISH_OFFSET_MAX );
+	BOOST_CHECK_EQUAL( BotSFJ_CornerWishCap(1, 0, 200, 600, 250, 1), BOT_SFJ_WISH_OFFSET_MAX );
+	/* A gentle turn over a long way needs only part of the extra offset. */
+	{
+		const float gentle = BotSFJ_CornerRequiredOffset(3, 2000, 400, 250, 1);
+		BOOST_CHECK( gentle >= BOT_SFJ_WISH_OFFSET_MAX && gentle < BOT_SFJ_CORNER_OFFSET_MAX );
+		BOOST_CHECK( BotSFJ_CornerRequiredOffset(6, 2000, 400, 250, 1) >= gentle );
+	}
 	const float left = BotSFJ_CommandYawCapped(100, 600, 0, 250, 1, 0.033f, 1, cap);
 	const float right = BotSFJ_CommandYawCapped(-100, 600, 0, 250, 1, 0.033f, -1, cap);
-	BOOST_CHECK_CLOSE( left, 100.0f, 0.001f );
-	BOOST_CHECK_CLOSE( right, -100.0f, 0.001f );
-	BOOST_CHECK( cosf(left * 0.01745329252f) < 0 );
+	BOOST_CHECK_CLOSE( left, 90.0f, 0.001f );
+	BOOST_CHECK_CLOSE( right, -90.0f, 0.001f );
+	/* A small remaining turn is not overshot: the wish stays at the gain angle. */
+	BOOST_CHECK_CLOSE( BotSFJ_CommandYawCapped(20, 600, 0, 250, 1, 0.033f, 1, cap),
+		BotSFJ_CommandYaw(20, 600, 0, 250, 1, 0.033f, 1), 0.001f );
 	BOOST_CHECK_EQUAL( BotSFJ_CommandYawCapped(20, 600, 0, 250, 1, 0.033f, 1, 74),
 		BotSFJ_CommandYaw(20, 600, 0, 250, 1, 0.033f, 1) );
 }
@@ -4085,9 +4095,31 @@ BOOST_AUTO_TEST_CASE( force_speed_comes_only_from_human_speed_routes )
 	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( 0, 1, 0, 0 ) );
 	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( -1, 1, 0, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 1, 1, 0, 0 ) );
-	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 1, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( 0, 1, 1, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedShouldDrop( 0, 1, 1, 1 ) );
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 1, 0, 1 ) );
 	BOOST_CHECK( !BotSFJ_TrackSpeedShouldDrop( 0, 0, 0, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( speed_and_normal_routes_are_kept_apart )
+{
+	/* Speed route: only with Speed on at the recorded level, or switched on now. */
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( 1, 2, 1, 2, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( 1, 2, 1, 3, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedMatches( 1, 3, 1, 2, 1, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( 1, 2, 0, 0, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedMatches( 1, 2, 0, 0, 0, 1 ) );
+	/* Normal (or unknown) route: never followed under Speed the bot cannot drop. */
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( 0, 0, 0, 0, 0, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( -1, -1, 0, 0, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedMatches( 0, 0, 1, 3, 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedMatches( -1, -1, 1, 3, 1, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedMatches( 0, 0, 1, 3, 0, 1 ) );
+	/* Recording splits on either toggle. */
+	BOOST_CHECK( BotSFJ_TrackSpeedToggled( 0, 1 ) );
+	BOOST_CHECK( BotSFJ_TrackSpeedToggled( 1, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedToggled( 1, 1 ) );
+	BOOST_CHECK( !BotSFJ_TrackSpeedToggled( 0, 0 ) );
 }
 
 static bot_sfj_replay_sample_t ReplaySample(float x, float y, float z, float yaw, float velYaw,
@@ -4254,6 +4286,104 @@ BOOST_AUTO_TEST_CASE( combat_hazard_candidates_strafe_then_back_off_keeping_aim 
 	/* Strafing left prefers the left-side detour. */
 	BotSFJ_CombatHazardCandidates(80.0f, 0.0f, out, 5);
 	BOOST_CHECK_CLOSE( BotSFJ_AngleDelta(out[0], 0.0f), 90.0f, 0.01 );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_debug_levels_and_colours_are_separate )
+{
+	BOOST_CHECK( !BotSFJ_DebugShows(0, BOT_SFJ_DEBUG_DECISION) );
+	BOOST_CHECK( BotSFJ_DebugShows(1, BOT_SFJ_DEBUG_DECISION) );
+	BOOST_CHECK( BotSFJ_DebugShows(3, BOT_SFJ_DEBUG_DECISION) );
+	BOOST_CHECK( !BotSFJ_DebugShows(1, BOT_SFJ_DEBUG_ROUTE) );
+	BOOST_CHECK( BotSFJ_DebugShows(2, BOT_SFJ_DEBUG_ROUTE) );
+	BOOST_CHECK( !BotSFJ_DebugShows(3, BOT_SFJ_DEBUG_ROUTE) );
+	BOOST_CHECK( !BotSFJ_DebugShows(2, BOT_SFJ_DEBUG_MOTION) );
+	BOOST_CHECK( BotSFJ_DebugShows(3, BOT_SFJ_DEBUG_MOTION) );
+
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("route crosses LAVA", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_HAZARD );
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("near a ledge", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_EDGE );
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("corner wish cap", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_YAW );
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("approach blocked", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_FAIL );
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("trusting the human hop", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_GOOD );
+	BOOST_CHECK_EQUAL( BotSFJ_DebugTextTone("planning", BOT_SFJ_TONE_PLAN), BOT_SFJ_TONE_PLAN );
+	BOOST_CHECK_EQUAL( std::string(BotSFJ_DebugToneColor(BOT_SFJ_TONE_HAZARD)), "^1" );
+	BOOST_CHECK_EQUAL( std::string(BotSFJ_DebugToneColor(BOT_SFJ_TONE_EDGE)), "^8" );
+}
+
+BOOST_AUTO_TEST_CASE( trusted_human_routes_survive_a_single_setback )
+{
+	BOOST_CHECK( BotSFJ_CollisionEndsRoute(0, 1) );
+	BOOST_CHECK( !BotSFJ_CollisionEndsRoute(1, 1) );
+	BOOST_CHECK( BotSFJ_CollisionEndsRoute(1, 2) );
+
+	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 0, 5000) );
+	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 1000, 1200) );
+	BOOST_CHECK( BotSFJ_ApproachBlockEnds(0, 1000, 1250) );
+	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(1, 1000, 1500) );
+	BOOST_CHECK( BotSFJ_ApproachBlockEnds(1, 1000, 1600) );
+
+	BOOST_CHECK_EQUAL( BotSFJ_ReplaySlowLimitMs(1), BotSFJ_ReplaySlowLimitMs(0) * 2 );
+	/* Trust halves the time spent off course, so a brief wobble no longer aborts. */
+	BOOST_CHECK( BotSFJ_ReplayOffCourseTrusted(1000.0f, 400, 1, 1) <=
+		BotSFJ_ReplayOffCourseTrusted(1000.0f, 400, 1, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( route_start_approach_settles_on_the_exact_spot )
+{
+	BOOST_CHECK_CLOSE( BotSFJ_ApproachArrivalSpeed(500.0f), 400.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ApproachArrivalSpeed(48.0f), 200.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ApproachArrivalSpeed(0.0f), 140.0f, 0.01 );
+	BOOST_CHECK( BotSFJ_ApproachArrivalSpeed(96.0f) > BotSFJ_ApproachArrivalSpeed(64.0f) );
+}
+
+BOOST_AUTO_TEST_CASE( forward_route_starts_beat_backtracking )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_BacktrackCost(400.0f, 0.5f, 300.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_BacktrackCost(400.0f, 0.0f, 300.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_BacktrackCost(20.0f, -1.0f, 300.0f), 0.0f );
+	BOOST_CHECK( BotSFJ_BacktrackCost(400.0f, -1.0f, 300.0f) >
+		BotSFJ_BacktrackCost(400.0f, -0.5f, 300.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackCost(400.0f, -1.0f, 600.0f) >
+		BotSFJ_BacktrackCost(400.0f, -1.0f, 0.0f) );
+	/* A start right behind costs more than walking the same distance ahead. */
+	BOOST_CHECK( BotSFJ_BacktrackCost(200.0f, -1.0f, 0.0f) > 200.0f );
+}
+
+BOOST_AUTO_TEST_CASE( edge_dancing_is_detected_and_escapes_follow_the_target )
+{
+	BOOST_CHECK_EQUAL( BotNav_EdgeStallCount(0, 0, 0.0f, 1000), 1 );
+	BOOST_CHECK_EQUAL( BotNav_EdgeStallCount(1, 1000, 40.0f, 2000), 2 );
+	BOOST_CHECK_EQUAL( BotNav_EdgeStallCount(2, 2000, 40.0f, 3000), BOT_NAV_EDGE_STALL_ESCAPES );
+	BOOST_CHECK_EQUAL( BotNav_EdgeStallCount(2, 1000, 40.0f, 6000), 1 );
+	BOOST_CHECK_EQUAL( BotNav_EdgeStallCount(2, 2000, 200.0f, 2500), 1 );
+	BOOST_CHECK( BotNav_EdgeEscapeScore(48.0f, 1.0f, 1) > BotNav_EdgeEscapeScore(64.0f, -1.0f, 1) );
+	BOOST_CHECK( BotNav_EdgeEscapeScore(64.0f, -1.0f, 0) > BotNav_EdgeEscapeScore(48.0f, 1.0f, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( combat_respects_lethal_edges_more_than_routes )
+{
+	BOOST_CHECK_CLOSE( BotNav_CombatLookahead(0.0f), 96.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotNav_CombatLookahead(400.0f), 160.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotNav_CombatLookahead(2000.0f), 256.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotNav_JumpLandingDistance(300.0f, 225.0f, 800.0f), 168.75f, 0.01 );
+	BOOST_CHECK_EQUAL( BotNav_JumpLandingDistance(300.0f, 225.0f, 0.0f), 0.0f );
+	BOOST_CHECK( !BotNav_CombatFallTooCostly(0, 100) );
+	BOOST_CHECK( !BotNav_CombatFallTooCostly(60, 100) );
+	BOOST_CHECK( BotNav_CombatFallTooCostly(70, 100) );
+	BOOST_CHECK( BotNav_CombatFallTooCostly(20, 40) );
+}
+
+BOOST_AUTO_TEST_CASE( air_side_switch_leads_the_velocity_turn )
+{
+	const float vx = cosf(-5.0f / 57.29577951308232f) * 600.0f;
+	const float vy = sinf(-5.0f / 57.29577951308232f) * 600.0f;
+	int switched = 1;
+
+	/* Without lead the velocity is still short of the route: keep turning. */
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, 0.0f, 0.1f), 1 );
+	/* Turning fast toward the route: flip early instead of swinging past it. */
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, 200.0f, 0.1f), -1 );
+	/* The lead is capped so a noisy rate cannot flip a correct side wildly. */
+	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, -5000.0f, 0.1f), 1 );
 }
 
 BOOST_AUTO_TEST_SUITE_END()
