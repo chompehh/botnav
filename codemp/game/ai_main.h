@@ -619,6 +619,7 @@ typedef struct bot_state_s
 	qboolean			sfjRouteAcquiring;
 	qboolean			sfjRouteAttemptActive;
 	int					sfjRouteStarted;
+	int					sfjApproachStarted;
 	int					sfjRouteStat;
 	int					sfjRouteSpeedContext;
 	qboolean			sfjRouteHopLaunched;
@@ -679,6 +680,9 @@ typedef struct bot_state_s
 	qboolean			sfjReplayActive;	// matched a recorded human sample this frame
 	int					sfjReplayCursor;	// monotonic sample cursor on the current route
 	int					sfjReplaySample;	// matched sample index (-1 none)
+	int					sfjReplayClockNode;
+	int					sfjReplayClockStart;
+	int					sfjReplayClockBase;
 	float				sfjReplayDeviation;	// distance from the human path
 	float				sfjReplayCross;		// signed distance, positive = left of the human path
 	float				sfjReplayBotSpeed;
@@ -708,6 +712,9 @@ typedef struct bot_state_s
 	int					sfjPlannedEntry;
 	qboolean			sfjPlannedRetreat;
 	int					sfjLastRoute;
+	int					sfjRecentRoutes[4];
+	int					sfjRecentRouteHead;
+	int					sfjRecentRouteUntil;
 	int					sfjNextWaypointAcquire;
 	vec3_t				sfjApproachTarget;	// current walk target while approaching a circle start
 	float				sfjApproachRunup;	// run-up distance behind the circle start (0 = walk straight to it)

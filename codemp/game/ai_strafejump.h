@@ -2,6 +2,7 @@
 #define AI_STRAFEJUMP_H
 
 #include <math.h>
+#include <stddef.h>
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
@@ -10,6 +11,7 @@
 #define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
 #define BOT_SFJ_MAX_TRACK_ROUTES 256
+#define BOT_SFJ_TRACK_MAX_NODES 32
 #define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
 #define BOT_SFJ_PURSUIT_STOP_DISTANCE 384.0f
@@ -177,16 +179,6 @@ static inline int BotSFJ_TrackResolvedAttempts(int attempts, int completions, in
 	if (interrupted > 0)
 		attempts -= interrupted;
 	return attempts > completions ? attempts : completions;
-}
-
-static inline float BotSFJ_TrackStallFactor(int stalls)
-{
-	float factor;
-
-	if (stalls <= 0)
-		return 1.0f;
-	factor = powf(0.65f, (float)stalls);
-	return factor < 0.1f ? 0.1f : factor;
 }
 
 static inline int BotSFJ_TrackForceJumpChargeAllows(int route, int forceJumpHop,
@@ -416,7 +408,54 @@ static inline int BotSFJ_HopRetryDelay(int failures, int lethal)
 
 static inline float BotSFJ_HopReliability(int failures, int passes)
 {
-	return ((float)passes + 1.0f) / ((float)passes + 1.0f + 4.0f * failures);
+	return 0.25f + 0.75f *
+		((float)passes + 1.0f) / ((float)passes + 1.0f + 4.0f * failures);
+}
+
+static inline void BotSFJ_HopEvidenceBound(int *failures, int *passes)
+{
+	while (*failures > 16 || *passes > 16 || *failures + *passes > 24)
+	{
+		*failures = *failures / 2 + *failures % 2;
+		*passes = *passes / 2 + *passes % 2;
+	}
+}
+
+static inline void BotSFJ_HopEvidenceNote(int *failures, int *passes, int success)
+{
+	BotSFJ_HopEvidenceBound(failures, passes);
+	if (success)
+		++*passes;
+	else
+		++*failures;
+}
+
+/* A failed suffix must not erase the value of the hops before it. */
+static inline float BotSFJ_HopRangeEvidence(const int *failures, const int *passes,
+	int entry, int end, int *attempts, int *successes)
+{
+	float reliability = 0.0f;
+	int i;
+
+	*attempts = *successes = 0;
+	if (entry < 0 || end <= entry || end > BOT_SFJ_TRACK_MAX_NODES)
+		return 1.0f;
+	for (i = entry; i < end; i++)
+	{
+		*successes += passes[i];
+		*attempts += passes[i] + failures[i];
+		reliability += BotSFJ_HopReliability(failures[i], passes[i]);
+	}
+	return reliability / (float)(end - entry);
+}
+
+static inline int BotSFJ_AvailablePrefixEnd(const int *available, int count, int entry)
+{
+	int end = entry;
+
+	while (end < count && available[end])
+		end++;
+	return end;
 }
 
 static inline int BotSFJ_MomentumCollision(float before, float after,
@@ -431,6 +470,19 @@ static inline int BotSFJ_MomentumCollision(float before, float after,
 static inline int BotSFJ_GroundRestart(int groundMs, float takeoffDistance)
 {
 	return groundMs >= 250 || takeoffDistance > 48.0f;
+}
+
+static inline int BotSFJ_HopNeedsApproach(int grounded, int launched,
+	int groundMs, float takeoffDistance)
+{
+	return grounded && !launched && groundMs >= 0 &&
+		BotSFJ_GroundRestart(groundMs, takeoffDistance);
+}
+
+static inline int BotSFJ_ApproachTimedOut(int started, int lastProgress, int now)
+{
+	return now - started > BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS + 12000 ||
+		now - lastProgress > 2000;
 }
 
 static inline float BotSFJ_GoalRouteScore(float before, float after, float cost)
@@ -476,8 +528,8 @@ static inline int BotSFJ_BackwardRouteEscape(int retreat, int saberOnly, int ena
 
 /* Multi-source Dijkstra: seeds are safe approaches, edges are safe connectors.
  * A negative cost means unreachable; first[] keeps the acquisition route. */
-static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
-	const float *seed, float *cost, int *first, int *parent)
+static inline void BotSFJ_RoutePathsDirected(int count, const float *edges,
+	const float *seed, float *cost, int *first, int *parent, const int *backtrack)
 {
 	int visited[BOT_SFJ_MAX_TRACK_ROUTES];
 	int i, j, step, best;
@@ -497,7 +549,10 @@ static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
 		best = -1;
 		for (i = 0; i < count; i++)
 			if (!visited[i] && cost[i] >= 0.0f &&
-				(best < 0 || cost[i] < cost[best]))
+				(best < 0 ||
+				 (backtrack && backtrack[first[i]] < backtrack[first[best]]) ||
+				 ((!backtrack || backtrack[first[i]] == backtrack[first[best]]) &&
+				  cost[i] < cost[best])))
 				best = i;
 		if (best < 0)
 			break;
@@ -508,7 +563,10 @@ static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
 			const float next = cost[best] + edge;
 
 			if (!visited[j] && edge >= 0.0f &&
-				(cost[j] < 0.0f || next < cost[j]))
+				(cost[j] < 0.0f ||
+				 (backtrack && backtrack[first[best]] < backtrack[first[j]]) ||
+				 ((!backtrack || backtrack[first[best]] == backtrack[first[j]]) &&
+				  next < cost[j])))
 			{
 				cost[j] = next;
 				first[j] = first[best];
@@ -517,6 +575,12 @@ static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
 			}
 		}
 	}
+}
+
+static inline void BotSFJ_RoutePathsWithParents(int count, const float *edges,
+	const float *seed, float *cost, int *first, int *parent)
+{
+	BotSFJ_RoutePathsDirected(count, edges, seed, cost, first, parent, NULL);
 }
 
 static inline void BotSFJ_RoutePaths(int count, const float *edges,
@@ -1830,7 +1894,6 @@ static inline int BotSFJ_SlowedOut(float peakSpeed, float horizontalSpeed, float
 #define BOT_SFJ_TRACK_END_MS 150
 #define BOT_SFJ_TRACK_MIN_NODES 2
 #define BOT_SFJ_TRACK_MIN_DISTANCE 256.0f
-#define BOT_SFJ_TRACK_MAX_NODES 32
 
 static inline int BotSFJ_TrackCircleJumpStart(int grounded, int forwardMove, int rightMove,
 	float yawRate, float horizontalSpeed, float groundSpeed, int jumpPressed)
@@ -2091,19 +2154,7 @@ static inline float BotSFJ_TrackRouteSuccess(int attempts, int completions)
 	return ((float)completions + 1.0f) / ((float)attempts + 2.0f);
 }
 
-/* After a few attempts with no completion a route's score halves every two
- * further failures, so the bots fall back to routes they actually finish. */
 #define BOT_SFJ_TRACK_FAIL_GRACE 4
-
-static inline float BotSFJ_TrackFailureDecay(int attempts, int completions)
-{
-	float decay;
-
-	if (completions > 0 || attempts < BOT_SFJ_TRACK_FAIL_GRACE)
-		return 1.0f;
-	decay = powf(0.5f, (float)(attempts - BOT_SFJ_TRACK_FAIL_GRACE + 1) * 0.5f);
-	return decay < 0.05f ? 0.05f : decay;
-}
 
 static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageSpeed,
 	int attempts, int completions, float entryDistance, float pickupRadius)
@@ -2123,15 +2174,13 @@ static inline float BotSFJ_TrackRouteScore(float remainingLength, float averageS
 	if (nearFactor > 1.0f)
 		nearFactor = 1.0f;
 	return remainingLength * speedFactor *
-		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor *
-		BotSFJ_TrackFailureDecay(attempts, completions);
+		(0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * nearFactor;
 }
 
 /*
  * Export ranking multiplier applied to the human value (length x speed) of a
  * recorded route: neutral until the bots have tried it a few times, then the
- * bots' success rate and measured speed retention, with routes that never get
- * completed dropping first.
+ * hop success rate and measured speed retention, without lifetime penalties.
  */
 static inline float BotSFJ_TrackExportFactor(int attempts, int completions, float performance)
 {
@@ -2141,9 +2190,9 @@ static inline float BotSFJ_TrackExportFactor(int attempts, int completions, floa
 		return 1.0f;
 	if (!(performance > 0.0f) || !isfinite(performance))
 		performance = 1.0f;
-	factor = (0.25f + 1.5f * BotSFJ_TrackRouteSuccess(attempts, completions)) * performance *
-		BotSFJ_TrackFailureDecay(attempts, completions);
-	return BotSFJ_ClampSetting(factor, 0.05f, 3.0f);
+	factor = (0.5f + BotSFJ_TrackRouteSuccess(attempts, completions)) *
+		BotSFJ_ClampSetting(performance, 0.5f, 1.5f);
+	return BotSFJ_ClampSetting(factor, 0.35f, 2.0f);
 }
 
 /*
@@ -2160,9 +2209,16 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
  * Human route replay. Exported routes carry decimated per-command samples
  * (position, view yaw, velocity yaw, speed, keys) and recorded vertical
  * wallruns, so bots copy the human's yaw and keys at each point of the route
- * instead of one universal corner rule.
+ * instead of one universal corner rule. replay_samples declares the exact
+ * input count; both sides of key/node/flag transitions survive decimation.
+ * Readers share a dynamically allocated budget and reject an unrepresentable
+ * route, never silently truncate it to the legacy fixed-slot limit.
  */
+/* Legacy fixed slots; new readers allocate only samples actually recorded. */
 #define BOT_SFJ_REPLAY_MAX_SAMPLES 256
+#define BOT_SFJ_REPLAY_ROUTE_SAMPLES 4096
+#define BOT_SFJ_REPLAY_TOTAL_SAMPLES 131072
+#define BOT_SFJ_REPLAY_MAX_SOURCE_SAMPLES 65536
 #define BOT_SFJ_REPLAY_MAX_WALLRUNS 4
 #define BOT_SFJ_REPLAY_FLAG_GROUNDED 1
 #define BOT_SFJ_REPLAY_FLAG_JUMP 2
@@ -2174,6 +2230,8 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 #define BOT_SFJ_REPLAY_KEEP_MS 100
 #define BOT_SFJ_REPLAY_MATCH_WINDOW 32
 #define BOT_SFJ_REPLAY_MATCH_HEIGHT 128.0f
+#define BOT_SFJ_REPLAY_STATIC_DISTANCE 1.0f
+#define BOT_SFJ_REPLAY_LOOKAHEAD_MS 50
 #define BOT_SFJ_REPLAY_YAW_CORRECTION 10.0f
 #define BOT_SFJ_REPLAY_YAW_DEADBAND 3.0f
 #define BOT_SFJ_REPLAY_CROSS_GAIN 0.08f
@@ -2221,6 +2279,22 @@ static inline int BotSFJ_ReplaySign(int value)
 	return value > 0 ? 1 : (value < 0 ? -1 : 0);
 }
 
+static inline int BotSFJ_ReplayStateChanged(const bot_sfj_replay_sample_t *a,
+	const bot_sfj_replay_sample_t *b)
+{
+	return a->forward != b->forward || a->right != b->right || a->up != b->up ||
+		a->flags != b->flags || a->node != b->node;
+}
+
+/* Preserve both edges of an interval, including one-command ground contacts. */
+static inline int BotSFJ_ReplayEssential(const bot_sfj_replay_sample_t *samples, int count, int i)
+{
+	if (i <= 0 || i >= count - 1)
+		return 1;
+	return BotSFJ_ReplayStateChanged(&samples[i - 1], &samples[i]) ||
+		BotSFJ_ReplayStateChanged(&samples[i], &samples[i + 1]);
+}
+
 /* Decimation for export: keep key/flag changes and every 20 units, 4 degrees or 100 ms. */
 static inline int BotSFJ_ReplayKeepSample(const bot_sfj_replay_sample_t *kept,
 	const bot_sfj_replay_sample_t *sample)
@@ -2229,10 +2303,7 @@ static inline int BotSFJ_ReplayKeepSample(const bot_sfj_replay_sample_t *kept,
 
 	if (!kept)
 		return 1;
-	if (BotSFJ_ReplaySign(kept->forward) != BotSFJ_ReplaySign(sample->forward) ||
-		BotSFJ_ReplaySign(kept->right) != BotSFJ_ReplaySign(sample->right) ||
-		BotSFJ_ReplaySign(kept->up) != BotSFJ_ReplaySign(sample->up) ||
-		((kept->flags ^ sample->flags) & ~BOT_SFJ_REPLAY_FLAG_WALLKNOWN) || kept->node != sample->node)
+	if (BotSFJ_ReplayStateChanged(kept, sample))
 		return 1;
 	dx = sample->origin[0] - kept->origin[0];
 	dy = sample->origin[1] - kept->origin[1];
@@ -2241,6 +2312,44 @@ static inline int BotSFJ_ReplayKeepSample(const bot_sfj_replay_sample_t *kept,
 	if (fabsf(BotSFJ_AngleDelta(sample->yaw, kept->yaw)) >= BOT_SFJ_REPLAY_KEEP_YAW)
 		return 1;
 	return sample->timeMs - kept->timeMs >= BOT_SFJ_REPLAY_KEEP_MS;
+}
+
+/*
+ * Return the complete required count. A NULL or undersized output is a sizing
+ * query, never a partial replay. Input and output must not overlap.
+ */
+static inline int BotSFJ_ReplayDecimate(const bot_sfj_replay_sample_t *samples, int count,
+	bot_sfj_replay_sample_t *output, int capacity)
+{
+	const bot_sfj_replay_sample_t *last = NULL;
+	int i, needed = 0, pass;
+
+	if (!samples || count <= 0)
+		return 0;
+	for (pass = 0; pass < 2; pass++)
+	{
+		last = NULL;
+		needed = 0;
+		for (i = 0; i < count; i++)
+		{
+			if (!BotSFJ_ReplayEssential(samples, count, i) &&
+				!BotSFJ_ReplayKeepSample(last, &samples[i]))
+				continue;
+			if (pass)
+				output[needed] = samples[i];
+			needed++;
+			last = &samples[i];
+		}
+		if (!output || needed > capacity)
+			break;
+	}
+	return needed;
+}
+
+static inline int BotSFJ_ReplayFitsBudget(int used, int count)
+{
+	return used >= 0 && used <= BOT_SFJ_REPLAY_TOTAL_SAMPLES && count >= 2 &&
+		count <= BOT_SFJ_REPLAY_ROUTE_SAMPLES && count <= BOT_SFJ_REPLAY_TOTAL_SAMPLES - used;
 }
 
 /*
@@ -2315,6 +2424,85 @@ static inline int BotSFJ_ReplayMatch(const bot_sfj_replay_sample_t *samples, int
 	if (fraction)
 		*fraction = bestFraction;
 	return best;
+}
+
+/*
+ * Timed match for one hop. node is the upcoming landing index stored in each
+ * sample. The cursor never moves backward or into another hop. Samples at the
+ * same position are skipped only once their recorded time is due
+ * (recordedTimeMs >= sample time; negative disables timing). Distinct
+ * geometry may still match ahead of the clock, inside the usual window.
+ */
+static inline int BotSFJ_ReplayMatchTimed(const bot_sfj_replay_sample_t *samples, int count, int cursor,
+	const float *origin, int node, int recordedTimeMs, float *deviation, float *cross, float *fraction)
+{
+	int i, best = -1, last;
+	float bestDistance = 0.0f, bestCross = 0.0f, bestFraction = 0.0f;
+
+	if (!samples || count <= 0 || !origin)
+		return -1;
+	if (cursor < 0)
+		cursor = 0;
+	if (cursor >= count)
+		cursor = count - 1;
+	while (cursor < count && samples[cursor].node < node)
+		cursor++;
+	if (cursor >= count || samples[cursor].node != node)
+		return -1;
+	while (recordedTimeMs >= 0 && cursor + 1 < count && samples[cursor + 1].node == node &&
+		samples[cursor + 1].timeMs <= recordedTimeMs)
+	{
+		const float dx = samples[cursor + 1].origin[0] - samples[cursor].origin[0];
+		const float dy = samples[cursor + 1].origin[1] - samples[cursor].origin[1];
+		const float dz = samples[cursor + 1].origin[2] - samples[cursor].origin[2];
+
+		if (dx * dx + dy * dy + dz * dz >
+			BOT_SFJ_REPLAY_STATIC_DISTANCE * BOT_SFJ_REPLAY_STATIC_DISTANCE)
+			break;
+		cursor++;
+	}
+	last = cursor + BOT_SFJ_REPLAY_MATCH_WINDOW;
+	if (last > count - 1)
+		last = count - 1;
+	for (i = cursor; i <= last && samples[i].node == node; i++)
+	{
+		const bot_sfj_replay_sample_t *a = &samples[i];
+		const bot_sfj_replay_sample_t *b = &samples[i + 1 < count ? i + 1 : i];
+		float distance, offset, t, z;
+
+		offset = BotSFJ_ReplaySegmentOffset(a->origin, b->origin, origin, &t, &distance);
+		z = a->origin[2] + (b->origin[2] - a->origin[2]) * t;
+		if (fabsf(origin[2] - z) > BOT_SFJ_REPLAY_MATCH_HEIGHT)
+			continue;
+		if (best < 0 || distance < bestDistance - 0.01f)
+		{
+			best = i;
+			bestDistance = distance;
+			bestCross = offset;
+			bestFraction = t;
+		}
+	}
+	if (deviation)
+		*deviation = bestDistance;
+	if (cross)
+		*cross = bestCross;
+	if (fraction)
+		*fraction = bestFraction;
+	return best;
+}
+
+/* Up to aheadMs later, stopping before any key, flag or node change; may return index. */
+static inline int BotSFJ_ReplayLookAhead(const bot_sfj_replay_sample_t *samples, int count, int index,
+	int aheadMs)
+{
+	int i;
+
+	if (!samples || index < 0 || index >= count)
+		return -1;
+	for (i = index + 1; i < count && samples[i].timeMs - samples[index].timeMs <= aheadMs &&
+		!BotSFJ_ReplayStateChanged(&samples[i - 1], &samples[i]); i++)
+		;
+	return i - 1;
 }
 
 static inline float BotSFJ_ReplayClamp(float value, float limit)
@@ -2687,6 +2875,26 @@ static inline float BotSFJ_BacktrackCost(float startDistance, float alignment, f
 	if (behind > 1.0f)
 		behind = 1.0f;
 	return startDistance * behind * 1.5f + (speed > 0.0f ? speed * 0.5f : 0.0f);
+}
+
+static inline int BotSFJ_StartIsBacktrack(float distance, float alignment)
+{
+	return distance > 32.0f && alignment < -0.17f;
+}
+
+static inline int BotSFJ_DirectionSector(float x, float y)
+{
+	int sector = (int)floorf(atan2f(y, x) * 1.2732395447351627f + 0.5f);
+
+	return (sector + 8) % 8;
+}
+
+/* Direction is a priority, not a small cost that route quality can overwhelm. */
+static inline int BotSFJ_ForwardRouteBetter(float score, int backtrack,
+	float bestScore, int bestBacktrack)
+{
+	return score > 0.0f && (bestScore <= 0.0f || backtrack < bestBacktrack ||
+		(backtrack == bestBacktrack && score > bestScore));
 }
 
 /* ---- Edge dancing ---- */

@@ -12678,6 +12678,12 @@ static void G_StrafeTrackAppend(strafetrack_text_t *text, const char *chunk)
 
 	if (!text->data)
 		return;
+	if (len >= STRAFETRACK_ROUTE_FILE_MAX - text->length)
+	{
+		free(text->data);
+		text->data = NULL;
+		return;
+	}
 	if (text->length + len + 1 > text->capacity)
 	{
 		int capacity = text->capacity * 2;
@@ -12803,45 +12809,65 @@ static int G_StrafeTrackCompareScore(const void *a, const void *b)
 
 //Writes botroutes/<map>.botroute keeping any hand-written blocks outside the recorded section.
 /*
- * Human replay for one route: decimated per-command samples (yaw, velocity
- * yaw, keys) and vertical wallruns with the time until the second jump that
- * left the wall. Wallruns in routes recorded before wall_run existed are
- * inferred from movement and marked as such.
+ * Never emit a replay prefix: every state transition must fit the reader's
+ * bounded sample budget. The caller rolls back the whole route on failure.
  */
-static void G_StrafeTrackAppendReplay(sqlite3 *db, strafetrack_text_t *text, sqlite3_int64 routeId,
+static qboolean G_StrafeTrackAppendReplay(sqlite3 *db, strafetrack_text_t *text, sqlite3_int64 routeId,
 	int *samplesOut, int *wallsOut)
 {
 	sqlite3_stmt *stmt = NULL;
 	bot_sfj_replay_sample_t *rows = NULL, *grown, *kept = NULL;
-	bot_sfj_replay_wallrun_t walls[BOT_SFJ_REPLAY_MAX_WALLRUNS];
+	bot_sfj_replay_wallrun_t walls[BOT_SFJ_REPLAY_MAX_WALLRUNS + 1];
 	int nodeTimes[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeCount = 0, count = 0, capacity = 0, keptCount = 0, wallCount, i, node;
+	int status;
+	const char *failure = "replay query failed";
 
 	if (sqlite3_prepare_v2(db, "SELECT time_ms FROM LocalStrafeRouteNode WHERE route_id = ? ORDER BY node_index",
 		-1, &stmt, NULL) != SQLITE_OK)
-		return;
+		goto failed;
 	sqlite3_bind_int64(stmt, 1, routeId);
-	while (sqlite3_step(stmt) == SQLITE_ROW && nodeCount < BOT_SFJ_TRACK_MAX_NODES)
+	while ((status = sqlite3_step(stmt)) == SQLITE_ROW)
+	{
+		if (nodeCount >= BOT_SFJ_TRACK_MAX_NODES)
+		{
+			failure = "too many landing nodes";
+			goto failed;
+		}
 		nodeTimes[nodeCount++] = sqlite3_column_int(stmt, 0);
+	}
+	if (status != SQLITE_DONE)
+		goto failed;
 	sqlite3_finalize(stmt);
 	stmt = NULL;
 	if (nodeCount <= 0)
-		return;
+	{
+		failure = "missing landing nodes";
+		goto failed;
+	}
 	if (sqlite3_prepare_v2(db, "SELECT time_ms, x, y, z, yaw, vel_x, vel_y, speed, forwardmove, rightmove, "
 		"upmove, grounded, jump_held, force_jump, wall_run FROM LocalStrafeRouteInput "
 		"WHERE route_id = ? AND time_ms >= 0 ORDER BY frame", -1, &stmt, NULL) != SQLITE_OK)
-		return;
+		goto failed;
 	sqlite3_bind_int64(stmt, 1, routeId);
-	while (sqlite3_step(stmt) == SQLITE_ROW)
+	while ((status = sqlite3_step(stmt)) == SQLITE_ROW)
 	{
 		bot_sfj_replay_sample_t *row;
 
+		if (count >= BOT_SFJ_REPLAY_MAX_SOURCE_SAMPLES)
+		{
+			failure = "source command limit exceeded";
+			goto failed;
+		}
 		if (count >= capacity)
 		{
 			capacity = capacity ? capacity * 2 : 1024;
 			grown = (bot_sfj_replay_sample_t *)realloc(rows, sizeof(*rows) * capacity);
 			if (!grown)
-				break;
+			{
+				failure = "source command allocation failed";
+				goto failed;
+			}
 			rows = grown;
 		}
 		row = &rows[count];
@@ -12882,31 +12908,45 @@ static void G_StrafeTrackAppendReplay(sqlite3 *db, strafetrack_text_t *text, sql
 		row->node = node;
 		count++;
 	}
+	if (status != SQLITE_DONE)
+		goto failed;
 	sqlite3_finalize(stmt);
+	stmt = NULL;
+	/* Legacy routes without any recorded commands still provide node hints. */
+	if (!count)
+		return qtrue;
 	if (count < 2)
 	{
-		free(rows);
-		return;
+		failure = "incomplete command stream";
+		goto failed;
 	}
-	wallCount = BotSFJ_ReplayScanWallRuns(rows, count, walls, BOT_SFJ_REPLAY_MAX_WALLRUNS);
-	kept = (bot_sfj_replay_sample_t *)malloc(sizeof(*kept) * count);
-	if (kept)
+	wallCount = BotSFJ_ReplayScanWallRuns(rows, count, walls, BOT_SFJ_REPLAY_MAX_WALLRUNS + 1);
+	if (wallCount > BOT_SFJ_REPLAY_MAX_WALLRUNS)
 	{
-		for (i = 0; i < count; i++)
-			if (BotSFJ_ReplayKeepSample(keptCount ? &kept[keptCount - 1] : NULL, &rows[i]) || i == count - 1)
-				kept[keptCount++] = rows[i];
-		for (i = 0; i < BOT_SFJ_REPLAY_MAX_SAMPLES && i < keptCount; i++)
-		{
-			const bot_sfj_replay_sample_t *r = &kept[keptCount > BOT_SFJ_REPLAY_MAX_SAMPLES ?
-				(int)((long long)i * (keptCount - 1) / (BOT_SFJ_REPLAY_MAX_SAMPLES - 1)) : i];
+		failure = "wallrun representation limit exceeded";
+		goto failed;
+	}
+	keptCount = BotSFJ_ReplayDecimate(rows, count, NULL, 0);
+	if (!BotSFJ_ReplayFitsBudget(samplesOut ? *samplesOut : 0, keptCount))
+	{
+		failure = "lossless replay sample budget exceeded";
+		goto failed;
+	}
+	kept = (bot_sfj_replay_sample_t *)malloc(sizeof(*kept) * keptCount);
+	if (!kept)
+	{
+		failure = "replay sample allocation failed";
+		goto failed;
+	}
+	BotSFJ_ReplayDecimate(rows, count, kept, keptCount);
+	G_StrafeTrackAppend(text, va("\treplay_samples %i\n", keptCount));
+	for (i = 0; i < keptCount; i++)
+	{
+		const bot_sfj_replay_sample_t *r = &kept[i];
 
-			G_StrafeTrackAppend(text, va("\tinput %i %i %.1f %.1f %.1f %.1f %.1f %.0f %i %i %i %i\n",
-				r->node, r->timeMs, r->origin[0], r->origin[1], r->origin[2], r->yaw, r->velYaw, r->speed,
-				r->forward, r->right, r->up, r->flags));
-		}
-		if (samplesOut)
-			*samplesOut += i;
-		free(kept);
+		G_StrafeTrackAppend(text, va("\tinput %i %i %.1f %.1f %.1f %.1f %.1f %.0f %i %i %i %i\n",
+			r->node, r->timeMs, r->origin[0], r->origin[1], r->origin[2], r->yaw, r->velYaw, r->speed,
+			r->forward, r->right, r->up, r->flags));
 	}
 	for (i = 0; i < wallCount; i++)
 		G_StrafeTrackAppend(text, va("\twallrun %i %.1f %.1f %.1f %.1f %i %i %i %i\n",
@@ -12914,7 +12954,19 @@ static void G_StrafeTrackAppendReplay(sqlite3 *db, strafetrack_text_t *text, sql
 			walls[i].airMs, walls[i].jumpOffMs, walls[i].exitKind, walls[i].inferred));
 	if (wallsOut)
 		*wallsOut += wallCount;
+	if (samplesOut)
+		*samplesOut += keptCount;
+	free(kept);
 	free(rows);
+	return qtrue;
+
+failed:
+	trap->Print(S_COLOR_YELLOW "exportStrafeTrack: route %lld omitted: %s (%i commands, %i replay samples).\n",
+		(long long)routeId, failure, count, keptCount);
+	sqlite3_finalize(stmt);
+	free(kept);
+	free(rows);
+	return qfalse;
 }
 
 static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qboolean quiet)
@@ -12926,6 +12978,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	static float candidateMaxSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
 	static float candidateAverageSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
 	static float candidateScores[STRAFETRACK_EXPORT_CANDIDATES];
+	static strafetrack_export_coverage_t candidateCoverage[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateSpeedActive[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateSpeedLevel[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateObjectiveSuccess[STRAFETRACK_EXPORT_CANDIDATES];
@@ -12934,7 +12987,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	static float sortedStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
 	static float sortedSpeeds[STRAFETRACK_EXPORT_CANDIDATES];
 	static unsigned char candidatePicked[STRAFETRACK_EXPORT_CANDIDATES];
-	static float coverageStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
+	static strafetrack_export_coverage_t coverageRoutes[STRAFETRACK_EXPORT_CANDIDATES];
 	static int coverageIndices[STRAFETRACK_EXPORT_CANDIDATES];
 	static unsigned char coveragePicked[STRAFETRACK_EXPORT_CANDIDATES];
 	int groupCounts[5] = {0, 0, 0, 0, 0};
@@ -13024,16 +13077,16 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 
 	G_StrafeTrackAppend(&text, STRAFETRACK_BEGIN_MARKER "\n");
 	//Long, fast human routes first (length x average speed), weighted by how well the bots
-	//complete them; the per-map limit is then spread over distinct start areas so other
-	//routes elsewhere on the map are not dropped. Bot recordings are never exported.
+	//complete them; spread the limit over starts and destinations. Objective markers
+	//lack phase/role context and are metadata, not a route-quality multiplier.
 	if (sqlite3_prepare_v2(db, "SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
 		"(r.distance * r.distance / MAX(r.duration_ms, 1)), n.x, n.y, n.z, r.speed_active, r.speed_level, "
-		"r.objective_success, r.created, r.max_speed, r.distance, r.duration_ms "
+		"r.objective_success, r.created, r.max_speed, r.distance, r.duration_ms, "
+		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style "
 		"FROM LocalStrafeRoute r "
 		"LEFT JOIN LocalStrafeRouteNode n ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ? AND r.node_count >= ? AND COALESCE(r.bot, 0) = 0 "
-		"ORDER BY (r.distance * r.distance / MAX(r.duration_ms, 1)) * "
-		"(1.0 + 0.1 * (COALESCE(r.objective_success,0)>0)) DESC, r.distance DESC LIMIT ?",
+		"ORDER BY (r.distance * r.distance / MAX(r.duration_ms, 1)) DESC, r.distance DESC LIMIT ?",
 		-1, &routes, NULL) == SQLITE_OK &&
 		sqlite3_prepare_v2(db, "SELECT x, y, z, speed, side, air_ms, side_only_pct, switch_pct, first_side, "
 		"takeoff_yaw_rate, air_yaw_rate, force_jump, force_height, speed_active, speed_level, "
@@ -13063,19 +13116,26 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			candidateAverageSpeeds[candidates] = sqlite3_column_int(routes, 15) > 0 ?
 				(float)(sqlite3_column_double(routes, 14) * 1000.0 /
 					sqlite3_column_int(routes, 15)) : 0.0f;
-			if (candidateObjectiveSuccess[candidates] > 0)
-				candidateScores[candidates] *= 1.1f;
 			candidateSpeedActive[candidates] = sqlite3_column_type(routes, 9) == SQLITE_NULL ?
 				-1 : sqlite3_column_int(routes, 9);
 			candidateSpeedLevel[candidates] = sqlite3_column_type(routes, 10) == SQLITE_NULL ?
 				-1 : sqlite3_column_int(routes, 10);
+			VectorCopy(&candidateStarts[candidates * 3], candidateCoverage[candidates].start);
+			candidateCoverage[candidates].haveEnd = sqlite3_column_type(routes, 6) != SQLITE_NULL;
+			candidateCoverage[candidates].forceJump = sqlite3_column_type(routes, 16) == SQLITE_NULL ?
+				-1 : sqlite3_column_int(routes, 16);
+			candidateCoverage[candidates].moveStyle = sqlite3_column_type(routes, 17) == SQLITE_NULL ?
+				-1 : sqlite3_column_int(routes, 17);
 			if (sqlite3_column_type(routes, 6) != SQLITE_NULL)
 			{
 				end[0] = (float)sqlite3_column_double(routes, 6);
 				end[1] = (float)sqlite3_column_double(routes, 7);
 				end[2] = (float)sqlite3_column_double(routes, 8);
+				VectorCopy(end, candidateCoverage[candidates].end);
 				candidateScores[candidates] *= BotSFJ_RouteExportFactor(mapname,
-					&candidateStarts[candidates * 3], end);
+					&candidateStarts[candidates * 3], end, (int)candidateIds[candidates],
+					candidateCreated[candidates], candidateSpeedActive[candidates],
+					candidateSpeedLevel[candidates]);
 			}
 			candidateOrder[candidates] = candidates;
 			candidates++;
@@ -13103,11 +13163,10 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 
 				if (BotSFJ_TrackSpeedGroup(candidateSpeedActive[k], candidateSpeedLevel[k]) != group)
 					continue;
-				VectorCopy(&sortedStarts[c * 3], &coverageStarts[count * 3]);
+				coverageRoutes[count] = candidateCoverage[k];
 				coverageIndices[count++] = c;
 			}
-			BotSFJ_TrackSelectCoverage(coverageStarts, count, groupQuotas[group],
-				STRAFETRACK_COVERAGE_SPACING, coveragePicked);
+			G_StrafeTrackSelectExportCoverage(coverageRoutes, count, groupQuotas[group], coveragePicked);
 			for (c = 0; c < count; c++)
 				if (coveragePicked[c])
 					candidatePicked[coverageIndices[c]] = 1;
@@ -13115,6 +13174,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		for (c = 0; c < candidates; c++)
 		{
 			const int k = candidateOrder[c];
+			const int routeTextStart = text.length;
 
 			if (!candidatePicked[c])
 				continue;
@@ -13163,7 +13223,15 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 					G_StrafeTrackAppend(&text, va("\tnode_speed %i %i\n",
 						sqlite3_column_int(nodes, 13), sqlite3_column_int(nodes, 14)));
 			}
-			G_StrafeTrackAppendReplay(db, &text, sortedIds[c], &replaySamples, &replayWalls);
+			if (!G_StrafeTrackAppendReplay(db, &text, sortedIds[c], &replaySamples, &replayWalls))
+			{
+				if (text.data)
+				{
+					text.length = routeTextStart;
+					text.data[text.length] = '\0';
+				}
+				continue;
+			}
 			G_StrafeTrackAppend(&text, "}\n");
 			written++;
 		}
@@ -13181,7 +13249,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	G_StrafeTrackAppend(&text, STRAFETRACK_END_MARKER "\n");
 	if (!text.data)
 	{
-		trap->Print("exportStrafeTrack: route text allocation failed; %s not overwritten.\n", path);
+		trap->Print("exportStrafeTrack: route text allocation or 16 MiB file limit exceeded; %s not overwritten.\n", path);
 		return -1;
 	}
 
@@ -13351,6 +13419,7 @@ typedef struct
 	int forceJump;
 	int moveStyle;
 	int haveEnd;
+	int recordedAt;
 } strafetrack_reset_candidate_t;
 
 static strafetrack_reset_candidate_t g_strafeResetCandidates[STRAFETRACK_EXPORT_CANDIDATES];
@@ -13386,7 +13455,7 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 		"SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
 		"(r.distance * r.distance / MAX(r.duration_ms, 1)), n.x, n.y, n.z, "
 		"r.speed_active, r.speed_level, COALESCE(r.objective_success, 0), "
-		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style "
+		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style, r.created "
 		"FROM LocalStrafeRoute r LEFT JOIN LocalStrafeRouteNode n "
 		"ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ? AND COALESCE(r.bot, 0) = 0 "
@@ -13416,6 +13485,8 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 			-1 : sqlite3_column_int(routes, 12);
 		candidate->moveStyle = sqlite3_column_type(routes, 13) == SQLITE_NULL ?
 			-1 : sqlite3_column_int(routes, 13);
+		candidate->recordedAt = sqlite3_column_type(routes, 14) == SQLITE_NULL ?
+			0 : sqlite3_column_int(routes, 14);
 		candidate->haveEnd = sqlite3_column_type(routes, 6) != SQLITE_NULL;
 		if (candidate->haveEnd)
 		{
@@ -13423,7 +13494,8 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 			for (i = 0; i < 3; i++)
 				end[i] = (float)sqlite3_column_double(routes, i + 6);
 			VectorCopy(end, candidate->end);
-			quality *= BotSFJ_RouteExportFactor(mapname, candidate->start, end);
+			quality *= BotSFJ_RouteExportFactor(mapname, candidate->start, end, (int)candidate->id,
+				candidate->recordedAt, candidate->speedActive, candidate->speedLevel);
 			candidate->direction[0] = end[0] - candidate->start[0];
 			candidate->direction[1] = end[1] - candidate->start[1];
 			candidate->direction[2] = end[2] - candidate->start[2];

@@ -3451,6 +3451,7 @@ void ClientThink_real( gentity_t *ent ) {
 	int			oldEventSequence;
 	int			msec;
 	int			commandTimeBefore;
+	int			groundBefore;
 	usercmd_t	*ucmd;
 	qboolean	isNPC = qfalse;
 	qboolean	controlledByPlayer = qfalse;
@@ -5234,12 +5235,16 @@ void ClientThink_real( gentity_t *ent ) {
 	}
 
 	commandTimeBefore = ent->client->ps.commandTime;
+	groundBefore = ent->client->ps.groundEntityNum;
 	Pmove (&pmove);
 	G_RecordTrackedResolvedCommand(ent, &pmove.cmd,
 		ent->client->ps.commandTime - commandTimeBefore);
 
 	if ( !isNPC )
+	{
+		BotSFJ_ResolvedMotion(ent->s.number, groundBefore, pmove.cmd.upmove);
 		G_StrafeTrackCommand( ent );
+	}
 
 	if (ent->client->solidHack)
 	{

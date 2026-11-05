@@ -353,6 +353,62 @@ static inline int G_StrafeTrackResetEquivalent(const float *start, const float *
 	return startDistance <= 192.0f * 192.0f && endDistance <= 192.0f * 192.0f;
 }
 
+typedef struct
+{
+	float start[3], end[3];
+	int forceJump, moveStyle, haveEnd;
+} strafetrack_export_coverage_t;
+
+/*
+ * Candidates are quality-sorted and already in the same speed group. Reserve
+ * half the slots for start coverage, then cover distinct start/destination and
+ * movement pairs before filling with additional high-quality recordings.
+ */
+static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_coverage_t *routes,
+	int count, int maximum, unsigned char *picked)
+{
+	int pass, i, j, selected = 0;
+
+	memset(picked, 0, count);
+	for (pass = 0; pass < 3; pass++)
+	{
+		const int limit = pass ? maximum : (maximum + 1) / 2;
+		for (i = 0; i < count && selected < limit; i++)
+		{
+			int represented = 0;
+
+			if (picked[i])
+				continue;
+			for (j = 0; pass < 2 && j < count && !represented; j++)
+			{
+				if (!picked[j])
+					continue;
+				if (!pass)
+				{
+					float distance = 0.0f;
+					int axis;
+					for (axis = 0; axis < 3; axis++)
+					{
+						const float delta = routes[i].start[axis] - routes[j].start[axis];
+						distance += delta * delta;
+					}
+					represented = distance < 192.0f * 192.0f;
+				}
+				else if (routes[i].haveEnd && routes[j].haveEnd)
+					represented = G_StrafeTrackResetEquivalent(routes[i].start, routes[i].end,
+						routes[j].start, routes[j].end, 0, 0, routes[i].forceJump,
+						routes[j].forceJump, routes[i].moveStyle, routes[j].moveStyle);
+			}
+			if (!represented)
+			{
+				picked[i] = 1;
+				selected++;
+			}
+		}
+	}
+	return selected;
+}
+
 static inline int G_StrafeTrackBackfillTakeoffsDB(sqlite3 *db, sqlite3_int64 routeId)
 {
 	sqlite3_stmt *inputs = NULL, *update = NULL;

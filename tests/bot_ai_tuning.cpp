@@ -14,6 +14,108 @@ BOOST_AUTO_TEST_SUITE( bot_ai )
 
 BOOST_AUTO_TEST_SUITE( tuning )
 
+BOOST_AUTO_TEST_CASE( strafe_forward_acquisition_beats_higher_rated_backtracking )
+{
+	BOOST_CHECK( BotSFJ_StartIsBacktrack(200, -0.5f) );
+	BOOST_CHECK( !BotSFJ_StartIsBacktrack(20, -1.0f) );
+	BOOST_CHECK( !BotSFJ_StartIsBacktrack(200, 0.1f) );
+	BOOST_CHECK( BotSFJ_ForwardRouteBetter(10, 0, 1000, 1) );
+	BOOST_CHECK( !BotSFJ_ForwardRouteBetter(1000, 1, 10, 0) );
+	BOOST_CHECK( !BotSFJ_ForwardRouteBetter(-1, 0, 10, 1) );
+	BOOST_CHECK( BotSFJ_ForwardRouteBetter(20, 0, 10, 0) );
+
+	const float edges[16] = { -1, -1, 300, -1, -1, -1, 1, -1,
+		-1, -1, -1, 10, -1, -1, -1, -1 };
+	const float seeds[4] = { 100, 1, -1, -1 };
+	const int backtrack[4] = { 0, 1, 1, 1 };
+	float costs[4];
+	int first[4], parent[4], path[4];
+	BotSFJ_RoutePathsDirected(4, edges, seeds, costs, first, parent, backtrack);
+	BOOST_CHECK_EQUAL( first[3], 0 );
+	BOOST_CHECK_EQUAL( costs[3], 410.0f );
+	BOOST_REQUIRE_EQUAL( BotSFJ_WalkPath(3, parent, 4, path, 4), 3 );
+	BOOST_CHECK_EQUAL( path[0], 0 );
+	BOOST_CHECK_EQUAL( path[1], 2 );
+	BOOST_CHECK_EQUAL( path[2], 3 );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_available_prefix_keeps_its_own_evidence_and_endpoint )
+{
+	const int available[5] = { 1, 1, 0, 1, 1 };
+	int failures[BOT_SFJ_TRACK_MAX_NODES] = {};
+	int passes[BOT_SFJ_TRACK_MAX_NODES] = {};
+	failures[2] = 100;
+	passes[0] = passes[1] = 10;
+	const int end = BotSFJ_AvailablePrefixEnd(available, 5, 0);
+	int attempts, successes;
+	BOOST_CHECK_EQUAL( end, 2 );
+	BOOST_CHECK_EQUAL( BotSFJ_AvailablePrefixEnd(available, 5, 2), 2 );
+	BOOST_CHECK_EQUAL( BotSFJ_AvailablePrefixEnd(available, 5, 3), 5 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopRangeEvidence(failures, passes, 0, end,
+		&attempts, &successes), 1.0f );
+	BOOST_CHECK_EQUAL( attempts, 20 );
+	BOOST_CHECK_EQUAL( successes, 20 );
+	BOOST_CHECK( BotSFJ_HopRangeEvidence(failures, passes, 0, 5,
+		&attempts, &successes) > 0.8f );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_forward_priority_still_allows_a_necessary_detour )
+{
+	const float edges[9] = { -1, -1, 20000, -1, -1, 100, -1, -1, -1 };
+	const float seeds[3] = { 10, 10, -1 };
+	const int backtrack[3] = { 0, 1, 1 };
+	float costs[3];
+	int first[3], parent[3];
+	BotSFJ_RoutePathsDirected(3, edges, seeds, costs, first, parent, backtrack);
+	BOOST_CHECK_EQUAL( first[2], 0 );
+	BOOST_CHECK_LT( BotSFJ_GoalRouteScore(1000, 100, costs[2]), 0 );
+	BotSFJ_RoutePathsWithParents(3, edges, seeds, costs, first, parent);
+	BOOST_CHECK_EQUAL( first[2], 1 );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(1000, 100, costs[2]), 0 );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_recent_hop_evidence_recovers_without_losing_death_gates )
+{
+	int failures = std::numeric_limits<int>::max(), passes = 0;
+	BotSFJ_HopEvidenceBound(&failures, &passes);
+	BOOST_CHECK_LE( failures, 16 );
+	const float before = BotSFJ_HopReliability(failures, passes);
+	for (int i = 0; i < 1000; ++i)
+		BotSFJ_HopEvidenceNote(&failures, &passes, 1);
+	BOOST_CHECK_GT( BotSFJ_HopReliability(failures, passes), before );
+	BOOST_CHECK_GT( BotSFJ_HopReliability(failures, passes), 0.8f );
+	BOOST_CHECK( BotSFJ_TrackHopTrusted(0, failures, passes) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrusted(1, failures, passes) );
+	for (int i = 0; i < 100000; ++i)
+	{
+		BotSFJ_HopEvidenceNote(&failures, &passes, i % 10 != 0);
+		BOOST_REQUIRE_LE( failures + passes, 25 );
+	}
+	BOOST_CHECK_GT( BotSFJ_HopReliability(failures, passes), 0.6f );
+	BOOST_CHECK_GE( BotSFJ_HopReliability(10000, 0), 0.25f );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_late_ground_restart_gets_a_fresh_approach_window )
+{
+	BOOST_CHECK( BotSFJ_HopNeedsApproach(1, 0, 300, 10) );
+	BOOST_CHECK( !BotSFJ_HopNeedsApproach(1, 1, 300, 10) );
+	BOOST_CHECK( !BotSFJ_HopNeedsApproach(0, 0, 300, 10) );
+	BOOST_CHECK( !BotSFJ_HopNeedsApproach(1, 0, 8, 10) );
+	BOOST_CHECK( !BotSFJ_HopNeedsApproach(1, 0, -1, 100) );
+	BOOST_CHECK( !BotSFJ_ApproachTimedOut(30000, 31000, 32000) );
+	BOOST_CHECK( BotSFJ_ApproachTimedOut(30000, 31000, 33001) );
+	BOOST_CHECK( BotSFJ_ApproachTimedOut(30000, 50000, 50001) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_connections_cover_eight_travel_directions )
+{
+	for (int i = 0; i < 8; ++i)
+	{
+		const float yaw = i * 0.7853981633974483f;
+		BOOST_CHECK_EQUAL( BotSFJ_DirectionSector(cosf(yaw), sinf(yaw)), i );
+	}
+}
+
 BOOST_AUTO_TEST_CASE( strafe_flag_goals_prioritize_scoring_and_closer_recovery )
 {
 	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(1, 1, 100, 50), BOT_SFJ_GOAL_FLAG_SCORE );
@@ -3339,9 +3441,6 @@ BOOST_AUTO_TEST_CASE( recorded_route_preference_and_backward_strafe )
 	BOOST_CHECK_EQUAL( BotSFJ_TrackRouteScore( 0.0f, 600.0f, 0, 0, 0.0f, 192.0f ), 0.0f );
 	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 0, 0 ), 0.5f, 0.001f );
 	BOOST_CHECK_CLOSE( BotSFJ_TrackRouteSuccess( 2, 5 ), 0.75f, 0.001f );
-	BOOST_CHECK_EQUAL( BotSFJ_TrackStallFactor( 0 ), 1.0f );
-	BOOST_CHECK( BotSFJ_TrackStallFactor( 2 ) < BotSFJ_TrackStallFactor( 1 ) );
-	BOOST_CHECK_GE( BotSFJ_TrackStallFactor( 100 ), 0.1f );
 	BOOST_CHECK( BotSFJ_TrackForceJumpChargeAllows( 1, 1, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 0, 1, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackForceJumpChargeAllows( 1, 0, 0 ) );
@@ -3930,17 +4029,13 @@ BOOST_AUTO_TEST_CASE( recorded_force_jump_is_measured_and_copied )
 	BOOST_CHECK( !BotSFJ_ForceJumpHold( 1, 160.0f, 1, 0, std::numeric_limits<float>::quiet_NaN(), 200.0f ) );
 }
 
-BOOST_AUTO_TEST_CASE( failing_routes_decay_and_lose_export_rank )
+BOOST_AUTO_TEST_CASE( failing_hops_have_bounded_export_rank )
 {
-	BOOST_CHECK_EQUAL( BotSFJ_TrackFailureDecay( 3, 0 ), 1.0f );
-	BOOST_CHECK_EQUAL( BotSFJ_TrackFailureDecay( 20, 1 ), 1.0f );
-	BOOST_CHECK( BotSFJ_TrackFailureDecay( 8, 0 ) < BotSFJ_TrackFailureDecay( 5, 0 ) );
-	BOOST_CHECK_GE( BotSFJ_TrackFailureDecay( 1000, 0 ), 0.05f );
 	BOOST_CHECK_EQUAL( BotSFJ_TrackExportFactor( 2, 0, 1.0f ), 1.0f );
 	BOOST_CHECK( BotSFJ_TrackExportFactor( 10, 9, 1.0f ) > BotSFJ_TrackExportFactor( 10, 2, 1.0f ) );
 	BOOST_CHECK( BotSFJ_TrackExportFactor( 10, 0, 1.0f ) < BotSFJ_TrackExportFactor( 10, 1, 1.0f ) );
-	BOOST_CHECK_GE( BotSFJ_TrackExportFactor( 500, 0, 0.1f ), 0.05f );
-	BOOST_CHECK_LE( BotSFJ_TrackExportFactor( 500, 500, 99.0f ), 3.0f );
+	BOOST_CHECK_GE( BotSFJ_TrackExportFactor( 500, 0, 0.1f ), 0.35f );
+	BOOST_CHECK_LE( BotSFJ_TrackExportFactor( 500, 500, 99.0f ), 2.0f );
 	/* A fast human route the bots never finish loses its pick score to a finished one. */
 	BOOST_CHECK( BotSFJ_TrackRouteScore( 3000.0f, 800.0f, 12, 0, 0.0f, 256.0f ) <
 		BotSFJ_TrackRouteScore( 1500.0f, 500.0f, 12, 10, 0.0f, 256.0f ) );
