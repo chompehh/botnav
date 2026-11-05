@@ -2898,7 +2898,10 @@ static qboolean BotNav_CheckFallingHazard(bot_state_t *bs, vec3_t moveDir, qbool
 	return qfalse;
 }
 
-/* Where the bot is really trying to go: route start, legacy waypoint, or travel goal. */
+/*
+ * Where the bot is really trying to go: route start, the active route's next
+ * landing, the travel goal (flag, enemy, item), and only then a legacy waypoint.
+ */
 static qboolean BotNav_EdgeEscapeTarget(const bot_state_t *bs, vec3_t target, const char **what)
 {
 	if (bs->sfjRoute > 0 && bs->sfjRouteApproach)
@@ -2907,16 +2910,22 @@ static qboolean BotNav_EdgeEscapeTarget(const bot_state_t *bs, vec3_t target, co
 		*what = "route start";
 		return qtrue;
 	}
-	if (bs->wpCurrent)
+	if (bs->sfjRoute > 0 && bs->sfjIntent != BOT_SFJ_INTENT_NONE)
 	{
-		VectorCopy(bs->wpCurrent->origin, target);
-		*what = "waypoint";
+		VectorCopy(bs->sfjIntentDestination, target);
+		*what = "route landing";
 		return qtrue;
 	}
 	if (bs->sfjTravelGoalValid)
 	{
 		VectorCopy(bs->sfjTravelGoal, target);
 		*what = "goal";
+		return qtrue;
+	}
+	if (bs->wpCurrent)
+	{
+		VectorCopy(bs->wpCurrent->origin, target);
+		*what = "waypoint";
 		return qtrue;
 	}
 	*what = "none";
@@ -2947,8 +2956,9 @@ static void BotNav_NoteEdgeEscape(bot_state_t *bs)
 		bs->sfjTravelPlanTime = 0;
 		return;
 	}
-	if (bs->wpCurrent)
+	if (bs->wpCurrent && !bs->sfjTravelGoalValid && !bs->sfjRoute)
 	{
+		/* Legacy waypoints are only swapped when no route or travel goal is in charge. */
 		const int old = bs->wpCurrent->index;
 		int wp;
 
@@ -2981,10 +2991,11 @@ static qboolean BotNav_LedgeEscape(bot_state_t *bs, vec3_t direction)
 		{ -1.0f, 0.0f }, { -0.707107f, 0.707107f },
 		{ -0.707107f, -0.707107f }, { 0.0f, 1.0f }, { 0.0f, -1.0f }
 	};
-	vec3_t forward, right, candidate, end, far, target, toTarget, best;
+	vec3_t forward, right, candidate, end, far, target, toTarget, best, previous;
 	trace_t tr;
 	const char *what;
 	qboolean haveTarget;
+	qboolean recentEscape;
 	float bestScore = -1e20f;
 	int i, bestIndex = -1;
 
@@ -3005,6 +3016,13 @@ static qboolean BotNav_LedgeEscape(bot_state_t *bs, vec3_t direction)
 		return qfalse;
 	VectorSet(right, forward[1], -forward[0], 0.0f);
 	haveTarget = BotNav_EdgeEscapeTarget(bs, target, &what);
+	/* The last escape at this same edge: a new one must not simply undo it. */
+	VectorCopy(bs->sfjLedgeDirection, previous);
+	previous[2] = 0.0f;
+	recentEscape = bs->sfjEdgeStallTime > 0 &&
+		level.time - bs->sfjEdgeStallTime <= BOT_NAV_EDGE_STALL_WINDOW_MS &&
+		sqrtf(BotSFJ_Dist2DSq(bs->origin, bs->sfjEdgeStallOrigin)) <= BOT_NAV_EDGE_STALL_RADIUS &&
+		VectorNormalize(previous) > 0.0f ? qtrue : qfalse;
 	if (haveTarget)
 	{
 		VectorSubtract(target, bs->origin, toTarget);
@@ -3043,6 +3061,8 @@ static qboolean BotNav_LedgeEscape(bot_state_t *bs, vec3_t direction)
 		clearance = 32.0f * tr.fraction;
 		score = BotNav_EdgeEscapeScore(clearance, haveTarget ? DotProduct(candidate, toTarget) : 0.0f,
 			haveTarget);
+		if (BotNav_EdgeEscapeReverses(recentEscape, DotProduct(candidate, previous)))
+			score -= BOT_NAV_EDGE_REVERSE_PENALTY;
 		if (score > bestScore)
 		{
 			bestScore = score;
@@ -3075,6 +3095,13 @@ static qboolean BotNav_LedgeEscape(bot_state_t *bs, vec3_t direction)
 
 static void BotNav_ApplyLedgeEscape(bot_state_t *bs, bot_input_t *bi, int time)
 {
+	/* Keep going until the edge is well behind, not just for the fixed commit time. */
+	if (bs->sfjLedgeUntil > 0 && bs->sfjLedgeUntil <= time && bs->sfjEdgeStallTime > 0 &&
+		!bs->sfjOwnsInput && bs->cur_ps.groundEntityNum != ENTITYNUM_NONE &&
+		BotNav_LedgeEscapeExtends(sqrtf(BotSFJ_Dist2DSq(bs->origin, bs->sfjEdgeStallOrigin)),
+			time - bs->sfjEdgeStallTime) &&
+		!BotNav_CheckFallingHazard(bs, bs->sfjLedgeDirection, qfalse))
+		bs->sfjLedgeUntil = time + 100;
 	if (bs->sfjLedgeUntil <= time)
 	{
 		vec3_t direction;
@@ -3701,6 +3728,7 @@ static void BotSFJ_Abort(bot_state_t *bs, int time)
 	bs->sfjCooldownUntil = time + BOT_SFJ_ABORT_COOLDOWN_MS;
 	bs->sfjJumpReleaseTime = 0;
 	bs->sfjRollPauseTime = 0;
+	bs->sfjRoutePauseSince = 0;
 	bs->sfjPeakSpeed = 0.0f;
 	bs->sfjSlowedSince = 0;
 	bs->sfjRoute = 0;
@@ -5905,6 +5933,8 @@ static void BotSFJ_EndTrackRoute(bot_state_t *bs, const char *reason)
 	bs->sfjReplaySample = -1;
 	bs->sfjReplayDeviation = 0.0f;
 	bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+	bs->sfjReplayFallback = qfalse;
+	bs->sfjRoutePauseSince = 0;
 }
 
 static int BotSFJ_PlayerSpeedContext(const playerState_t *ps)
@@ -7316,6 +7346,7 @@ static void BotSFJ_ResetReplay(bot_state_t *bs, int routeIndex, int entry)
 	bs->sfjReplayDeviation = 0.0f;
 	bs->sfjReplayCross = 0.0f;
 	bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+	bs->sfjReplayFallback = qfalse;
 	bs->sfjRouteWallStage = 0;
 	bs->sfjRouteWallDone = 0;
 	if (samples)
@@ -7328,25 +7359,29 @@ static void BotSFJ_ResetReplay(bot_state_t *bs, int routeIndex, int entry)
 }
 
 /*
- * Trust bounds: a bot that has clearly left the human's line, or lost the
- * momentum the human kept here, ends its attempt. Ground repositioning for a
- * new circle jump, approaches and recorded wallruns are exempt.
+ * Trust bounds: a bot that drifts off the human's line, or loses the momentum
+ * the human kept here, keeps the route and steers the hop with the corner
+ * controller until it is back on the line. Only a sustained, very large drift
+ * gives the route up, and drift never counts against the human's hop. Ground
+ * repositioning for a new circle jump, approaches and recorded wallruns are exempt.
  */
 static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *ps,
 	const bot_sfj_track_route_t *route)
 {
 	const bot_sfj_replay_sample_t *samples = bs->sfjReplayActive ?
 		BotSFJ_RouteSamples(bs->sfjRoute - 1) : NULL;
+	const qboolean haveSamples = route->sampleCount >= 2 ? qtrue : qfalse;
 	const qboolean grounded = ps->groundEntityNum != ENTITYNUM_NONE;
 	const int node = bs->sfjRouteNode < route->nodeCount ? bs->sfjRouteNode : route->nodeCount - 1;
 	const float *from = node > 0 ? route->node[node - 1] : route->start;
 	const float normal = ps->speed > 0 ? (float)ps->speed : 250.0f;
-	qboolean restart, repositioning, offCourse, slow, trusted;
+	qboolean restart, repositioning, offCourse, slow, trusted, fallback;
 	int offMs, slowMs;
 
 	if (bs->sfjRouteApproach || bs->sfjRouteWallStage || !bs->sfjRouteAttemptActive)
 	{
 		bs->sfjReplayOffSince = bs->sfjReplaySlowSince = 0;
+		bs->sfjReplayFallback = qfalse;
 		return qtrue;
 	}
 	restart = route->nodeGroundMs[node] >= 0 &&
@@ -7354,36 +7389,50 @@ static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *
 	repositioning = (restart && grounded) || !bs->sfjRouteHopLaunched ||
 		(samples && bs->sfjReplaySample >= 0 &&
 			(samples[bs->sfjReplaySample].flags & (BOT_SFJ_REPLAY_FLAG_GROUNDED | BOT_SFJ_REPLAY_FLAG_WALLRUN)));
-	offMs = BotSFJ_ReplaySustain(bs->sfjReplayDeviation > (samples ? BOT_SFJ_REPLAY_SOFT_DEVIATION :
+	offMs = BotSFJ_ReplaySustain(bs->sfjReplayDeviation > (haveSamples ? BOT_SFJ_REPLAY_SOFT_DEVIATION :
 		BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION), &bs->sfjReplayOffSince, level.time);
+	if (BotSFJ_ReplayAbandon(bs->sfjReplayDeviation, offMs, haveSamples))
+	{
+		BotSFJ_DebugInfo(bs, va("far off the human line on route %i node %i: %.0f units for %i ms; "
+			"giving the route up (not counted against the hop)",
+			bs->sfjRoute - 1, node, bs->sfjReplayDeviation, offMs));
+		BotSFJ_FinishTrackAttempt(bs, qfalse, qfalse);
+		BotSFJ_EndTrackRoute(bs, "far off the recorded human line");
+		return qfalse;
+	}
 	{
 		const bot_sfj_route_stat_t *stat = bs->sfjRouteStat >= 0 ?
 			&g_botSfjRouteStats[bs->sfjRouteStat] : NULL;
 		const int hop = bs->sfjRouteHopLaunched && bs->sfjRouteLaunchedNode >= 0 &&
 			bs->sfjRouteLaunchedNode < BOT_SFJ_TRACK_MAX_NODES ? bs->sfjRouteLaunchedNode : node;
 
-		/* Trusted human hops get longer before a drift or slow patch ends the attempt. */
+		/* Trusted human hops get longer before a drift or slow patch leaves the human's yaw. */
 		trusted = !stat || BotSFJ_TrackHopTrusted(stat->hopDeaths[hop],
 			stat->hopRecentFailures[hop], stat->hopRecentPasses[hop]);
 	}
 	offCourse = !repositioning && BotSFJ_ReplayOffCourseTrusted(bs->sfjReplayDeviation, offMs,
-		samples != NULL, trusted);
+		haveSamples, trusted);
 	slowMs = BotSFJ_ReplaySustain(samples && bs->sfjReplaySample >= 0 &&
 		BotSFJ_ReplayMomentumLow(bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed, normal, repositioning),
 		&bs->sfjReplaySlowSince, level.time);
 	slow = slowMs >= BotSFJ_ReplaySlowLimitMs(trusted);
-	if (!offCourse && !slow)
-		return qtrue;
-	BotSFJ_DebugInfo(bs, offCourse ?
-		va("off the human line on route %i node %i: %.0f units for %i ms; ending attempt",
-			bs->sfjRoute - 1, node, bs->sfjReplayDeviation, offMs) :
-		va("lost momentum on route %i node %i: %.0f vs human %.0f (normal %.0f) for %i ms; ending attempt",
-			bs->sfjRoute - 1, node, bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed, normal, slowMs));
-	BotSFJ_NoteHopFailure(bs, qfalse, qfalse);
-	BotSFJ_FinishTrackAttempt(bs, qfalse, qtrue);
-	BotSFJ_EndTrackRoute(bs, offCourse ? "clearly off the recorded human line" :
-		"lost the momentum the human kept here");
-	return qfalse;
+	fallback = !repositioning && BotSFJ_ReplayFallback(bs->sfjReplayFallback, offCourse, slow,
+		bs->sfjReplayDeviation, haveSamples) ? qtrue : qfalse;
+	if (fallback && !bs->sfjReplayFallback)
+		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_TRUST, 250, "trust",
+			"route %d node %d: %s; corner steering until back on the human line (route kept)",
+			bs->sfjRoute - 1, node, offCourse || !slow ?
+				va("%.0f units off the human line", bs->sfjReplayDeviation) :
+				va("speed %.0f vs human %.0f", bs->sfjReplayBotSpeed, bs->sfjReplayHumanSpeed));
+	else if (!fallback && bs->sfjReplayFallback)
+		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_TRUST, 250, "trust",
+			"route %d node %d: back on the human line (%.0f units); replay resumes",
+			bs->sfjRoute - 1, node, bs->sfjReplayDeviation);
+	bs->sfjReplayFallback = fallback;
+	/* The human's yaw does not fit here: the corner controller steers this hop. */
+	if (fallback)
+		bs->sfjReplayActive = qfalse;
+	return qtrue;
 }
 
 static void BotSFJ_ReplayHeartbeat(bot_state_t *bs, const bot_sfj_track_route_t *route)
@@ -7514,16 +7563,36 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		if (BotSFJ_HopNeedsApproach(grounded, bs->sfjRouteHopLaunched, route->nodeGroundMs[node],
 				Distance(from, route->nodeTakeoff[node])))
 		{
-			BotSFJ_NodeApproachRoute(route, node, &approachRoute, bs);
-			BotSFJ_PickApproachRunup(bs, &approachRoute);
-			VectorCopy(approachRoute.start, bs->sfjApproachTarget);
-			bs->sfjApproachBest = Distance(ps->origin, approachRoute.start);
-			bs->sfjApproachBestTime = level.time;
-			bs->sfjApproachStarted = level.time;
-			bs->sfjApproachBlockedSince = 0;
-			bs->sfjApproachViaRunup = qfalse;
-			bs->sfjRouteApproach = qtrue;
-			bs->sfjRouteTime = level.time;
+			vec3_t hop, offset;
+			float pastTakeoff = -1.0f;
+			const float speed = sqrtf(ps->velocity[0] * ps->velocity[0] + ps->velocity[1] * ps->velocity[1]);
+
+			VectorSubtract(route->node[node], route->nodeTakeoff[node], hop);
+			hop[2] = 0.0f;
+			VectorSubtract(ps->origin, route->nodeTakeoff[node], offset);
+			offset[2] = 0.0f;
+			if (VectorNormalize(hop) > 0.0f)
+				pastTakeoff = DotProduct(offset, hop);
+			if (BotSFJ_RestartInPlace(node, sqrtf(BotSFJ_Dist2DSq(ps->origin, route->nodeTakeoff[node])),
+					pastTakeoff, speed))
+				BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_APPROACH, 500,
+					"approach", "route %d node %d: ground restart in place (%.0f u %s takeoff, speed %.0f)",
+					bs->sfjRoute - 1, node, sqrtf(BotSFJ_Dist2DSq(ps->origin, route->nodeTakeoff[node])),
+					pastTakeoff >= 0.0f ? "past" : "short of", speed);
+			else
+			{
+				/* Short of the takeoff and slow: walk to it, no run-up behind it. */
+				BotSFJ_NodeApproachRoute(route, node, &approachRoute, bs);
+				bs->sfjApproachRunup = 0.0f;
+				VectorCopy(approachRoute.start, bs->sfjApproachTarget);
+				bs->sfjApproachBest = Distance(ps->origin, approachRoute.start);
+				bs->sfjApproachBestTime = level.time;
+				bs->sfjApproachStarted = level.time;
+				bs->sfjApproachBlockedSince = 0;
+				bs->sfjApproachViaRunup = qfalse;
+				bs->sfjRouteApproach = qtrue;
+				bs->sfjRouteTime = level.time;
+			}
 		}
 	}
 	if (bs->sfjRouteApproach)
@@ -8355,11 +8424,11 @@ static qboolean BotSFJ_RouteHopTrusted(const bot_state_t *bs, const vec3_t route
 		Distance(routeDestination, route->node[bs->sfjRouteNode]) > 1.0f)
 		return qfalse;
 	/*
-	 * Clearly off the human's line, the human's hop no longer vouches for this
-	 * arc. Small drifts inside the hard limit still follow the human.
+	 * Drifting off the human's line does not cost trust: the hop still vouches
+	 * for its arc until the bot is so far off that the route is given up.
 	 */
-	if (bs->sfjReplayDeviation > (route->sampleCount >= 2 ? BOT_SFJ_REPLAY_HARD_DEVIATION :
-		BOT_SFJ_REPLAY_LOOSE_HARD_DEVIATION))
+	if (bs->sfjReplayDeviation > (route->sampleCount >= 2 ? BOT_SFJ_REPLAY_ABANDON_DEVIATION :
+		BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION))
 		return qfalse;
 	if (bs->sfjRouteStat < 0 || bs->sfjRouteStat >= g_botSfjRouteStatCount)
 		return qtrue;
@@ -8693,6 +8762,57 @@ static void BotSFJ_Reject(bot_state_t *bs, const char *reason)
 		BotSFJ_Abort(bs, level.time);
 }
 
+/*
+ * Ledge/wall recovery or a roll on the ground pauses the recorded route instead
+ * of ending it. Returns qtrue while paused (the caller leaves the frame alone).
+ */
+static qboolean BotSFJ_PauseRoute(bot_state_t *bs, playerState_t *ps, qboolean airborneHop,
+	const char *reason)
+{
+	const qboolean recovering = bs->sfjLedgeUntil > level.time || bs->sfjWallRunStage ||
+		BG_InRoll(ps, ps->legsAnim) ? qtrue : qfalse;
+
+	if (!BotSFJ_RoutePauseAllows(bs->sfjRoute, recovering, airborneHop,
+		bs->sfjRoutePauseSince ? level.time - bs->sfjRoutePauseSince : 0))
+		return qfalse;
+	if (!bs->sfjRoutePauseSince)
+	{
+		bs->sfjRoutePauseSince = level.time;
+		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_MISC, 250, "pause",
+			"route %d paused at node %d: %s", bs->sfjRoute - 1, bs->sfjRouteNode,
+			reason ? reason : "recovery owns movement");
+	}
+	if (bs->sfjPhase != BOT_SFJ_PHASE_OFF && bs->sfjPhase != BOT_SFJ_PHASE_ABORT)
+	{
+		bs->sfjPhase = BOT_SFJ_PHASE_OFF;
+		bs->sfjPhaseTime = level.time;
+	}
+	bs->sfjOwnsInput = qfalse;
+	bs->sfjArcCheckedTime = 0;
+	return qtrue;
+}
+
+/* The recovery is over: give back the paused time to the route's timers. */
+static void BotSFJ_ResumeRoute(bot_state_t *bs)
+{
+	int paused;
+
+	if (!bs->sfjRoutePauseSince)
+		return;
+	paused = level.time - bs->sfjRoutePauseSince;
+	bs->sfjRoutePauseSince = 0;
+	if (!bs->sfjRoute || paused <= 0)
+		return;
+	bs->sfjRouteTime += paused;
+	if (bs->sfjRouteApproach)
+	{
+		bs->sfjApproachStarted += paused;
+		bs->sfjApproachBestTime += paused;
+	}
+	BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_MISC, 250, "pause",
+		"route %d resumed at node %d after %d ms", bs->sfjRoute - 1, bs->sfjRouteNode, paused);
+}
+
 /* Whether an escape strafe could be done backwards (facing the enemy) at all. */
 static qboolean BotSFJ_EscapeBackwardAvailable(bot_state_t *bs)
 {
@@ -8964,6 +9084,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	conflict = BotSFJ_GetInputConflict(bs, ps, &queued, qtrue, &conflictReason);
 	if (conflict == BOT_SFJ_CONFLICT_HARD)
 	{
+		if (BotSFJ_PauseRoute(bs, ps, airborneJump, conflictReason))
+			return;
 		BotSFJ_Reject(bs, va("input/state conflict: %s", conflictReason));
 		return;
 	}
@@ -8977,10 +9099,12 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 				bs->sfjRollPauseTime = level.time;
 			bs->sfjOwnsInput = qfalse;
 		}
-		else
+		else if (!BotSFJ_PauseRoute(bs, ps, airborneJump, "roll"))
 			BotSFJ_Reject(bs, "roll cannot initiate or indefinitely pause a strafe");
 		return;
 	}
+	/* Recovery is over: the paused route continues before its corridor is checked. */
+	BotSFJ_ResumeRoute(bs);
 	if (bs->sfjRollPauseTime)
 	{
 		/* The roll owns movement, not the old arc: revalidate fully before restarting. */
@@ -9120,6 +9244,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	conflict = BotSFJ_GetInputConflict(bs, ps, &queued, qfalse, &conflictReason);
 	if (BotSFJ_ConflictBlocks(conflict, bs->sfjPhase))
 	{
+		if (BotSFJ_PauseRoute(bs, ps, airborneJump, conflictReason))
+			return;
 		BotSFJ_Reject(bs, va("input/state conflict: %s", conflictReason));
 		return;
 	}
@@ -9222,10 +9348,14 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	{
 		if (bs->sfjRouteAttemptActive)
 		{
+			/* Only real hazards count against a human hop; a predicted wall or ledge does not. */
+			const qboolean realHazard = airborneJump || bs->sfjArcHazard;
+
 			if (bs->sfjArcBlocked)
 				g_botSfjStats.routeBlockedTakeoffs++;
-			BotSFJ_NoteHopFailure(bs, qfalse, qtrue);
-			BotSFJ_FinishTrackAttempt(bs, qfalse, qtrue);
+			if (realHazard)
+				BotSFJ_NoteHopFailure(bs, qfalse, qtrue);
+			BotSFJ_FinishTrackAttempt(bs, qfalse, realHazard);
 		}
 		BotSFJ_Reject(bs, airborneJump ? "hazard ahead in flight" :
 			"predicted jump arc unsafe (wall, drop, hazard or lands off route)");
@@ -9455,10 +9585,27 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 				BotSFJ_GroundWishHazard(bs, ps, approachYaw, commandMsec) :
 				!BotSFJ_GroundWishIsSafe(bs, ps, approachYaw, commandMsec)))
 		{
-			if (bs->sfjRouteApproach)
+			if (bs->sfjRouteApproach && bs->sfjRoute > 0)
+			{
+				/*
+				 * Hold here facing the start instead of handing frames to legacy
+				 * waypoint navigation; the approach watchdog ends a real stall.
+				 */
 				BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_MOTION, BOT_SFJ_TONE_HAZARD, BOT_SFJ_DEBUG_KIND_HAZARD, 500,
-					"hazard", "route %d approach step toward yaw %.0f vetoed (hazard ahead); legacy navigation this frame",
+					"hazard", "route %d approach step toward yaw %.0f vetoed (hazard ahead); holding position",
 					bs->sfjRoute - 1, approachYaw);
+				candidate = *bi;
+				candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+					ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_WALK);
+				VectorClear(candidate.dir);
+				candidate.speed = 0.0f;
+				candidate.viewangles[YAW] = AngleNormalize360(approachYaw);
+				*bi = candidate;
+				bs->sfjOwnsInput = qtrue;
+				bs->viewangles[YAW] = candidate.viewangles[YAW];
+				bs->ideal_viewangles[YAW] = candidate.viewangles[YAW];
+				return;
+			}
 			bs->sfjOwnsInput = qfalse;
 			return;
 		}
@@ -9470,8 +9617,9 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			const float targetDistance = sqrtf(BotSFJ_Dist2DSq(ps->origin, bs->sfjApproachTarget));
 			const float startDistance = sqrtf(BotSFJ_Dist2DSq(ps->origin, startRoute->start));
 
-			/* Settle exactly on the start point instead of arriving "near enough" at full run. */
-			approachSpeed = BotSFJ_ApproachArrivalSpeed(targetDistance);
+			/* Settle exactly on the route start; mid-route takeoffs keep running speed. */
+			if (!bs->sfjRouteNode)
+				approachSpeed = BotSFJ_ApproachArrivalSpeed(targetDistance);
 			/* Close to the circle-jump start, look where the human looked when starting. */
 			if (startDistance <= BOT_SFJ_APPROACH_FACE_RADIUS && !bs->sfjRouteNode &&
 				startSamples && startRoute->sampleCount >= 1 && !backward)
@@ -9496,6 +9644,9 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	}
 	if (!BotSFJ_CanOwnInput(bot_strafejumps.integer, fresh, eligible, bs->sfjPhase))
 	{
+		if (bs->sfjRoute && BotSFJ_PauseRoute(bs, ps,
+			!grounded && BotSFJ_PhaseInProgress(bs->sfjPhase) ? qtrue : qfalse, conflictReason))
+			return;
 		if (bs->sfjRoute)
 			BotSFJ_EndTrackRoute(bs, !fresh ? "expired recorded route intent" : "recorded route interrupted");
 		if (bs->sfjPhase != BOT_SFJ_PHASE_OFF && bs->sfjPhase != BOT_SFJ_PHASE_ABORT)
@@ -9614,10 +9765,12 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			BotSFJ_DebugReject(bs, "takeoff arc unsafe");
 			if (bs->sfjRouteAttemptActive)
 			{
+				/* Only real hazards count against a human hop; a predicted wall or ledge does not. */
 				if (bs->sfjArcBlocked)
 					g_botSfjStats.routeBlockedTakeoffs++;
-				BotSFJ_NoteHopFailure(bs, qfalse, qtrue);
-				BotSFJ_FinishTrackAttempt(bs, qfalse, qtrue);
+				if (bs->sfjArcHazard)
+					BotSFJ_NoteHopFailure(bs, qfalse, qtrue);
+				BotSFJ_FinishTrackAttempt(bs, qfalse, bs->sfjArcHazard);
 			}
 			BotSFJ_Abort(bs, time);
 			return;
@@ -9772,7 +9925,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			 * copied relative yaw already turns the corner, anticipating it as well over-turns. */
 			targetView = BotSFJ_ReplayViewYaw(s->yaw, s->velYaw, s->speed, s->velYaw,
 				horizontalSpeed > 1.0f ? vectoyaw(ps->velocity) : s->velYaw, horizontalSpeed,
-				bs->sfjReplayCross);
+				bs->sfjReplayCross, BotSFJ_AxesYaw(forwardMove, rightMove));
 			commandYaw = targetView - BotSFJ_AxesYaw(forwardMove, rightMove);
 			BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_MOTION, BOT_SFJ_TONE_YAW, BOT_SFJ_DEBUG_KIND_YAW, 200, "yaw",
 				"replay%s route %d sample %d: view %.0f human %.0f vel %.0f humanVel %.0f cross %.0f keys %+d/%+d",

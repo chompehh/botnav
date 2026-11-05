@@ -692,6 +692,8 @@ typedef struct bot_state_s
 	int					sfjReplayRight;
 	int					sfjReplayOffSince;
 	int					sfjReplaySlowSince;
+	qboolean			sfjReplayFallback;	// off the human line or slow: corner steering keeps the route
+	int					sfjRoutePauseSince;	// route paused (not ended) while ledge recovery or a roll owns movement
 	int					sfjRouteWallStage;	// recorded wallrun replay: 0 idle, 1 trigger, 2 on wall, 3 exit
 	int					sfjRouteWallIndex;
 	int					sfjRouteWallStart;

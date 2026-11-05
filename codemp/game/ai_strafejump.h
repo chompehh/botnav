@@ -479,6 +479,20 @@ static inline int BotSFJ_HopNeedsApproach(int grounded, int launched,
 		BotSFJ_GroundRestart(groundMs, takeoffDistance);
 }
 
+/*
+ * Mid-route ground restarts re-jump where the bot is when it is already at or
+ * past the human's takeoff (along the hop), or still running at least normal
+ * speed: walking back to the takeoff and a run-up behind it is backtracking.
+ */
+#define BOT_SFJ_RESTART_IN_PLACE_RADIUS 48.0f
+#define BOT_SFJ_RESTART_IN_PLACE_SPEED 250.0f
+
+static inline int BotSFJ_RestartInPlace(int node, float takeoffDistance, float pastTakeoff, float speed)
+{
+	return node > 0 && (takeoffDistance <= BOT_SFJ_RESTART_IN_PLACE_RADIUS || pastTakeoff >= 0.0f ||
+		speed >= BOT_SFJ_RESTART_IN_PLACE_SPEED);
+}
+
 static inline int BotSFJ_ApproachTimedOut(int started, int lastProgress, int now)
 {
 	return now - started > BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS + 12000 ||
@@ -2232,10 +2246,15 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 #define BOT_SFJ_REPLAY_MATCH_HEIGHT 128.0f
 #define BOT_SFJ_REPLAY_STATIC_DISTANCE 1.0f
 #define BOT_SFJ_REPLAY_LOOKAHEAD_MS 50
-#define BOT_SFJ_REPLAY_YAW_CORRECTION 10.0f
+#define BOT_SFJ_REPLAY_HEADING_GAIN 0.75f
+#define BOT_SFJ_REPLAY_YAW_CORRECTION 45.0f
 #define BOT_SFJ_REPLAY_YAW_DEADBAND 3.0f
-#define BOT_SFJ_REPLAY_CROSS_GAIN 0.08f
-#define BOT_SFJ_REPLAY_CROSS_MAX 6.0f
+#define BOT_SFJ_REPLAY_CROSS_GAIN 0.12f
+#define BOT_SFJ_REPLAY_CROSS_MAX 15.0f
+#define BOT_SFJ_REPLAY_WISH_MAX 90.0f
+#define BOT_SFJ_REPLAY_ABANDON_DEVIATION 256.0f
+#define BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION 384.0f
+#define BOT_SFJ_REPLAY_ABANDON_MS 500
 #define BOT_SFJ_REPLAY_HARD_DEVIATION 160.0f
 #define BOT_SFJ_REPLAY_SOFT_DEVIATION 80.0f
 #define BOT_SFJ_REPLAY_SOFT_MS 300
@@ -2512,24 +2531,51 @@ static inline float BotSFJ_ReplayClamp(float value, float limit)
 
 /*
  * View yaw that reproduces the human's wish angle relative to velocity at this
- * point of the route, plus a small, bounded correction toward the human's
- * travel direction and path. crossTrack is positive when the bot is left of
- * the human path. Slow players use the human's absolute yaw.
+ * point of the route, plus a correction that steers the bot's velocity onto the
+ * human's travel direction and path. The correction is large enough to turn
+ * back after over-turning and to follow a corner the bot is late into, but the
+ * resulting wish (view minus the key axes) always stays within 90 degrees of
+ * the bot's own velocity so the hop never brakes. crossTrack is positive when
+ * the bot is left of the human path. Slow players use the human's absolute yaw.
  */
 static inline float BotSFJ_ReplayViewYaw(float humanYaw, float humanVelYaw, float humanSpeed,
-	float targetVelYaw, float botVelYaw, float botSpeed, float crossTrack)
+	float targetVelYaw, float botVelYaw, float botSpeed, float crossTrack, float axesYaw)
 {
-	float correction;
+	float correction, wish;
 
 	if (humanSpeed < 50.0f || botSpeed < 50.0f)
 		return humanYaw;
-	correction = 0.5f * BotSFJ_AngleDelta(targetVelYaw, botVelYaw) -
+	correction = BOT_SFJ_REPLAY_HEADING_GAIN * BotSFJ_AngleDelta(targetVelYaw, botVelYaw) -
 		BotSFJ_ReplayClamp(crossTrack * BOT_SFJ_REPLAY_CROSS_GAIN, BOT_SFJ_REPLAY_CROSS_MAX);
 	/* Small heading errors fix themselves; chasing them every frame over-turns. */
 	if (fabsf(correction) < BOT_SFJ_REPLAY_YAW_DEADBAND)
 		correction = 0.0f;
 	correction = BotSFJ_ReplayClamp(correction, BOT_SFJ_REPLAY_YAW_CORRECTION);
-	return botVelYaw + BotSFJ_AngleDelta(humanYaw, humanVelYaw) + correction;
+	wish = BotSFJ_ReplayClamp(BotSFJ_AngleDelta(humanYaw - axesYaw, humanVelYaw) + correction,
+		BOT_SFJ_REPLAY_WISH_MAX);
+	return botVelYaw + wish + axesYaw;
+}
+
+/*
+ * Off the human line or short of the human's momentum, the route is kept and
+ * the hop falls back to the corner controller; replay resumes once the bot is
+ * back within half the soft deviation and has its speed again.
+ */
+static inline int BotSFJ_ReplayFallback(int falling, int offCourse, int slow, float deviation,
+	int haveSamples)
+{
+	const float soft = haveSamples ? BOT_SFJ_REPLAY_SOFT_DEVIATION : BOT_SFJ_REPLAY_LOOSE_SOFT_DEVIATION;
+
+	if (offCourse || slow)
+		return 1;
+	return falling && deviation > soft * 0.5f;
+}
+
+/* Only a sustained, very large drift gives the route up (and never counts against the hop). */
+static inline int BotSFJ_ReplayAbandon(float deviation, int deviatingMs, int haveSamples)
+{
+	return deviation > (haveSamples ? BOT_SFJ_REPLAY_ABANDON_DEVIATION :
+		BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION) && deviatingMs >= BOT_SFJ_REPLAY_ABANDON_MS;
 }
 
 /* Off-course test; haveSamples selects the tight replay limits. */
@@ -2915,6 +2961,40 @@ static inline int BotNav_EdgeStallCount(int count, int lastTime, float distanceF
 static inline float BotNav_EdgeEscapeScore(float clearance, float targetAlignment, int haveTarget)
 {
 	return clearance + (haveTarget ? targetAlignment * 64.0f : 0.0f);
+}
+
+/*
+ * A new escape at the same edge, soon after the last one, must not reverse it
+ * (the 15/195 ping-pong); it remains only a last resort when nothing else is safe.
+ */
+#define BOT_NAV_EDGE_REVERSE_PENALTY 1000.0f
+
+static inline int BotNav_EdgeEscapeReverses(int recentEscape, float previousAlignment)
+{
+	return recentEscape && previousAlignment < -0.5f;
+}
+
+/* Keep escaping past the commit time until the bot is this far from the edge (bounded). */
+#define BOT_NAV_LEDGE_CLEAR_DISTANCE 64.0f
+#define BOT_NAV_LEDGE_MAX_COMMIT_MS 1400
+
+static inline int BotNav_LedgeEscapeExtends(float distanceFromEdge, int escapingMs)
+{
+	return distanceFromEdge < BOT_NAV_LEDGE_CLEAR_DISTANCE && escapingMs >= 0 &&
+		escapingMs < BOT_NAV_LEDGE_MAX_COMMIT_MS;
+}
+
+/*
+ * Ledge recovery, a wall recovery or a roll on the ground pauses a recorded
+ * route instead of ending it; the route resumes when the recovery is over.
+ * Mid-jump conflicts and long pauses still end the route.
+ */
+#define BOT_SFJ_ROUTE_PAUSE_MAX_MS 1500
+
+static inline int BotSFJ_RoutePauseAllows(int route, int recovering, int airborneHop, int pausedMs)
+{
+	return route > 0 && recovering && !airborneHop &&
+		pausedMs >= 0 && pausedMs <= BOT_SFJ_ROUTE_PAUSE_MAX_MS;
 }
 
 /* ---- Combat edges ---- */

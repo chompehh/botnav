@@ -259,6 +259,14 @@ legal powers, no exclusive combat movement, headroom, a clear rear floor lane
 and a nonlethal swept return arc; it has a three-second cooldown. Lower-level
 wall flips and unverified forward vaults are deliberately not substituted.
 
+Ledge escapes aim for the route start, the active route's next landing or the
+travel goal (flag, enemy, item) before a legacy waypoint. Legacy waypoints are
+only swapped for edge dancing when no route or travel goal is active. A new
+escape at the same edge within four seconds never reverses the previous one
+unless nothing else is safe. An escape keeps going past its 700 ms commit until
+the bot is 64 units from where it started (at most 1.4 s), while the way ahead
+stays safe.
+
 Reproduce the `Strafetracks4` input comparison:
 
 ```sh
@@ -469,9 +477,11 @@ of a silently truncated replay. Vertical wallruns are included:
 
 Flags: 1 grounded, 2 jump held, 4 on a wall (`BOTH_FORCEWALLRUNFLIP_START`), 8 force jump, 16 wall state was recorded. `LocalStrafeRouteInput.wall_run` (and the `wall_run` column of `strafetrack_inputs.csv`) records the wall state; older rows have it `NULL`, so their wallruns are inferred from a forward-held airborne stop after a jump press followed by a climb of at least 40 units. Legacy blocks without `replay_samples` and node-only routes remain readable. Declared replays must contain exactly the promised number of valid inputs; malformed, incomplete or over-budget blocks are rejected as a whole. Older game modules cannot retain replays longer than 256 samples; use the updated module with the regenerated files. Run `exportStrafeTrack` (or let autoexport rewrite the file) to add samples to existing routes.
 
-While airborne on a route with samples, a bot matches its position to the human path (monotonically, so looping routes do not snap back) and copies the human's movement keys and the human's view angle **relative to velocity** at that point, with a correction toward the human path capped at ±10°. Replay matching continues while flying near or past a landing; it does not freeze until touchdown. A per-hop clock advances through stationary samples only as their recorded time becomes due, avoiding a stalled cursor without skipping pauses or later visits to the same location. Matching stays on the current hop, with up to 50 ms of lookahead that stops before key, flag or node transitions. Legacy hops without samples use their landing corridor. Each corner therefore gets the human's own yaw, not a fixed corner rule, and the view is not rate-limited during replay. Grounded repositioning before a new circle jump replays the human's absolute yaw and keys.
+While airborne on a route with samples, a bot matches its position to the human path (monotonically, so looping routes do not snap back) and copies the human's movement keys and the human's view angle **relative to velocity** at that point, plus a correction that steers the bot's velocity onto the human's travel direction (75% of the heading error) and path (up to 15°), capped at ±45°. The resulting wish (view minus the key axes) always stays within 90° of the bot's velocity, so an overturned bot turns back and a bot late into a corner turns harder without braking the hop. Replay matching continues while flying near or past a landing; it does not freeze until touchdown. A per-hop clock advances through stationary samples only as their recorded time becomes due, avoiding a stalled cursor without skipping pauses or later visits to the same location. Matching stays on the current hop, with up to 50 ms of lookahead that stops before key, flag or node transitions. Legacy hops without samples use their landing corridor. Each corner therefore gets the human's own yaw, not a fixed corner rule, and the view is not rate-limited during replay. Grounded repositioning before a new circle jump replays the human's absolute yaw and keys.
 
-Trust in the human route ends, the attempt counts as a hop failure, and the route is released when the bot is more than 160 units off the human path, more than 80 units for 300 ms, or below 1.05× normal speed (or under 60% of the human's speed) for 350 ms where the human was above 1.15× normal speed. Routes without samples use 256 / 192 units for 400 ms. Approaches, grounded restarts the human also made, samples where the human was on the ground or a wall, and hops not yet launched are exempt.
+When the bot is more than 160 units off the human path, more than 80 units for 300 ms, or below 1.05× normal speed (or under 60% of the human's speed) for 350 ms where the human was above 1.15× normal speed, the route is kept and the hop is steered by the corner controller (with corner anticipation) instead of the human's yaw. Replay resumes once the bot is back within 40 units and has its speed again. Routes without samples use 256 / 192 units for 400 ms. Trusted hops get twice the time. Only a drift of more than 256 units (384 without samples) for 500 ms gives the route up, and drifting never counts as a hop failure or costs trust. Approaches, grounded restarts the human also made, samples where the human was on the ground or a wall, and hops not yet launched are exempt.
+
+Only deaths, real hazards (kill triggers, lava/slime/nodrop, lethal landings) and repeated corroborated collisions count against a human hop. A takeoff rejected only because the arc prediction touches a wall or ledge (on a hop that is not trusted) ends that attempt without recording a failure. Ledge or wall recovery and rolls on the ground pause a recorded route for up to 1.5 s instead of ending it; the route's node and approach timers are extended by the pause. Mid-jump conflicts still end the route.
 
 A recorded vertical wallrun is replayed when an airborne bot (in `BOTH_JUMP1`/`BOTH_INAIR1`, Levitation 3 usable under `bot_forcepowers`/`g_forcePowerDisable`, no `SFL_NO_WALL_RUNS` saber) is within 48 units (40 vertically) of where the human hit the wall and a wall is directly ahead along the human's yaw. The bot faces the wall, holds forward, presses jump, and stays on the wall for the human's recorded time before pressing jump a second time (never sooner than the engine's 400 ms). The jump-off is skipped and the bot rides the wall if the landing behind is an instant-death hazard. Ledge-flip and drop exits ride the wall like the human did. Wallrun time is excluded from collision, momentum and off-course checks.
 
@@ -512,7 +522,7 @@ use, combat and hard engine-forced states still take priority. While on a route,
 each landing node is the movement goal and the strafe frequency wait is skipped.
 Every takeoff still passes landing and hazard checks. Finishing without a
 continuation, a sustained stall, a node timeout, or an overriding interaction
-returns control to ordinary navigation.
+returns control to ordinary navigation. A route approach step vetoed by a real hazard holds position facing the start instead of handing frames to legacy waypoint navigation; the approach watchdog ends a real stall.
 
 With `bot_strafe_loosen 1` (default) recorded routes allow for frame-rate differences between the human and the bot:
 - a landing counts as reached within 30% of the hop length (at least 80 and at least `bot_strafe_tolerance`, at most 256 units), or once the bot passes the landing's perpendicular plane within that width;
@@ -550,8 +560,10 @@ Route choice and chaining:
   traversal cost; a short local detour may still lead to a better connected endpoint.
 - `node_takeoff <x> <y> <z> <ground_ms>` records the takeoff for the hop ending at
   the preceding `node`. A ground interval of at least 250 ms, or repositioning
-  more than 48 units from the previous landing, starts a safe grounded approach
-  and a fresh circle jump. It is not treated as an uninterrupted hop chain or
+  more than 48 units from the previous landing, starts a fresh circle jump. A bot
+  that is within 48 units of that takeoff, already past it along the hop, or still
+  moving at 250 u/s or more re-jumps where it is; otherwise it walks forward to the
+  takeoff at full speed (no run-up point behind it, no arrival slowdown). It is not treated as an uninterrupted hop chain or
   an instruction to wait an exact number of milliseconds. Legacy input rows
   are used to recover takeoffs where possible; missing measurements stay unknown.
   Bot takeoff and landing transitions are also observed after each processed
@@ -633,7 +645,8 @@ Route choice and chaining:
   landing or mover), the bot still takes the hop the human took. Grounded
   frames on a trusted hop are released only for hazards, not for ledge lips.
   A hop loses that trust after a death on it, or after three or more real
-  failures to carry speed through it that outnumber its recent passes. Only lethal
+  failures (stalls, corroborated collisions, hazards) that outnumber its recent
+  passes. Drifting off the human line or a wall-only arc prediction is not a failure. Only lethal
   failures or untrusted hops receive a shared cooldown: initially 15 seconds
   for stalls/unsafe arcs or 60 seconds for lethal traversal, doubling with
   failures up to five minutes. Recent evidence
