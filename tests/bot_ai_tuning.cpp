@@ -4477,7 +4477,8 @@ BOOST_AUTO_TEST_CASE( trusted_human_routes_survive_a_single_setback )
 {
 	BOOST_CHECK( BotSFJ_CollisionEndsRoute(0, 1) );
 	BOOST_CHECK( !BotSFJ_CollisionEndsRoute(1, 1) );
-	BOOST_CHECK( BotSFJ_CollisionEndsRoute(1, 2) );
+	BOOST_CHECK( !BotSFJ_CollisionEndsRoute(1, 2) );
+	BOOST_CHECK( BotSFJ_CollisionEndsRoute(1, BOT_SFJ_TRUSTED_COLLISIONS) );
 
 	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 0, 5000) );
 	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 1000, 1200) );
@@ -4548,6 +4549,110 @@ BOOST_AUTO_TEST_CASE( air_side_switch_leads_the_velocity_turn )
 	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, 200.0f, 0.1f), -1 );
 	/* The lead is capped so a noisy rate cannot flip a correct side wildly. */
 	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, -5000.0f, 0.1f), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( defenders_recover_stolen_flags_or_escort_a_closer_carrier )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, 0.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, -1.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 200.0f, 1000.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 200.0f, 200.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, -1.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	/* Carriers always score, even if their own flag is stolen and closer. */
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(1, 1, 50.0f, 1000.0f), BOT_SFJ_GOAL_FLAG_SCORE );
+}
+
+BOOST_AUTO_TEST_CASE( routes_can_make_progress_inside_flag_capture_approaches )
+{
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(512.0f, 100.0f, 450.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(320.0f, 0.0f, 320.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(100.0f, 0.0f, 100.0f), 0.0f );
+	BOOST_CHECK_LT( BotSFJ_GoalRouteScore(100.0f, 200.0f, 100.0f), 0.0f );
+	BOOST_CHECK_LE( BotSFJ_GoalRouteScore(0.0f, 0.0f, 0.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(1000.0f, 200.0f, 100.0f), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( trusted_replay_tolerates_more_drift )
+{
+	const float dev = BOT_SFJ_REPLAY_ABANDON_DEVIATION * 1.2f;
+
+	BOOST_CHECK( BotSFJ_ReplayAbandonTrusted(dev, BOT_SFJ_REPLAY_ABANDON_MS, 1, 0) );
+	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(dev, BOT_SFJ_REPLAY_ABANDON_MS, 1, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(BOT_SFJ_REPLAY_ABANDON_DEVIATION * 2.0f,
+		BOT_SFJ_REPLAY_ABANDON_MS, 1, 1) );
+	BOOST_CHECK( BotSFJ_ReplayAbandonTrusted(BOT_SFJ_REPLAY_ABANDON_DEVIATION * 2.0f,
+		BOT_SFJ_REPLAY_ABANDON_MS * 2, 1, 1) );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayAbandonDeviation(1, 1), BOT_SFJ_REPLAY_ABANDON_DEVIATION * 1.5f, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayAbandonDeviation(0, 0), BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION, 0.01 );
+}
+
+BOOST_AUTO_TEST_CASE( human_yaw_is_copied_only_for_turns_or_trouble )
+{
+	bot_sfj_replay_sample_t samples[4];
+	int i;
+
+	memset(samples, 0, sizeof(samples));
+	for (i = 0; i < 4; i++)
+	{
+		samples[i].timeMs = i * 150;
+		samples[i].speed = 600.0f;
+		samples[i].velYaw = 90.0f;
+	}
+	BOOST_CHECK( !BotSFJ_ReplayTurnAhead(samples, 4, 0, BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG) );
+	samples[2].velYaw = 130.0f;
+	BOOST_CHECK( BotSFJ_ReplayTurnAhead(samples, 4, 0, BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG) );
+	/* A turn beyond the look-ahead window is not yet a reason to steer. */
+	samples[2].velYaw = 90.0f;
+	samples[3].velYaw = 130.0f;
+	BOOST_CHECK( !BotSFJ_ReplayTurnAhead(samples, 4, 0, BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG) );
+	/* Wrapping across 180 is a small turn. */
+	samples[3].velYaw = 90.0f;
+	samples[0].velYaw = 175.0f;
+	samples[1].velYaw = samples[2].velYaw = -175.0f;
+	BOOST_CHECK( !BotSFJ_ReplayTurnAhead(samples, 4, 0, BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG) );
+	BOOST_CHECK( !BotSFJ_ReplayTurnAhead(NULL, 4, 0, BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG) );
+
+	BOOST_CHECK( !BotSFJ_ReplaySteers(0, 0, 0, 0) );
+	BOOST_CHECK( BotSFJ_ReplaySteers(1, 0, 0, 0) );
+	BOOST_CHECK( BotSFJ_ReplaySteers(0, 1, 0, 0) );
+	BOOST_CHECK( BotSFJ_ReplaySteers(0, 0, 1, 0) );
+	BOOST_CHECK( BotSFJ_ReplaySteers(0, 0, 0, 1) );
+}
+
+BOOST_AUTO_TEST_CASE( recorded_evidence_overrides_predicted_hazards )
+{
+	BOOST_CHECK( BotSFJ_TrustOverridesPrediction(1, 0, 0) );
+	BOOST_CHECK( !BotSFJ_TrustOverridesPrediction(1, 1, 0) );
+	BOOST_CHECK( BotSFJ_TrustOverridesPrediction(1, 1, 1) );
+	BOOST_CHECK( !BotSFJ_TrustOverridesPrediction(0, 1, 1) );
+	BOOST_CHECK( !BotSFJ_TrustOverridesPrediction(0, 0, 1) );
+
+	BOOST_CHECK( BotSFJ_FlightHazardVetoes(1, 0, 1) );
+	BOOST_CHECK( BotSFJ_FlightHazardVetoes(1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_FlightHazardVetoes(1, 1, 1) );
+	BOOST_CHECK( !BotSFJ_FlightHazardVetoes(0, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( bots_ride_rising_elevators )
+{
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(0, 200.0f, 0, 1, -1, 0) );
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 200.0f, 0, 0, -1, 1000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, -1, 1000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, -200.0f, 0, 1, -1, 1000) );
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 0.0f, 1, 1, 200, 200) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 1, 0, 200, 200) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 1, 1, BOT_NAV_ELEVATOR_START_MS, 2000) );
+	/* A stuck lift never holds the bot forever. */
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 200.0f, 0, 1, -1, BOT_NAV_ELEVATOR_MAX_MS + 1) );
+
+	BOOST_CHECK( BotSFJ_ElevatorPauseAllows(1, 1, 0, 5000) );
+	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 0, 0, 0) );
+	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(0, 1, 0, 0) );
+	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 1, 0, BOT_NAV_ELEVATOR_MAX_MS + 1) );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

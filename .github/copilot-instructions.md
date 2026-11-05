@@ -53,7 +53,9 @@ Key entry points: `StandardBotAI` (per-frame), `CombatBotAI`, `NewBotAI_ReactToB
 - Learned preferences are additive, capped (±`BOTLEARN_BONUS_CAP`) bonuses and must never
   override legal-action, movement-safety or defense-recovery gates.
 - Strafe-jump safety: never drop hazard, trigger_hurt, lava, slime or nodrop checks when relaxing
-  wall or conflict rules.
+  wall or conflict rules. Exception: on trusted recorded human hops (no recorded death) with
+  `bot_strafe_trusthuman 1`, predicted hazards are advisory and recorded deaths decide trust.
+  Improvised jumps always keep every hazard check.
 - C89-style C in `codemp/game` (declarations at the top of blocks, tabs for indentation).
   Keep the code style that is already in the file.
 

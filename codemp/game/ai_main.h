@@ -694,6 +694,9 @@ typedef struct bot_state_s
 	int					sfjReplaySlowSince;
 	qboolean			sfjReplayFallback;	// off the human line or slow: corner steering keeps the route
 	int					sfjRoutePauseSince;	// route paused (not ended) while ledge recovery or a roll owns movement
+	qboolean			sfjReplaySteer;		// human yaw/keys steer this frame (data turn, wallrun or trouble)
+	int					navRideStart;		// standing on a lift since (0 = not riding)
+	int					navRideRestSince;	// lift underfoot resting at its low end since
 	int					sfjRouteWallStage;	// recorded wallrun replay: 0 idle, 1 trigger, 2 on wall, 3 exit
 	int					sfjRouteWallIndex;
 	int					sfjRouteWallStart;

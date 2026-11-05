@@ -61,6 +61,13 @@ static inline int BotSFJ_FlagGoal(int carrying, int ownUnsafe, float ownCost, fl
 	return BOT_SFJ_GOAL_FLAG_ATTACK;
 }
 
+static inline int BotSFJ_DefenderGoal(int ownUnsafe, float ownCost, float teammateCost)
+{
+	if (ownUnsafe && ownCost >= 0.0f && (teammateCost < 0.0f || ownCost <= teammateCost))
+		return BOT_SFJ_GOAL_FLAG_RECOVER;
+	return teammateCost >= 0.0f ? BOT_SFJ_GOAL_ESCORT : BOT_SFJ_GOAL_FLAG_ATTACK;
+}
+
 static inline int BotSFJ_WallRunAllows(int navigation, int grounded, int nearbyEnemy,
 	int level, int forceAllowed, int force, int conflict, int retryReady)
 {
@@ -282,9 +289,10 @@ static inline int BotSFJ_TrackSpeedToggled(int startActive, int active)
  * Human routes are trusted over the bot's own arc prediction (walls, ledges,
  * off-corridor landings). Trust is lost only after a death on the route, or
  * after repeated real failures to carry speed through the hop that outnumber
- * its successful passes. Hazards are never trusted away.
+ * its successful passes. Recorded evidence decides: see
+ * BotSFJ_TrustOverridesPrediction for predicted hazards.
  */
-#define BOT_SFJ_TRACK_TRUST_FAILURES 3
+#define BOT_SFJ_TRACK_TRUST_FAILURES 5
 
 static inline int BotSFJ_TrackHopTrusted(int deaths, int failures, int passes)
 {
@@ -2578,6 +2586,55 @@ static inline int BotSFJ_ReplayAbandon(float deviation, int deviatingMs, int hav
 		BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION) && deviatingMs >= BOT_SFJ_REPLAY_ABANDON_MS;
 }
 
+/*
+ * A trusted human hop keeps the route through 1.5x the drift for twice as long:
+ * a poor scan or lookahead is not evidence that the human line is wrong.
+ */
+static inline int BotSFJ_ReplayAbandonTrusted(float deviation, int deviatingMs, int haveSamples,
+	int trusted)
+{
+	if (!trusted)
+		return BotSFJ_ReplayAbandon(deviation, deviatingMs, haveSamples);
+	return BotSFJ_ReplayAbandon(deviation / 1.5f, deviatingMs / 2, haveSamples);
+}
+
+static inline float BotSFJ_ReplayAbandonDeviation(int haveSamples, int trusted)
+{
+	return (haveSamples ? BOT_SFJ_REPLAY_ABANDON_DEVIATION :
+		BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION) * (trusted ? 1.5f : 1.0f);
+}
+
+/*
+ * Human yaw is copied only where it solves a problem: the recorded travel
+ * direction turns by at least BOT_SFJ_REPLAY_TURN_DEG within the next
+ * BOT_SFJ_REPLAY_TURN_MS (an obvious corner in the data), the human wallran, or
+ * the bot is in trouble here (a momentum-killing collision or lost speed).
+ * Elsewhere the bot's own strafe controller follows the human line.
+ */
+#define BOT_SFJ_REPLAY_TURN_DEG 25.0f
+#define BOT_SFJ_REPLAY_TURN_MS 400
+
+static inline int BotSFJ_ReplayTurnAhead(const bot_sfj_replay_sample_t *samples, int count,
+	int index, int aheadMs, float minDegrees)
+{
+	int i;
+
+	if (!samples || index < 0 || index >= count || samples[index].speed < 50.0f)
+		return 0;
+	for (i = index + 1; i < count && samples[i].timeMs - samples[index].timeMs <= aheadMs; i++)
+	{
+		if (samples[i].speed >= 50.0f &&
+			fabsf(BotSFJ_AngleDelta(samples[i].velYaw, samples[index].velYaw)) >= minDegrees)
+			return 1;
+	}
+	return 0;
+}
+
+static inline int BotSFJ_ReplaySteers(int turnAhead, int wallrun, int collisions, int slow)
+{
+	return turnAhead || wallrun || collisions > 0 || slow;
+}
+
 /* Off-course test; haveSamples selects the tight replay limits. */
 static inline int BotSFJ_ReplayOffCourse(float deviation, int deviatingMs, int haveSamples)
 {
@@ -2880,10 +2937,52 @@ static inline int BotSFJ_DebugTextTone(const char *text, int fallback)
 }
 
 /* ---- Trusting human routes ---- */
-/* A trusted human hop survives one momentum collision; the second ends it. */
+/*
+ * A trusted human hop survives two momentum collisions (the bot switches to the
+ * human's yaw after the first); the third ends it.
+ */
+#define BOT_SFJ_TRUSTED_COLLISIONS 3
+
 static inline int BotSFJ_CollisionEndsRoute(int trusted, int collisions)
 {
-	return collisions >= (trusted ? 2 : 1);
+	return collisions >= (trusted ? BOT_SFJ_TRUSTED_COLLISIONS : 1);
+}
+
+/*
+ * Recorded evidence, not the bot's own scan, decides human hops. With
+ * bot_strafe_trusthuman a trusted hop (no recorded death, failures within
+ * bounds) is attempted even when the bot predicts a hazard, a mover or an open
+ * drop; one recorded lethal fall makes the hop untrusted and every hazard check
+ * applies again. Improvised and untrusted jumps always keep the hazard checks.
+ */
+static inline int BotSFJ_TrustOverridesPrediction(int trusted, int hazard, int trustHuman)
+{
+	return trusted && (!hazard || trustHuman);
+}
+
+/* Aborting a trusted human hop mid-air drops strafe control over the gap it crosses. */
+static inline int BotSFJ_FlightHazardVetoes(int hazardAhead, int trustedHop, int trustHuman)
+{
+	return hazardAhead && !(trustedHop && trustHuman);
+}
+
+/* ---- Elevators ---- */
+#define BOT_NAV_ELEVATOR_RISE_SPEED 8.0f
+#define BOT_NAV_ELEVATOR_START_MS 1500
+#define BOT_NAV_ELEVATOR_MAX_MS 15000
+
+/*
+ * Ride a lift up: hold still while the mover underfoot rises, and briefly on a
+ * lift resting at its low end (standing on it starts it) when the goal is above.
+ */
+static inline int BotNav_ElevatorRideHolds(int onMover, float riseSpeed, int atLowRest,
+	int goalAbove, int restMs, int rideMs)
+{
+	if (!onMover || rideMs < 0 || rideMs > BOT_NAV_ELEVATOR_MAX_MS)
+		return 0;
+	if (riseSpeed > BOT_NAV_ELEVATOR_RISE_SPEED)
+		return 1;
+	return atLowRest && goalAbove && restMs >= 0 && restMs < BOT_NAV_ELEVATOR_START_MS;
 }
 
 #define BOT_SFJ_APPROACH_BLOCK_MS 250
@@ -2995,6 +3094,13 @@ static inline int BotSFJ_RoutePauseAllows(int route, int recovering, int airborn
 {
 	return route > 0 && recovering && !airborneHop &&
 		pausedMs >= 0 && pausedMs <= BOT_SFJ_ROUTE_PAUSE_MAX_MS;
+}
+
+/* Riding a lift pauses a grounded route for as long as the ride may last. */
+static inline int BotSFJ_ElevatorPauseAllows(int route, int riding, int airborneHop, int pausedMs)
+{
+	return route > 0 && riding && !airborneHop &&
+		pausedMs >= 0 && pausedMs <= BOT_NAV_ELEVATOR_MAX_MS;
 }
 
 /* ---- Combat edges ---- */
