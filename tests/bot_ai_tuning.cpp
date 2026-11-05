@@ -4240,20 +4240,89 @@ static bot_sfj_replay_sample_t ReplaySample(float x, float y, float z, float yaw
 BOOST_AUTO_TEST_CASE( replay_view_yaw_copies_the_humans_corner_not_a_fixed_rule )
 {
 	/* Two corners at the same velocity: the human held 20 and 45 degrees of wish offset. */
-	const float gentle = BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f);
-	const float sharp = BotSFJ_ReplayViewYaw(135.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f);
+	const float gentle = BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f, 0.0f);
+	const float sharp = BotSFJ_ReplayViewYaw(135.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f, 0.0f);
 
 	BOOST_CHECK_CLOSE( gentle, 110.0f, 0.01 );
 	BOOST_CHECK_CLOSE( sharp, 135.0f, 0.01 );
-	/* The offset follows the bot's own velocity, plus a bounded correction. */
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 80.0f, 600.0f, 0.0f),
-		80.0f + 20.0f + 5.0f, 0.01 );
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 150.0f, 80.0f, 600.0f, 0.0f),
+	/* The offset follows the bot's own velocity, plus a correction onto the human's heading. */
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 80.0f, 600.0f, 0.0f, 0.0f),
+		80.0f + 20.0f + 10.0f * BOT_SFJ_REPLAY_HEADING_GAIN, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 150.0f, 80.0f, 600.0f, 0.0f, 0.0f),
 		80.0f + 20.0f + BOT_SFJ_REPLAY_YAW_CORRECTION, 0.01 );
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 1000.0f),
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 1000.0f, 0.0f),
 		110.0f - BOT_SFJ_REPLAY_CROSS_MAX, 0.01 );
+	/* Key axes shift the view, not the wish: A+W at 45 degrees keeps the human's wish. */
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(135.0f, 90.0f, 600.0f, 90.0f, 90.0f, 600.0f, 0.0f, 45.0f),
+		135.0f, 0.01 );
 	/* Slow (repositioning on the ground) copies the absolute human yaw. */
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(200.0f, 90.0f, 20.0f, 90.0f, 90.0f, 600.0f, 0.0f), 200.0f, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(200.0f, 90.0f, 20.0f, 90.0f, 90.0f, 600.0f, 0.0f, 0.0f), 200.0f, 0.01 );
+}
+
+BOOST_AUTO_TEST_CASE( replay_view_yaw_turns_back_after_overturning_and_follows_late_corners )
+{
+	/* Overturned 60 degrees left of the human's travel: the wish crosses to the right of velocity. */
+	const float overturn = BotSFJ_ReplayViewYaw(110.0f, 90.0f, 600.0f, 90.0f, 150.0f, 600.0f, 0.0f, 0.0f);
+	/* Route 65: human turned to 314 while the bot kept flying at 10; the bot turns hard right. */
+	const float late = BotSFJ_ReplayViewYaw(300.0f, 314.0f, 600.0f, 314.0f, 10.0f, 600.0f, 0.0f, 0.0f);
+
+	BOOST_CHECK( BotSFJ_AngleDelta(overturn, 150.0f) < 0.0f );
+	BOOST_CHECK( BotSFJ_AngleDelta(late, 10.0f) < -40.0f );
+	/* The old bounded 10 degree correction would have kept the bot turning the wrong way. */
+	BOOST_CHECK( BotSFJ_AngleDelta(late, 10.0f) < -14.0f - 10.0f );
+	/* The wish never goes past 90 degrees off the bot's velocity, so the hop never brakes. */
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(170.0f, 90.0f, 600.0f, 150.0f, 90.0f, 600.0f, 0.0f, 0.0f),
+		90.0f + BOT_SFJ_REPLAY_WISH_MAX, 0.01 );
+	BOOST_CHECK_CLOSE( BotSFJ_ReplayViewYaw(170.0f, 90.0f, 600.0f, 150.0f, 90.0f, 600.0f, 0.0f, 45.0f),
+		90.0f + 35.0f + BOT_SFJ_REPLAY_YAW_CORRECTION + 45.0f, 0.01 );
+}
+
+BOOST_AUTO_TEST_CASE( replay_drift_keeps_the_route_with_corner_steering )
+{
+	/* Off course or slow: corner steering, never an ended route or a hop failure. */
+	BOOST_CHECK( BotSFJ_ReplayFallback(0, 1, 0, 100.0f, 1) );
+	BOOST_CHECK( BotSFJ_ReplayFallback(0, 0, 1, 5.0f, 1) );
+	/* Hysteresis: replay resumes only once well back on the line. */
+	BOOST_CHECK( BotSFJ_ReplayFallback(1, 0, 0, 50.0f, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayFallback(1, 0, 0, 30.0f, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayFallback(0, 0, 0, 70.0f, 1) );
+	/* Only a sustained, very large drift gives the route up. */
+	BOOST_CHECK( !BotSFJ_ReplayAbandon(200.0f, 5000, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayAbandon(300.0f, 400, 1) );
+	BOOST_CHECK( BotSFJ_ReplayAbandon(300.0f, 500, 1) );
+	BOOST_CHECK( !BotSFJ_ReplayAbandon(300.0f, 600, 0) );
+	BOOST_CHECK( BotSFJ_ReplayAbandon(400.0f, 600, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( mid_route_ground_restart_rejumps_in_place )
+{
+	/* The route start still uses its exact approach. */
+	BOOST_CHECK( !BotSFJ_RestartInPlace(0, 300.0f, 50.0f, 400.0f) );
+	BOOST_CHECK( BotSFJ_RestartInPlace(1, 100.0f, 10.0f, 0.0f) );
+	BOOST_CHECK( BotSFJ_RestartInPlace(1, 30.0f, -30.0f, 0.0f) );
+	BOOST_CHECK( BotSFJ_RestartInPlace(1, 100.0f, -100.0f, 300.0f) );
+	/* Short of the takeoff and slow: walk forward to it. */
+	BOOST_CHECK( !BotSFJ_RestartInPlace(1, 100.0f, -100.0f, 100.0f) );
+}
+
+BOOST_AUTO_TEST_CASE( ledge_escapes_do_not_ping_pong_and_routes_pause_for_recovery )
+{
+	BOOST_CHECK( BotNav_EdgeEscapeReverses(1, -0.9f) );
+	BOOST_CHECK( !BotNav_EdgeEscapeReverses(1, 0.0f) );
+	BOOST_CHECK( !BotNav_EdgeEscapeReverses(0, -1.0f) );
+	/* A reversed escape loses even to a poorly aligned one. */
+	BOOST_CHECK( BotNav_EdgeEscapeScore(64.0f, 1.0f, 1) - BOT_NAV_EDGE_REVERSE_PENALTY <
+		BotNav_EdgeEscapeScore(8.0f, -1.0f, 1) );
+	BOOST_CHECK( BotNav_LedgeEscapeExtends(30.0f, 800) );
+	BOOST_CHECK( !BotNav_LedgeEscapeExtends(70.0f, 800) );
+	BOOST_CHECK( !BotNav_LedgeEscapeExtends(30.0f, 1500) );
+
+	BOOST_CHECK( BotSFJ_RoutePauseAllows(1, 1, 0, 0) );
+	BOOST_CHECK( BotSFJ_RoutePauseAllows(1, 1, 0, 1000) );
+	BOOST_CHECK( !BotSFJ_RoutePauseAllows(0, 1, 0, 0) );
+	BOOST_CHECK( !BotSFJ_RoutePauseAllows(1, 0, 0, 0) );
+	BOOST_CHECK( !BotSFJ_RoutePauseAllows(1, 1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_RoutePauseAllows(1, 1, 0, 2000) );
 }
 
 BOOST_AUTO_TEST_CASE( replay_off_course_and_momentum_limits )
