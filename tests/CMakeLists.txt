@@ -24,6 +24,7 @@ endif(NOT InOpenJK)
 set(TestFiles
 	"main.cpp"
 	"bot_ai_tuning.cpp"
+	"bot_replay_export.cpp"
 	"jvm_rules.cpp"
 	"ui_profile.cpp"
 	"bot_learning.cpp"

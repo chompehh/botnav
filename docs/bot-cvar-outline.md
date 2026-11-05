@@ -395,8 +395,10 @@ Session/journey IDs and route `start_ms`/`end_ms` connect movement segments acro
 ground pauses. Player-confirmed captures and returns mark associated routes
 `objective_success = 1`; automatic flag resets are not player success evidence.
 Historical rows without this instrumentation remain unknown, not failed runs.
-Objective-confirmed demonstrations receive a bounded preference, never a bypass
-of goal progress, power availability or movement safety.
+Objective-confirmed demonstrations retain their success labels, but receive no
+unconditional navigation bonus: a successful journey contains both outbound
+flag acquisition and return segments. Current goal progress, power availability
+and movement safety determine which direction is useful now.
 
 The October 28 "Strafetracks 3" snapshot contains 265 human and 2,115 bot routes on
 `mp/ctf4`, but its old schemas have no flag events or gametype, so they cannot prove
@@ -426,7 +428,7 @@ With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewr
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at 24 MB, like `exportDuelTrack`);
-- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 256 routes per map are chosen, starts at least 192 units apart, in order of human value (length x average speed) times the bots' own result on the loaded map: neutral until the bots have tried a route 4 times, then (0.25 + 1.5 x success rate) x speed retention, halving every two further failures while never completed. Fast routes the bots finish stay; routes they keep failing drop out first. Routes saved by older builds get their hop style measured once from their stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
+- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 256 routes per map are chosen across Speed-context quotas. Half of each quota is reserved for starts at least 192 units apart; selection then preserves distinct start/destination and force/movement combinations before filling remaining slots by quality. Human value (length x average speed) is weighted by bounded recent bot hop results and measured performance on the loaded map, matched to the recording's identity and Speed context. Lifetime stalls and whole-route noncompletion do not progressively erase useful prefixes. Objective-success labels are retained without a direction-blind ranking bonus. Routes saved by older builds get their hop style measured once from their stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, so hand-written `strafejump` blocks are kept;
 - reloads the routes, so bots start using them immediately.
 
 Recorded route block format:
@@ -450,16 +452,24 @@ The route-level `speed_active` / `speed_level` keywords precede all nodes. `node
 
 ### Human replay samples and recorded wallruns
 
-Exported routes also carry the human's decimated inputs (kept on every key/flag change, node change, and every 20 units, 4° of yaw or 100 ms; at most 256 per route) and any vertical wallruns:
+Exported routes also carry the human's decimated inputs. Both sides of every
+key, flag, and node transition survive, alongside samples every 20 units,
+4 degrees of yaw or 100 ms. There is no final uniform downsampling that removes
+ground contacts. Complete replays share a dynamically allocated pool of up to
+131,072 samples per map, with at most 4,096 per route, rather than allocating
+that maximum for every route. Routes that cannot fit produce diagnostics instead
+of a silently truncated replay. Vertical wallruns are included:
 
 ```
+    replay_samples 2   // complete number of input lines in this block
     input   2 1840 1532.0 -462.0 140.0 96.5 81.0 512 127 -127 0 0   // node, ms, x y z, view yaw, velocity yaw, speed, forward right up, flags
+    input   2 1850 1537.0 -462.0 138.0 96.5 81.0 514 127 -127 0 0
     wallrun 3 1710.0 -300.0 180.0 90.0 620 540 1 0                    // node, wall x y z, yaw, air ms before, ms on wall before the second jump, exit (1 jump-off, 2 ledge flip, 0 drop), inferred
 ```
 
-Flags: 1 grounded, 2 jump held, 4 on a wall (`BOTH_FORCEWALLRUNFLIP_START`), 8 force jump, 16 wall state was recorded. `LocalStrafeRouteInput.wall_run` (and the `wall_run` column of `strafetrack_inputs.csv`) records the wall state; older rows have it `NULL`, so their wallruns are inferred from a forward-held airborne stop after a jump press followed by a climb of at least 40 units. Old game modules ignore the new lines. Run `exportStrafeTrack` (or let autoexport rewrite the file) to add samples to existing routes.
+Flags: 1 grounded, 2 jump held, 4 on a wall (`BOTH_FORCEWALLRUNFLIP_START`), 8 force jump, 16 wall state was recorded. `LocalStrafeRouteInput.wall_run` (and the `wall_run` column of `strafetrack_inputs.csv`) records the wall state; older rows have it `NULL`, so their wallruns are inferred from a forward-held airborne stop after a jump press followed by a climb of at least 40 units. Legacy blocks without `replay_samples` and node-only routes remain readable. Declared replays must contain exactly the promised number of valid inputs; malformed, incomplete or over-budget blocks are rejected as a whole. Older game modules cannot retain replays longer than 256 samples; use the updated module with the regenerated files. Run `exportStrafeTrack` (or let autoexport rewrite the file) to add samples to existing routes.
 
-While airborne on a route with samples, a bot matches its position to the human path (monotonically, so looping routes do not snap back) and copies the human's movement keys and the human's view angle **relative to velocity** at that point, with a correction toward the human path capped at ±10°. Each corner therefore gets the human's own yaw, not a fixed corner rule, and the view is not rate-limited during replay. Grounded repositioning before a new circle jump replays the human's absolute yaw and keys.
+While airborne on a route with samples, a bot matches its position to the human path (monotonically, so looping routes do not snap back) and copies the human's movement keys and the human's view angle **relative to velocity** at that point, with a correction toward the human path capped at ±10°. Replay matching continues while flying near or past a landing; it does not freeze until touchdown. A per-hop clock advances through stationary samples only as their recorded time becomes due, avoiding a stalled cursor without skipping pauses or later visits to the same location. Matching stays on the current hop, with up to 50 ms of lookahead that stops before key, flag or node transitions. Legacy hops without samples use their landing corridor. Each corner therefore gets the human's own yaw, not a fixed corner rule, and the view is not rate-limited during replay. Grounded repositioning before a new circle jump replays the human's absolute yaw and keys.
 
 Trust in the human route ends, the attempt counts as a hop failure, and the route is released when the bot is more than 160 units off the human path, more than 80 units for 300 ms, or below 1.05× normal speed (or under 60% of the human's speed) for 350 ms where the human was above 1.15× normal speed. Routes without samples use 256 / 192 units for 400 ms. Approaches, grounded restarts the human also made, samples where the human was on the ground or a wall, and hops not yet launched are exempt.
 
@@ -489,7 +499,11 @@ start and only position is checked. Being near the start is never enough on
 its own. A blocked approach, two seconds without 16 units of progress, or an
 approach over twenty seconds falls back to ordinary navigation and looks for
 another start right away. A chain into another route at 250 u/s or more keeps
-its momentum and uses the earlier 48-unit entry. Nearby mid-route pickups remain available as described below.
+its momentum and uses the earlier 48-unit entry. Each recorded ground restart
+gets its own approach timer, even after twenty seconds of successful route travel.
+Residual weapon cooldown without a visible enemy or queued attack does not
+interrupt navigation; real attacks and special movement retain their gates.
+Nearby mid-route pickups remain available as described below.
 
 Recorded routes take precedence over single-jump hints and waypoint corridors.
 During approach and chaining, incidental waypoint jump/duck flags and navigation
@@ -517,11 +531,22 @@ Route choice and chaining:
   away and finish at least 128 units farther from the opponent. Cached choices
   and planned successors recheck endpoint separation against the opponent's
   current position; chained escape searches use the away-from-opponent heading.
+- Safe forward starts take priority over higher-rated starts behind the bot.
+  Walking forward to a useful start is checked before accepting a backward
+  acquisition. Direction is measured toward the current strategic goal, or
+  current momentum when there is no strategic goal. Existing forward walks
+  remain committed; backward walks are reconsidered periodically. A short-lived,
+  per-bot recent-route penalty discourages ping-pong without permanently banning
+  routes or preventing necessary retreat/goal-change reversals.
 - Connections retain their exact destination entry node, not only their distance.
   Planning can traverse multiple routes that are not directly reachable from the
   bot's current position; every connected suffix must actually be available.
-  The selected successor is used when the first route finishes, with a fresh
-  walk/hop check. Endpoint progress toward the strategic goal must outweigh
+  A route with an unavailable later hop can still be acquired for its usable
+  prefix. Its score uses that prefix's endpoint and evidence, never the unreachable
+  original endpoint. At the boundary, the bot replans from its actual position;
+  connections from the original endpoint are not borrowed for a partial route.
+  Successors are reconsidered against the current goal and forward walking
+  alternatives when the first route finishes. Endpoint progress must outweigh
   traversal cost; a short local detour may still lead to a better connected endpoint.
 - `node_takeoff <x> <y> <z> <ground_ms>` records the takeoff for the hop ending at
   the preceding `node`. A ground interval of at least 250 ms, or repositioning
@@ -529,6 +554,10 @@ Route choice and chaining:
   and a fresh circle jump. It is not treated as an uninterrupted hop chain or
   an instruction to wait an exact number of milliseconds. Legacy input rows
   are used to recover takeoffs where possible; missing measurements stay unknown.
+  Bot takeoff and landing transitions are also observed after each processed
+  movement command, not only at AI think intervals. Emitting jump input alone
+  is not credited as takeoff, and passing a landing in flight is not success.
+  Confirmed passes clear hop-local collision and replay drift timers.
 - A measured speed loss of at least 200 u/s to at most 45% of the preceding
   speed, from at least 300 u/s within 150 ms, is a collision failure only when
   a world-wall hull sweep corroborates it during a launched hop. Forced movement,
@@ -550,9 +579,11 @@ Route choice and chaining:
 - A bounded, directed route network joins recorded endpoints to circle starts
   or intermediate landings
   through swept, floor-checked connectors up to 1,024 units long. Connectivity
-  is built one route per frame and shared between bots. Planning considers safe
-  acquisition cost, recorded speed, completion history, stalls, and individual
-  hop reliability. A longer, faster or more reliable route may be chosen over
+  is refreshed one route per frame and shared between bots, with travel-direction
+  diversity and alternative destination entries after failed connector checks.
+  Planning considers safe acquisition cost, recorded speed, and bounded hop
+  evidence. Reliability is averaged across the selected range, not multiplied
+  across every hop in a long recording. A longer, faster or more reliable route may be chosen over
   a nearer one: its credit is up to 384 units of extra walking, scaled by its
   completion rate, hop reliability, length (full at 2,048 units) and average
   recorded speed (full at 600 u/s). Actual approaches are checked again
@@ -572,18 +603,25 @@ Route choice and chaining:
   distances. Defensive aggression and existing retreat decisions favor routes
   that gain enemy separation; carrying a flag keeps the objective destination.
   Backward-facing escape and saber-only restrictions still apply.
-- Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by start
-  and last landing plus execution speed context so re-exports retain history.
-  The versioned format begins with `botroute_stats 5`; each route stores start x/y/z, last landing x/y/z,
+- Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by recording
+  ID, creation time, start and last landing, and execution speed context so
+  re-exports retain history without contaminating different recordings.
+  The versioned format begins with `botroute_stats 7`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
   traversal deaths, unsafe-arc rejections, and 32 groups of hop failures, passes,
-  successful force-jump hold height, and successful yaw correction.
+  successful force-jump hold height, and successful yaw correction, followed by
+  recording ID and creation time, then 32 groups of hop deaths, recent failures,
+  and recent passes.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
-  unknown legacy history for export ranking. Legacy eight-field and versions 2-4
+  unknown legacy history. Legacy eight-field and versions 2-6
   remain readable. Version 3 files are migrated once: hop failures, stalls
   and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
-  cleared, while deaths, passes and completions are kept. Joining mid-route or chaining in counts as an attempt.
+  cleared, while deaths, passes and completions are kept. Older formats cannot
+  identify which hop caused a death, so those deaths are conservatively retained
+  for every hop; new deaths are localized to the launched hop. Lifetime counters
+  remain available for diagnosis, while bounded recent evidence drives preferences.
+  Joining mid-route or chaining in counts as an attempt.
   Interrupted attempts are excluded from the completion-rate denominator.
   Approach walking is excluded from the measured distance, duration and speed
   integrals; measurement begins at the circle start.
@@ -595,11 +633,14 @@ Route choice and chaining:
   landing or mover), the bot still takes the hop the human took. Grounded
   frames on a trusted hop are released only for hazards, not for ledge lips.
   A hop loses that trust after a death on it, or after three or more real
-  failures to carry speed through it that outnumber its passes. Only lethal
+  failures to carry speed through it that outnumber its recent passes. Only lethal
   failures or untrusted hops receive a shared cooldown: initially 15 seconds
   for stalls/unsafe arcs or 60 seconds for lethal traversal, doubling with
-  failures up to five minutes. Reliability penalties
-  persist across maps/restarts, while successful prefixes remain usable; bots
+  failures up to five minutes. Recent evidence
+  persists across maps/restarts but recovers as successful passes accumulate;
+  lifetime stall and repeated whole-route noncompletion penalties are not stacked.
+  Acquisition failures and interruptions do not count as launched-hop failures.
+  Successful prefixes remain usable; bots
   stop before a quarantined hop rather than repeating it. Falling, lava, slime
   and kill-trigger deaths are attributed to the launched hop, including a
   three-second window after airborne input release. Unrelated combat deaths are
