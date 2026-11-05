@@ -218,7 +218,12 @@ CTF/CTY goals work without a legacy waypoint file. Carrying a flag selects the
 home base; otherwise a stolen/dropped own flag is preferred when its estimated
 travel cost is no greater than the enemy flag's. A safe own flag selects enemy
 flag attack; an allied carrier selects escort. Nearby visible combat still takes
-input priority. Other modes pursue the current visible/recently seen enemy, or
+input priority for non-carriers. Defenders pursue a stolen own flag (or recover
+its dropped location), unless a teammate carrying the enemy flag is closer to
+the bot; then they escort that teammate. When their own flag is safe, defenders
+attack or escort instead of guarding an idle base. Carriers prioritize returning
+to the original home base over equipment gathering, forced roles or chasing the
+stolen own flag, including within 512 units of scoring. Other modes pursue the current visible/recently seen enemy, or
 use a map objective/free-run goal; defensive routes must increase separation.
 `bot_strafejumps_debug 2` names the goal and player, selected entry, next chain
 route, destination route, goal gain, travel cost, alternative, mean/peak/end speed,
@@ -494,7 +499,7 @@ In combat (enemy within 1024 units) a grounded bot checks its movement and veloc
 
 Bots copy each hop: the first key side (when the route is within 20° of the velocity), side-only vs full beat, the mid-air switch point and the yaw speeds. On a `node_force` hop a bot with levitation (and `bot_forcepowers` on, levitation not in `g_forcePowerDisable`) keeps holding jump from takeoff until it is as high as the human was. Older game modules skip the `node_style` / `node_force` lines.
 
-Travel goals: a CTF defender whose flag is home targets its own base (`defend-base`) instead of the enemy flag, so legacy defence navigation and routes agree. A legacy waypoint objective within 512 units of the bot's own flag base is ignored as a travel goal unless the bot carries a flag or defends. Within 320 units of its goal no route scores as progress, so arrived bots stop seeking routes. A goal change keeps the recently-run route memory, preventing an immediate run back along the same route.
+Travel goals: legacy CTF navigation and strafe-route goals share the defender recovery/escort priorities above. There is no 512-unit base exclusion or 320-unit arrival cutoff: a route that makes worthwhile progress toward the goal remains eligible even on the final capture approach. Explicit goals survive route completion, so chaining remains goal-directed rather than reverting to free-run selection near the flag. A goal change keeps the recently-run route memory, preventing an immediate run back along the same route.
 
 Elevators: a bot standing on a rising mover (`ET_MOVER`) holds still and skips ledge escape until the lift stops (at most 15 s), pausing (not ending) an active recorded route; on a lift resting at its low end with the goal above, it waits up to 1.5 s for the lift to start. A close visible enemy cancels the wait.
 

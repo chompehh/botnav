@@ -34,8 +34,7 @@ typedef enum
 	BOT_SFJ_GOAL_FLAG_RECOVER,
 	BOT_SFJ_GOAL_FLAG_SCORE,
 	BOT_SFJ_GOAL_ESCORT,
-	BOT_SFJ_GOAL_OBJECTIVE,
-	BOT_SFJ_GOAL_DEFEND
+	BOT_SFJ_GOAL_OBJECTIVE
 } bot_sfj_goal_t;
 
 static inline const char *BotSFJ_GoalName(int goal)
@@ -49,7 +48,6 @@ static inline const char *BotSFJ_GoalName(int goal)
 	case BOT_SFJ_GOAL_FLAG_SCORE: return "score-flag";
 	case BOT_SFJ_GOAL_ESCORT: return "escort";
 	case BOT_SFJ_GOAL_OBJECTIVE: return "map-objective";
-	case BOT_SFJ_GOAL_DEFEND: return "defend-base";
 	default: return "free-run";
 	}
 }
@@ -63,29 +61,11 @@ static inline int BotSFJ_FlagGoal(int carrying, int ownUnsafe, float ownCost, fl
 	return BOT_SFJ_GOAL_FLAG_ATTACK;
 }
 
-/*
- * A CTF defender whose flag is home guards its base instead of running routes
- * toward the enemy flag, which the legacy defender navigation keeps undoing.
- */
-static inline int BotSFJ_DefendGoal(int defender, int carrying, int ownFlagHome)
+static inline int BotSFJ_DefenderGoal(int ownUnsafe, float ownCost, float teammateCost)
 {
-	return defender && !carrying && ownFlagHome;
-}
-
-/*
- * Legacy waypoint destinations near the bot's own flag base are not travel goals
- * for an attacker: following them makes bots run routes back and forth across
- * their own base. Carriers and defenders use the base on purpose.
- */
-#define BOT_SFJ_OWN_BASE_RADIUS 512.0f
-
-static inline int BotSFJ_ObjectiveGoalAllows(int haveDestination, int objective,
-	float ownBaseDistance, int carrying, int defender)
-{
-	if (!haveDestination || !objective)
-		return 0;
-	return carrying || defender || !(ownBaseDistance >= 0.0f &&
-		ownBaseDistance < BOT_SFJ_OWN_BASE_RADIUS);
+	if (ownUnsafe && ownCost >= 0.0f && (teammateCost < 0.0f || ownCost <= teammateCost))
+		return BOT_SFJ_GOAL_FLAG_RECOVER;
+	return teammateCost >= 0.0f ? BOT_SFJ_GOAL_ESCORT : BOT_SFJ_GOAL_FLAG_ATTACK;
 }
 
 static inline int BotSFJ_WallRunAllows(int navigation, int grounded, int nearbyEnemy,
@@ -527,14 +507,10 @@ static inline int BotSFJ_ApproachTimedOut(int started, int lastProgress, int now
 		now - lastProgress > 2000;
 }
 
-/* Within this range of its goal a bot has arrived: no route can make useful progress. */
-#define BOT_SFJ_GOAL_ARRIVE_RADIUS 320.0f
-
 static inline float BotSFJ_GoalRouteScore(float before, float after, float cost)
 {
 	if (!isfinite(before) || !isfinite(after) || !isfinite(cost) ||
-		before < 0.0f || after < 0.0f || cost < 0.0f ||
-		before <= BOT_SFJ_GOAL_ARRIVE_RADIUS)
+		before < 0.0f || after < 0.0f || cost < 0.0f)
 		return -1.0f;
 	return before - after - cost * 0.15f;
 }

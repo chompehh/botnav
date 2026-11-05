@@ -4551,27 +4551,27 @@ BOOST_AUTO_TEST_CASE( air_side_switch_leads_the_velocity_turn )
 	BOOST_CHECK_EQUAL( BotSFJ_AirSideSwitchLead(1, 0.0f, vx, vy, 0, 0, 0, &switched, -5000.0f, 0.1f), 1 );
 }
 
-BOOST_AUTO_TEST_CASE( defenders_guard_base_and_attackers_ignore_own_base_objectives )
+BOOST_AUTO_TEST_CASE( defenders_recover_stolen_flags_or_escort_a_closer_carrier )
 {
-	BOOST_CHECK( BotSFJ_DefendGoal(1, 0, 1) );
-	BOOST_CHECK( !BotSFJ_DefendGoal(1, 1, 1) );
-	BOOST_CHECK( !BotSFJ_DefendGoal(1, 0, 0) );
-	BOOST_CHECK( !BotSFJ_DefendGoal(0, 0, 1) );
-
-	BOOST_CHECK( !BotSFJ_ObjectiveGoalAllows(0, 1, 2000.0f, 0, 0) );
-	BOOST_CHECK( !BotSFJ_ObjectiveGoalAllows(1, 0, 2000.0f, 0, 0) );
-	BOOST_CHECK( !BotSFJ_ObjectiveGoalAllows(1, 1, 200.0f, 0, 0) );
-	BOOST_CHECK( BotSFJ_ObjectiveGoalAllows(1, 1, 200.0f, 1, 0) );
-	BOOST_CHECK( BotSFJ_ObjectiveGoalAllows(1, 1, 200.0f, 0, 1) );
-	BOOST_CHECK( BotSFJ_ObjectiveGoalAllows(1, 1, 2000.0f, 0, 0) );
-	/* No own base known (non-CTF). */
-	BOOST_CHECK( BotSFJ_ObjectiveGoalAllows(1, 1, -1.0f, 0, 0) );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, 0.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, -1.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 200.0f, 1000.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 200.0f, 200.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, -1.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
+	/* Carriers always score, even if their own flag is stolen and closer. */
+	BOOST_CHECK_EQUAL( BotSFJ_FlagGoal(1, 1, 50.0f, 1000.0f), BOT_SFJ_GOAL_FLAG_SCORE );
 }
 
-BOOST_AUTO_TEST_CASE( arrived_bots_do_not_seek_routes )
+BOOST_AUTO_TEST_CASE( routes_can_make_progress_inside_flag_capture_approaches )
 {
-	BOOST_CHECK_LT( BotSFJ_GoalRouteScore(BOT_SFJ_GOAL_ARRIVE_RADIUS, 0.0f, 0.0f), 0.0f );
-	BOOST_CHECK_LT( BotSFJ_GoalRouteScore(100.0f, 0.0f, 0.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(512.0f, 100.0f, 450.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(320.0f, 0.0f, 320.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(100.0f, 0.0f, 100.0f), 0.0f );
+	BOOST_CHECK_LT( BotSFJ_GoalRouteScore(100.0f, 200.0f, 100.0f), 0.0f );
+	BOOST_CHECK_LE( BotSFJ_GoalRouteScore(0.0f, 0.0f, 0.0f), 0.0f );
 	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(1000.0f, 200.0f, 100.0f), 0.0f );
 }
 

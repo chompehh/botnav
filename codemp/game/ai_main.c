@@ -2162,22 +2162,6 @@ void WPConstantRoutine(bot_state_t *bs)
 	}
 }
 
-//check if our ctf state is to guard the base
-qboolean BotCTFGuardDuty(bot_state_t *bs)
-{
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
-	{
-		return qfalse;
-	}
-
-	if (bs->ctfState == CTFSTATE_DEFENDER)
-	{
-		return qtrue;
-	}
-
-	return qfalse;
-}
-
 //when we reach the waypoint we are travelling to,
 //this function will be called. We will perform any
 //checks for flags on the current wp and activate
@@ -2216,7 +2200,7 @@ void WPTouchRoutine(bot_state_t *bs)
 	}
 #endif
 
-	if (bs->isCamper && bot_camp.integer && (BotIsAChickenWuss(bs) || BotCTFGuardDuty(bs) || bs->isCamper == 2) && ((bs->wpCurrent->flags & WPFLAG_SNIPEORCAMP) || (bs->wpCurrent->flags & WPFLAG_SNIPEORCAMPSTAND)) &&
+	if (bs->isCamper && bot_camp.integer && (BotIsAChickenWuss(bs) || bs->isCamper == 2) && ((bs->wpCurrent->flags & WPFLAG_SNIPEORCAMP) || (bs->wpCurrent->flags & WPFLAG_SNIPEORCAMPSTAND)) &&
 		bs->cur_ps.weapon != WP_SABER && bs->cur_ps.weapon != WP_MELEE && bs->cur_ps.weapon != WP_STUN_BATON)
 	{ //if we're a camper and a chicken then camp
 		if (bs->wpDirection)
@@ -6132,13 +6116,15 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 			if (!ent->inuse || !ent->client || ent->health <= 0 ||
 				ent->client->sess.sessionTeam == TEAM_SPECTATOR)
 				continue;
-			if (ent->client->ps.powerups[ownPowerup])
+			if (ent->client->ps.powerups[ownPowerup] &&
+				!OnSameTeam(&g_entities[bs->client], ent))
 			{
 				ownGoal = ent->client->ps.origin;
 				ownCarrier = i;
 				ownUnsafe = qtrue;
 			}
-			if (ent->client->ps.powerups[enemyPowerup])
+			if (ent->client->ps.powerups[enemyPowerup] &&
+				OnSameTeam(&g_entities[bs->client], ent))
 			{
 				enemyGoal = ent->client->ps.origin;
 				enemyCarrier = i;
@@ -6168,14 +6154,11 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 				enemyCost = cost + Distance(end, enemyGoal);
 		}
 		type = BotSFJ_FlagGoal(carryingFlag, ownUnsafe, ownCost, enemyCost);
-		if (type == BOT_SFJ_GOAL_FLAG_ATTACK && enemyCarrier < 0 && base && base->inuse &&
-			BotSFJ_DefendGoal(bs->ctfState == CTFSTATE_DEFENDER, carryingFlag, !ownUnsafe))
-		{
-			/* Legacy defender navigation returns to the base: do not route away from it. */
-			goal = base->origin;
-			type = BOT_SFJ_GOAL_DEFEND;
-		}
-		else if (type == BOT_SFJ_GOAL_FLAG_SCORE)
+		if (!carryingFlag && bs->ctfState == CTFSTATE_DEFENDER)
+			type = BotSFJ_DefenderGoal(ownUnsafe,
+				ownGoal ? Distance(ps->origin, ownGoal) : -1.0f,
+				enemyCarrier >= 0 ? Distance(ps->origin, enemyGoal) : -1.0f);
+		if (type == BOT_SFJ_GOAL_FLAG_SCORE)
 			goal = base && base->inuse ? base->origin : own && own->inuse ?
 				own->r.currentOrigin : NULL;
 		else if (type == BOT_SFJ_GOAL_FLAG_RECOVER)
@@ -6214,24 +6197,11 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 			targetClient = bs->currentEnemy->s.number;
 		}
 	}
-	if (!goal && bs->wpDestination)
+	if (!goal && bs->wpDestination &&
+		(bs->siegeState || bs->rangedPickupEntity >= MAX_CLIENTS))
 	{
-		float ownBaseDistance = -1.0f;
-
-		if (level.gametype == GT_CTF || level.gametype == GT_CTY)
-		{
-			const wpobject_t *ownBase = level.clients[bs->client].sess.sessionTeam == TEAM_RED ?
-				oFlagRed : oFlagBlue;
-
-			if (ownBase && ownBase->inuse)
-				ownBaseDistance = Distance(bs->wpDestination->origin, ownBase->origin);
-		}
-		if (BotSFJ_ObjectiveGoalAllows(1, bs->siegeState || bs->rangedPickupEntity >= MAX_CLIENTS,
-			ownBaseDistance, carryingFlag, bs->ctfState == CTFSTATE_DEFENDER))
-		{
-			goal = bs->wpDestination->origin;
-			type = BOT_SFJ_GOAL_OBJECTIVE;
-		}
+		goal = bs->wpDestination->origin;
+		type = BOT_SFJ_GOAL_OBJECTIVE;
 	}
 	if (goal)
 	{
@@ -7734,15 +7704,7 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		BotSFJ_FinishTrackAttempt(bs, qtrue, qfalse);
 		bs->sfjLastRoute = finished + 1;
 		bs->sfjTravelPlanTime = 0;
-		/* Arrived at an explicit goal: no chaining on into a route away from it. */
-		if (!fleeFrom && bs->sfjTravelGoalKind != 1 && bs->sfjTravelGoalValid &&
-			Distance(ps->origin, bs->sfjTravelGoal) <= BOT_SFJ_GOAL_ARRIVE_RADIUS)
-		{
-			BotSFJ_EndTrackRoute(bs, "recorded route complete: arrived at goal");
-			return qfalse;
-		}
-		if (bs->sfjTravelGoalKind == 1 ||
-			(bs->sfjTravelGoalValid && Distance(ps->origin, bs->sfjTravelGoal) < 192.0f))
+		if (bs->sfjTravelGoalKind == 1)
 			bs->sfjTravelGoalValid = qfalse;
 		/* Keep going forward along another route that continues from here. */
 		VectorSubtract(route->node[route->nodeCount - 1],
@@ -11174,11 +11136,10 @@ gentity_t *GetNearestBadThing(bot_state_t *bs)
 	}
 }
 
-//Keep our CTF priorities on defending our team's flag
+//Recover our team's dropped flag.
 int BotDefendFlag(bot_state_t *bs)
 {
 	wpobject_t *flagPoint;
-	vec3_t a;
 
 	if (level.clients[bs->client].sess.sessionTeam == TEAM_RED)
 	{
@@ -11198,12 +11159,7 @@ int BotDefendFlag(bot_state_t *bs)
 		return 0;
 	}
 
-	VectorSubtract(bs->origin, flagPoint->origin, a);
-
-	if (VectorLength(a) > BASE_GUARD_DISTANCE)
-	{
-		bs->wpDestination = flagPoint;
-	}
+	bs->wpDestination = flagPoint;
 
 	return 1;
 }
@@ -11212,7 +11168,6 @@ int BotDefendFlag(bot_state_t *bs)
 int BotGetEnemyFlag(bot_state_t *bs)
 {
 	wpobject_t *flagPoint;
-	vec3_t a;
 
 	if (level.clients[bs->client].sess.sessionTeam == TEAM_RED)
 	{
@@ -11232,12 +11187,7 @@ int BotGetEnemyFlag(bot_state_t *bs)
 		return 0;
 	}
 
-	VectorSubtract(bs->origin, flagPoint->origin, a);
-
-	if (VectorLength(a) > BASE_GETENEMYFLAG_DISTANCE)
-	{
-		bs->wpDestination = flagPoint;
-	}
+	bs->wpDestination = flagPoint;
 
 	return 1;
 }
@@ -11265,7 +11215,9 @@ int BotGetFlagBack(bot_state_t *bs)
 	{
 		ent = &g_entities[i];
 
-		if (ent && ent->client && ent->client->ps.powerups[myFlag] && !OnSameTeam(&g_entities[bs->client], ent))
+		if (ent->inuse && ent->client && ent->health > 0 &&
+			ent->client->sess.sessionTeam != TEAM_SPECTATOR &&
+			ent->client->ps.powerups[myFlag] && !OnSameTeam(&g_entities[bs->client], ent))
 		{
 			foundCarrier = 1;
 			break;
@@ -11331,7 +11283,9 @@ int BotGuardFlagCarrier(bot_state_t *bs)
 	{
 		ent = &g_entities[i];
 
-		if (ent && ent->client && ent->client->ps.powerups[enemyFlag] && OnSameTeam(&g_entities[bs->client], ent))
+		if (ent->inuse && ent->client && ent->health > 0 &&
+			ent->client->sess.sessionTeam != TEAM_SPECTATOR &&
+			ent->client->ps.powerups[enemyFlag] && OnSameTeam(&g_entities[bs->client], ent))
 		{
 			foundCarrier = 1;
 			break;
@@ -11377,15 +11331,14 @@ int BotGuardFlagCarrier(bot_state_t *bs)
 int BotGetFlagHome(bot_state_t *bs)
 {
 	wpobject_t *flagPoint;
-	vec3_t a;
 
 	if (level.clients[bs->client].sess.sessionTeam == TEAM_RED)
 	{
-		flagPoint = flagRed;
+		flagPoint = oFlagRed;
 	}
 	else if (level.clients[bs->client].sess.sessionTeam == TEAM_BLUE)
 	{
-		flagPoint = flagBlue;
+		flagPoint = oFlagBlue;
 	}
 	else
 	{
@@ -11397,12 +11350,7 @@ int BotGetFlagHome(bot_state_t *bs)
 		return 0;
 	}
 
-	VectorSubtract(bs->origin, flagPoint->origin, a);
-
-	if (VectorLength(a) > BASE_FLAGWAIT_DISTANCE)
-	{
-		bs->wpDestination = flagPoint;
-	}
+	bs->wpDestination = flagPoint;
 
 	return 1;
 }
@@ -11477,12 +11425,7 @@ int CTFTakesPriority(bot_state_t *bs)
 	gentity_t *ent = NULL;
 	int enemyFlag = 0;
 	int myFlag = 0;
-	int enemyHasOurFlag = 0;
-	//int weHaveEnemyFlag = 0;
-	int numOnMyTeam = 0;
-	//int numOnEnemyTeam = 0;
-	int numAttackers = 0;
-	//int numDefenders = 0;
+	int ownCarrier = -1, teammateCarrier = -1;
 	int i = 0;
 	int idleWP;
 	int dosw = 0;
@@ -11496,6 +11439,15 @@ int CTFTakesPriority(bot_state_t *bs)
 	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
 	{
 		return 0;
+	}
+
+	/* Scoring outranks equipment gathering, forced roles and carrier pursuit. */
+	if (BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+	{
+		bs->ctfState = CTFSTATE_GETFLAGHOME;
+		bs->isCamping = 0;
+		bs->wpCamping = NULL;
+		return BotGetFlagHome(bs);
 	}
 
 	if (bs->cur_ps.weapon == WP_BRYAR_PISTOL &&
@@ -11573,6 +11525,8 @@ int CTFTakesPriority(bot_state_t *bs)
 		flagBlue = oFlagBlue;
 	}
 
+	if (bs->ctfState == CTFSTATE_GETFLAGHOME)
+		bs->ctfState = 0;
 	if (!bs->ctfState)
 	{
 		return 0;
@@ -11584,60 +11538,15 @@ int CTFTakesPriority(bot_state_t *bs)
 	{
 		ent = &g_entities[i];
 
-		if (ent && ent->client)
+		if (ent->inuse && ent->client && ent->health > 0 &&
+			ent->client->sess.sessionTeam != TEAM_SPECTATOR)
 		{
-			/*if (ent->client->ps.powerups[enemyFlag] && OnSameTeam(&g_entities[bs->client], ent))
-			{
-				weHaveEnemyFlag = 1;
-			}
-			else */if (ent->client->ps.powerups[myFlag] && !OnSameTeam(&g_entities[bs->client], ent))
-			{
-				enemyHasOurFlag = 1;
-			}
-
-			if (OnSameTeam(&g_entities[bs->client], ent))
-			{
-				numOnMyTeam++;
-			}
-			else
-			{
-				//numOnEnemyTeam++;
-			}
-
-			if (botstates[ent->s.number])
-			{
-				if (botstates[ent->s.number]->ctfState == CTFSTATE_ATTACKER ||
-					botstates[ent->s.number]->ctfState == CTFSTATE_RETRIEVAL)
-				{
-					numAttackers++;
-				}
-				else
-				{
-					//numDefenders++;
-				}
-			}
-			else
-			{ //assume real players to be attackers in our logic
-				numAttackers++;
-			}
+			if (ent->client->ps.powerups[myFlag] && !OnSameTeam(&g_entities[bs->client], ent))
+				ownCarrier = i;
+			if (ent->client->ps.powerups[enemyFlag] && OnSameTeam(&g_entities[bs->client], ent))
+				teammateCarrier = i;
 		}
 		i++;
-	}
-
-	if (bs->cur_ps.powerups[enemyFlag])
-	{
-		if ((numOnMyTeam < 2 || !numAttackers) && enemyHasOurFlag)
-		{
-			bs->ctfState = CTFSTATE_RETRIEVAL;
-		}
-		else
-		{
-			bs->ctfState = CTFSTATE_GETFLAGHOME;
-		}
-	}
-	else if (bs->ctfState == CTFSTATE_GETFLAGHOME)
-	{
-		bs->ctfState = 0;
 	}
 
 	if (bs->state_Forced)
@@ -11647,10 +11556,29 @@ int CTFTakesPriority(bot_state_t *bs)
 
 	if (bs->ctfState == CTFSTATE_DEFENDER)
 	{
-		if (BotDefendFlag(bs))
+		const gentity_t *drop = myFlag == PW_REDFLAG ? droppedRedFlag : droppedBlueFlag;
+		const qboolean dropped = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM);
+		const float ownCost = ownCarrier >= 0 ?
+			Distance(bs->origin, g_entities[ownCarrier].client->ps.origin) :
+			dropped ? Distance(bs->origin, drop->r.currentOrigin) : -1.0f;
+		const float teammateCost = teammateCarrier >= 0 ?
+			Distance(bs->origin, g_entities[teammateCarrier].client->ps.origin) : -1.0f;
+		const int goal = BotSFJ_DefenderGoal(ownCarrier >= 0 || dropped, ownCost, teammateCost);
+
+		/* Do not let an old equipment goal undo recovery or escort navigation. */
+		dosw = 0;
+		if (goal == BOT_SFJ_GOAL_FLAG_RECOVER)
 		{
-			goto success;
+			if ((ownCarrier >= 0 && BotGetFlagBack(bs)) || (dropped && BotDefendFlag(bs)))
+				goto success;
 		}
+		else if (goal == BOT_SFJ_GOAL_ESCORT)
+		{
+			if (BotGuardFlagCarrier(bs))
+				goto success;
+		}
+		else if (BotGetEnemyFlag(bs))
+			goto success;
 	}
 
 	if (bs->ctfState == CTFSTATE_ATTACKER)
@@ -12563,6 +12491,13 @@ void GetIdealDestination(bot_state_t *bs)
 		bs->dangerousObject = NULL;
 	}
 
+	if (!badthing && BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) &&
+		CTFTakesPriority(bs))
+	{
+		bs->runningToEscapeThreat = 1;
+		return;
+	}
+
 	if (!badthing && bs->dontGoBack > level.time)
 	{
 		if (bs->wpDestination)
@@ -12591,10 +12526,8 @@ void GetIdealDestination(bot_state_t *bs)
 
 	if (!badthing && CTFTakesPriority(bs))
 	{
-		if (bs->ctfState)
-		{
-			bs->runningToEscapeThreat = 1;
-		}
+		bs->runningToEscapeThreat =
+			BotSFJ_ClientCarriesFlag(g_entities[bs->client].client);
 		return;
 	}
 	else if (!badthing && SiegeTakesPriority(bs))
