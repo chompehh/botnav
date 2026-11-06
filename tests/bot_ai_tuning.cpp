@@ -3,6 +3,8 @@
 #include <math.h>
 #include <limits>
 #include <cstdlib>
+#include <algorithm>
+#include <vector>
 
 #include "ai_combat_tuning.h"
 #include "ai_strafejump.h"
@@ -2868,7 +2870,10 @@ BOOST_AUTO_TEST_CASE( sfj_track_landing_and_end )
 BOOST_AUTO_TEST_CASE( sfj_track_keep_rules )
 {
 	BOOST_CHECK( BotSFJ_TrackKeep( 2, 300.0f, 0 ) );
-	BOOST_CHECK( !BotSFJ_TrackKeep( 1, 900.0f, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackKeep( 1, 900.0f, 0 ) );
+	BOOST_CHECK( BotSFJ_TrackKeep( 1, 128.0f, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackKeep( 1, 127.9f, 0 ) );
+	BOOST_CHECK( !BotSFJ_TrackKeep( 0, 900.0f, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackKeep( 4, 100.0f, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackKeep( 4, 900.0f, 1 ) );
 }
@@ -4707,6 +4712,122 @@ BOOST_AUTO_TEST_CASE( route_runners_hold_combat )
 	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 0, 1, 0, 1) );
 	/* grounded, no flag business: normal combat */
 	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 0, 0, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( route_input_commitment_survives_enemy_and_landing_transitions )
+{
+	for (int phase = BOT_SFJ_PHASE_OFF; phase <= BOT_SFJ_PHASE_ABORT; ++phase)
+	{
+		BOOST_CHECK( BotSFJ_RouteInputCommitted(1, 0, phase) );
+		BOOST_CHECK( !BotSFJ_RouteInputCommitted(0, 0, phase) );
+		const int committed = BotSFJ_RouteInputCommitted(1, 1, phase);
+		BOOST_CHECK_EQUAL( committed, phase == BOT_SFJ_PHASE_TAKEOFF ||
+			phase == BOT_SFJ_PHASE_LANDING || phase == BOT_SFJ_PHASE_REJUMP ||
+			phase == BOT_SFJ_PHASE_AIR );
+		for (int hardHit = 0; hardHit < 2; ++hardHit)
+			for (int hurt = 0; hurt < 2; ++hurt)
+				BOOST_CHECK( BotNav_RouteCombatHold(1,
+					BotSFJ_RouteInputCommitted(1, 0, phase), 0, 0, hardHit, hurt) );
+	}
+}
+
+BOOST_AUTO_TEST_CASE( trusted_ground_and_flight_predictions_use_the_same_policy )
+{
+	for (int unsafe = 0; unsafe < 2; ++unsafe)
+		for (int trusted = 0; trusted < 2; ++trusted)
+			for (int enabled = 0; enabled < 2; ++enabled)
+			{
+				const int veto = unsafe && !(trusted && enabled);
+				BOOST_CHECK_EQUAL( BotSFJ_GroundPredictionVetoes(unsafe, trusted, enabled), veto );
+				BOOST_CHECK_EQUAL( BotSFJ_FlightHazardVetoes(unsafe, trusted, enabled), veto );
+			}
+	BOOST_CHECK( BotSFJ_GroundPredictionVetoes(1, BotSFJ_TrackHopTrusted(1, 0, 10), 1) );
+	BOOST_CHECK( BotSFJ_GroundPredictionVetoes(1, BotSFJ_TrackHopTrusted(0, 5, 0), 1) );
+}
+
+BOOST_AUTO_TEST_CASE( circle_start_discovery_precedes_legacy_ledge_recovery )
+{
+	BOOST_CHECK( BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 1, 0, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(0, 1, 1, 0, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 0, 1, 0, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 0, 0, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 1, 1, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 1, 0, 1, 0, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 1, 0, 0, 1, 1) );
+	BOOST_CHECK( !BotSFJ_DiscoverBeforeLedgeRecovery(1, 1, 1, 0, 0, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( route_failure_attribution_covers_unlaunched_and_interrupted_hops )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(0, 0, 0, 1, 2, 4), 2 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(0, 0, 1, 1, 2, 4), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(1, 0, 1, 1, 2, 4), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(1, 0, 0, 1, 4, 4), 3 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(1, 0, 0, 0, 0, 0), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(0, 1, 0, 1, 2, 4), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(0, 0, 0, 1, 4, 4), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_PendingFailureNode(0, 0, 1, -1, 2, 4), -1 );
+	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 6000, 0, 1, 0) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 6001, 0, 1, 0) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(0, 1000, 0, 1, 0) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 999, 0, 1, 0) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 2000, -1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 2000, 1, 1, 0) );
+	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2500, 0, 1, 1) );
+	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 1) );
+	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( speed_hops_lose_trust_sooner_and_recover_with_success )
+{
+	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 1, 0, 1) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(0, 2, 0, 1) );
+	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 2, 0, 0) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(0, 2, 3, 1) );
+	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 2, 4, 1) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(1, 0, 16, 1) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(1, 0, 16, 0) );
+	for (int failures = 0; failures < 20; ++failures)
+		for (int lethal = 0; lethal < 2; ++lethal)
+		{
+			const int normal = BotSFJ_HopRetryDelayForSpeed(failures, lethal, 0);
+			BOOST_CHECK_EQUAL( normal, BotSFJ_HopRetryDelay(failures, lethal) );
+			BOOST_CHECK_EQUAL( BotSFJ_HopRetryDelayForSpeed(failures, lethal, 1),
+				std::min(300000, normal * 2) );
+		}
+	const float reliability = BotSFJ_HopReliability(2, 1);
+	BOOST_CHECK_LT( BotSFJ_SpeedReliability(reliability, 1), reliability );
+	BOOST_CHECK_EQUAL( BotSFJ_SpeedReliability(reliability, 0), reliability );
+	BOOST_CHECK_EQUAL( BotSFJ_SpeedReliability(1.0f, 1), 1.0f );
+}
+
+BOOST_AUTO_TEST_CASE( short_connector_quality_rewards_speed_and_observed_success )
+{
+	const float quick = BotSFJ_TrackConnectorScore(256.0f, 600, 1.0f);
+	BOOST_CHECK_GT( quick, BotSFJ_TrackConnectorScore(256.0f, 1200, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_TrackConnectorScore(256.0f, 600, 1.5f), quick );
+	BOOST_CHECK_LT( BotSFJ_TrackConnectorScore(256.0f, 600, 0.35f), quick );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackConnectorScore(127.0f, 600, 1.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackConnectorScore(769.0f, 600, 1.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackConnectorScore(256.0f, 0, 1.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrackConnectorScore(256.0f, 600, 0.0f), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( expanded_route_graph_retains_short_link_to_primary_route )
+{
+	const int count = BOT_SFJ_MAX_TRACK_ROUTES;
+	std::vector<float> edges(count * count, -1.0f), seed(count, -1.0f), cost(count);
+	std::vector<int> first(count), parent(count);
+	seed[0] = 2.0f;
+	seed[1] = 500.0f;
+	edges[count - 1] = 5.0f;
+	edges[(count - 1) * count + 1] = 20.0f;
+	BotSFJ_RoutePathsWithParents(count, edges.data(), seed.data(), cost.data(), first.data(), parent.data());
+	BOOST_CHECK_EQUAL( first[1], 0 );
+	BOOST_CHECK_EQUAL( cost[1], 27.0f );
+	BOOST_CHECK_EQUAL( parent[1], count - 1 );
+	BOOST_CHECK_EQUAL( parent[count - 1], 0 );
+	BOOST_CHECK_GE( BOT_SFJ_REPLAY_TOTAL_SAMPLES / count, 512 );
 }
 
 BOOST_AUTO_TEST_CASE( route_approach_pauses_and_goals )

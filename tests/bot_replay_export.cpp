@@ -179,6 +179,27 @@ BOOST_AUTO_TEST_CASE(export_coverage_keeps_movement_types_and_fills_spare_slots)
 	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 4, 0, picked), 0);
 }
 
+BOOST_AUTO_TEST_CASE(export_reserves_quick_short_connectors_over_long_duplicates)
+{
+	strafetrack_export_coverage_t routes[] = {
+		coverage(0, 2000), coverage(1, 2001), coverage(3000, 5000),
+		coverage(6000, 8000), coverage(10, 266), coverage(10, 266), coverage(10, 394)
+	};
+	routes[4].connectorScore = BotSFJ_TrackConnectorScore(256, 1200, 1.0f);
+	routes[5].connectorScore = BotSFJ_TrackConnectorScore(256, 600, 1.5f);
+	routes[6].connectorScore = BotSFJ_TrackConnectorScore(384, 900, 1.0f);
+	unsigned char picked[7] = {};
+	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 7, 4, picked), 4);
+	BOOST_CHECK(picked[5]);
+	BOOST_CHECK(!picked[4]);
+	BOOST_CHECK(!picked[1]);
+	BOOST_CHECK(!G_StrafeTrackExportEquivalent(&routes[5], &routes[6]));
+	BOOST_CHECK(G_StrafeTrackExportEquivalent(&routes[4], &routes[5]));
+	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 7, 8, picked), 7);
+	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 7, 0, picked), 0);
+	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 0, 8, picked), 0);
+}
+
 BOOST_AUTO_TEST_CASE(timed_match_waits_through_pause_without_later_loop_skip)
 {
 	auto samples = replay(130);
