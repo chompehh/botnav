@@ -318,6 +318,7 @@ static void BotSFJ_ApplyRouteWallRun(bot_state_t *bs, bot_input_t *bi, int time)
 static void BotNav_FilterCombatHazardInput(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
+static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
 	const vec3_t end);
 static qboolean NewBotAI_ShouldConserveForce(bot_state_t *bs);
@@ -3868,7 +3869,7 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 
 	if (BG_InRoll(ps, ps->legsAnim))
 		BOT_SFJ_SOFT("roll in progress (pausing strafe)");
-	if (bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK))
+	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs))
 		BOT_SFJ_SOFT("queued attack");
 	if (!ignoreNavigation && (bi->actionflags & (softActions & ~(ACTION_ATTACK | ACTION_ALT_ATTACK))))
 		BOT_SFJ_SOFT("queued jump/crouch/walk");
@@ -4749,6 +4750,7 @@ typedef struct
 	int completions;
 	int stalls;
 	int interrupted;
+	int loops;	/* walks toward this route that turned into backtrack loops */
 	int speedContext;
 	int routeId;
 	int recordedAt;
@@ -5302,7 +5304,7 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 	COM_BeginParseSession(path);
 	if (!Q_stricmp(COM_Parse(&text), "botroute_stats"))
 	{
-		if (COM_ParseInt(&text, &version) || (version < 2 || version > 7))
+		if (COM_ParseInt(&text, &version) || (version < 2 || version > 8))
 		{
 			free(buffer);
 			return;
@@ -5404,6 +5406,8 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 		}
 		if (!valid)
 			break;
+		if (version >= 8 && (COM_ParseInt(&text, &stat.loops) || stat.loops < 0))
+			break;
 		if (stat.attempts < 0 || stat.completions < 0 || stat.completions > stat.attempts ||
 			stat.stalls < 0 || stat.interrupted < 0 || stat.speedContext < -1 ||
 			stat.speedContext > 3 || stat.deaths < 0 || stat.unsafe < 0 ||
@@ -5436,7 +5440,7 @@ static void BotSFJ_WriteRouteStats(void)
 		trap->Print(S_COLOR_YELLOW "Could not write strafe route results: %s\n", path);
 		return;
 	}
-	trap->FS_Write("botroute_stats 7\n", strlen("botroute_stats 7\n"), f);
+	trap->FS_Write("botroute_stats 8\n", strlen("botroute_stats 8\n"), f);
 	for (i = 0; i < g_botSfjRouteStatCount; i++)
 	{
 		const bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[i];
@@ -5462,6 +5466,8 @@ static void BotSFJ_WriteRouteStats(void)
 				stat->hopRecentPasses[node]);
 			trap->FS_Write(line, strlen(line), f);
 		}
+		line = va(" %i", stat->loops);
+		trap->FS_Write(line, strlen(line), f);
 		trap->FS_Write("\n", 1, f);
 	}
 	trap->FS_Close(f);
@@ -5516,6 +5522,9 @@ static void BotSFJ_NoteRouteResult(bot_state_t *bs, int routeIndex)
 		return;
 	stat = &g_botSfjRouteStats[bs->sfjRouteStat];
 	stat->attempts++;
+	/* Reaching the start and running the route earns back trust lost to loops. */
+	if (stat->loops > 0)
+		stat->loops--;
 	g_botSfjRouteStatsDirty = qtrue;
 }
 
@@ -5578,7 +5587,7 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 			{
 				/* A human carried speed through here: one bump is not proof the route is wrong. */
 				BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_GOOD, BOT_SFJ_DEBUG_KIND_TRUST, 250,
-					"trust", "route %d hop %d: wall contact %d/%d (speed %.0f -> %.0f), keeping the human line with the human's yaw",
+					"trust", "route %d hop %d: wall contact %d/%d (speed %.0f -> %.0f), keeping the human line",
 					bs->sfjRoute - 1, launched, bs->sfjRouteCollisions, BOT_SFJ_TRUSTED_COLLISIONS,
 					bs->sfjRouteSampleSpeed, speed);
 			}
@@ -6079,6 +6088,61 @@ static void BotSFJ_UpdateConnections(bot_state_t *bs)
 	}
 }
 
+/* FFA-style games: with no other goal, chase the nearest opponent's live position,
+ * re-snapshotted every bot_hunt_interval ms (a snapshot keeps the route plan stable). */
+static const float *BotNav_HuntTarget(bot_state_t *bs, const vec3_t origin)
+{
+	gentity_t *target = NULL;
+	const int interval = bot_hunt_interval.integer;
+	int i, best = -1;
+	float bestDistance = 0.0f;
+
+	if (interval <= 0 || level.gametype == GT_SIEGE || level.gametype == GT_CTF ||
+		level.gametype == GT_CTY || level.gametype == GT_DUEL || level.gametype == GT_POWERDUEL)
+	{
+		bs->huntClient = 0;
+		return NULL;
+	}
+	if (bs->huntClient > 0 && bs->huntClient <= MAX_CLIENTS)
+	{
+		target = &g_entities[bs->huntClient - 1];
+		if (!target->inuse || !target->client || target->health <= 0 ||
+			target->client->sess.sessionTeam == TEAM_SPECTATOR ||
+			target->client->pers.connected != CON_CONNECTED)
+			target = NULL;
+	}
+	if (BotNav_HuntRefreshDue(interval, bs->huntRefreshTime, level.time, target != NULL))
+	{
+		for (i = 0; i < level.maxclients; i++)
+		{
+			gentity_t *ent = &g_entities[i];
+			float distance;
+
+			if (i == bs->client || !ent->inuse || !ent->client || ent->health <= 0 ||
+				ent->client->sess.sessionTeam == TEAM_SPECTATOR ||
+				ent->client->pers.connected != CON_CONNECTED ||
+				(ent->client->ps.pm_flags & PMF_FOLLOW) ||
+				OnSameTeam(&g_entities[bs->client], ent))
+				continue;
+			distance = Distance(origin, ent->client->ps.origin);
+			if (best < 0 || distance < bestDistance)
+			{
+				best = i;
+				bestDistance = distance;
+			}
+		}
+		bs->huntRefreshTime = level.time;
+		if (best < 0)
+		{
+			bs->huntClient = 0;
+			return NULL;
+		}
+		bs->huntClient = best + 1;
+		VectorCopy(g_entities[best].client->ps.origin, bs->huntOrigin);
+	}
+	return bs->huntClient > 0 ? bs->huntOrigin : NULL;
+}
+
 static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 	qboolean retreating)
 {
@@ -6154,6 +6218,11 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 				enemyCost = cost + Distance(end, enemyGoal);
 		}
 		type = BotSFJ_FlagGoal(carryingFlag, ownUnsafe, ownCost, enemyCost);
+		/* Can't score while our flag is away: a carrier at base hunts it down instead of
+		 * running back and forth over the empty stand. */
+		if (BotSFJ_CarrierRecovers(carryingFlag, ownUnsafe,
+			base && base->inuse ? Distance(ps->origin, base->origin) : -1.0f, ownCost))
+			type = BOT_SFJ_GOAL_FLAG_RECOVER;
 		if (!carryingFlag && bs->ctfState == CTFSTATE_DEFENDER)
 			type = BotSFJ_DefenderGoal(ownUnsafe,
 				ownGoal ? Distance(ps->origin, ownGoal) : -1.0f,
@@ -6203,6 +6272,15 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 		goal = bs->wpDestination->origin;
 		type = BOT_SFJ_GOAL_OBJECTIVE;
 	}
+	if (!goal && !retreating && !carryingFlag && !bs->wpCamping)
+	{
+		goal = BotNav_HuntTarget(bs, ps->origin);
+		if (goal)
+		{
+			type = BOT_SFJ_GOAL_ENEMY;
+			targetClient = bs->huntClient - 1;
+		}
+	}
 	if (goal)
 	{
 		if (bs->sfjTravelGoalKind != 2 || bs->sfjTravelGoalType != type ||
@@ -6213,7 +6291,11 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 			 * the recently-run memory stays: clearing it lets the bot run straight back. */
 			if (bs->sfjTravelGoalKind != 2 || bs->sfjTravelGoalType != type ||
 				Distance(goal, bs->sfjTravelGoal) > 512.0f)
+			{
 				bs->sfjWalkCount = 0;
+				bs->sfjWalkCommitUntil = 0;
+				bs->sfjGoalProgressTime = 0;
+			}
 		}
 		VectorCopy(goal, bs->sfjTravelGoal);
 		bs->sfjTravelGoalKind = 2;
@@ -6758,6 +6840,31 @@ static void BotSFJ_UpdateWalkGraph(bot_state_t *bs)
 	}
 }
 
+/* Learn a backtrack loop: bench the route for this bot and remember it across maps. */
+static void BotSFJ_NoteWalkLoop(bot_state_t *bs, const playerState_t *ps, int index, const char *why)
+{
+	int stat;
+
+	if (index < 0 || index >= g_botSfjTrackRouteCount)
+		return;
+	bs->sfjRouteRetryUntil[index] = level.time + BOT_SFJ_LOOP_RETRY_MS;
+	stat = g_botSfjTrackRoutes[index].stat[BotSFJ_PlayerSpeedContext(ps)];
+	if (stat >= 0 && stat < g_botSfjRouteStatCount)
+	{
+		g_botSfjRouteStats[stat].loops++;
+		g_botSfjRouteStatsDirty = qtrue;
+	}
+	bs->sfjLoopRoute = bs->sfjLoopCount = bs->sfjLoopSince = 0;
+	bs->sfjGoalProgressTime = level.time;
+	bs->sfjWalkCount = 0;
+	bs->sfjWalkCommitUntil = 0;
+	bs->sfjWalkRetryUntil = level.time + 500;
+	if (BotSFJ_DebugShows(bot_strafejumps_debug.integer, BOT_SFJ_DEBUG_ROUTE))
+		BotDebug_Printf("^3[SFJ walk]^7 %s backtrack loop toward route=%d (%s); benched %ds, learned loops=%d\n",
+			g_entities[bs->client].client->pers.netname, index + 1, why, BOT_SFJ_LOOP_RETRY_MS / 1000,
+			stat >= 0 && stat < g_botSfjRouteStatCount ? g_botSfjRouteStats[stat].loops : 0);
+}
+
 static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 	const vec3_t heading, const float *fleeFrom, qboolean forwardOnly,
 	vec3_t direction, vec3_t destination)
@@ -6777,9 +6884,32 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 		level.time < bs->sfjWalkRetryUntil)
 		return qfalse;
 	forwardSpeed = BotSFJ_ForwardHeading(bs, ps, heading, forward);
+	/* Goal progress: walks that never bring a static flag goal closer are loops. */
+	if (!fleeFrom && bs->sfjTravelGoalValid)
+	{
+		const float goalDistance = Distance(ps->origin, bs->sfjTravelGoal);
+
+		if (bs->sfjGoalProgressTime <= 0 || bs->sfjGoalProgressTime > level.time ||
+			goalDistance < bs->sfjGoalProgressBest - BOT_SFJ_GOAL_PROGRESS)
+		{
+			bs->sfjGoalProgressBest = goalDistance;
+			bs->sfjGoalProgressTime = level.time;
+		}
+		else if (bs->sfjWalkCount && bs->sfjWalkRoute > 0 &&
+			(bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK ||
+				bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_SCORE) &&
+			BotSFJ_LoopDetected(0, level.time - bs->sfjGoalProgressTime))
+		{
+			bs->sfjGoalProgressBest = goalDistance;
+			BotSFJ_NoteWalkLoop(bs, ps, bs->sfjWalkRoute - 1, "no progress toward the goal");
+			return qfalse;
+		}
+	}
+	/* A start behind the goal heading only drops the walk once its commitment is over. */
 	if (!fleeFrom && bs->sfjWalkCount && bs->sfjWalkIndex < bs->sfjWalkCount &&
 		BotSFJ_RouteStartIsBacktrack(ps, forward,
 			g_botSfjTrackRoutes[bs->sfjWalkPath[bs->sfjWalkIndex]].start) &&
+		!BotSFJ_WalkCommitted(bs->sfjWalkCommitUntil, level.time) &&
 		(forwardOnly || level.time >= bs->sfjNextWaypointAcquire))
 		bs->sfjWalkCount = 0;
 	if (!bs->sfjWalkCount)
@@ -6863,8 +6993,16 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 					score = BotSFJ_EscapeRouteScore(Distance(ps->origin, fleeFrom),
 						Distance(end, fleeFrom), travelCost);
 				else if (bs->sfjTravelGoalValid)
+				{
+					const float goalGain = Distance(ps->origin, bs->sfjTravelGoal) -
+						Distance(end, bs->sfjTravelGoal);
+
+					/* Walking back toward a start must clearly pay off toward the goal. */
+					if (backtrack[first[i]] && !BotSFJ_BacktrackPaysOff(goalGain, cost[i]))
+						continue;
 					score = BotSFJ_GoalRouteScore(Distance(ps->origin, bs->sfjTravelGoal),
 						Distance(end, bs->sfjTravelGoal), travelCost);
+				}
 				else
 				{
 					vec3_t delta;
@@ -6885,6 +7023,9 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 				if (level.time < bs->sfjRecentRouteUntil &&
 					BotNav_RecentContains(bs->sfjRecentRoutes, 4, i))
 					score *= 0.5f;
+				if (route->stat[BotSFJ_PlayerSpeedContext(ps)] >= 0)
+					score *= BotSFJ_LoopPenalty(g_botSfjRouteStats[
+						route->stat[BotSFJ_PlayerSpeedContext(ps)]].loops);
 				used = BotSFJ_WalkPath(i, parent, count, path, BOT_SFJ_WALK_PATH_MAX);
 				if (!used || !BotSFJ_ForwardRouteBetter(score, backtrack[first[i]],
 					bestScore, bestBacktrack))
@@ -6900,6 +7041,27 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 		}
 		if (best < 0)
 			return qfalse;
+		{
+			const float startDistance = Distance(ps->origin, g_botSfjTrackRoutes[best].start);
+			const qboolean sameRoute = bs->sfjLoopRoute == best + 1 ? qtrue : qfalse;
+
+			bs->sfjLoopCount = BotSFJ_LoopReplanCount(bs->sfjLoopCount, bs->sfjLoopSince, level.time,
+				sameRoute, sameRoute && startDistance < bs->sfjLoopBestDist - BOT_SFJ_LOOP_PROGRESS);
+			if (bs->sfjLoopCount <= 1)
+			{
+				bs->sfjLoopRoute = best + 1;
+				bs->sfjLoopSince = level.time;
+				bs->sfjLoopBestDist = startDistance;
+			}
+			if (!fleeFrom && BotSFJ_LoopDetected(bs->sfjLoopCount, 0))
+			{
+				BotSFJ_NoteWalkLoop(bs, ps, best, va("replanned %d times in %ds without getting closer",
+					bs->sfjLoopCount, (level.time - bs->sfjLoopSince) / 1000));
+				return qfalse;
+			}
+			bs->sfjWalkCommitUntil = level.time + BotSFJ_WalkCommitMs(
+				Distance(ps->origin, g_botSfjTrackRoutes[bs->sfjWalkPath[0]].start));
+		}
 		bs->sfjWalkRoute = best + 1;
 		bs->sfjWalkIndex = 0;
 		bs->sfjWalkCheckTime = 0;
@@ -7443,8 +7605,8 @@ static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *
 		bs->sfjReplayActive = qfalse;
 	{
 		const qboolean steer = bs->sfjReplayActive && (repositioning ||
-			BotSFJ_ReplaySteers(BotSFJ_ReplayTurnAhead(samples, route->sampleCount, bs->sfjReplaySample,
-				BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_REPLAY_TURN_DEG),
+			BotSFJ_HumanYawUseful(BotSFJ_ReplayTurnAhead(samples, route->sampleCount, bs->sfjReplaySample,
+				BOT_SFJ_REPLAY_TURN_MS, BOT_SFJ_HUMAN_TURN_DEG),
 			samples && bs->sfjReplaySample >= 0 &&
 				(samples[bs->sfjReplaySample].flags & BOT_SFJ_REPLAY_FLAG_WALLRUN),
 			bs->sfjRouteCollisions, slowMs > 0)) ? qtrue : qfalse;
@@ -8750,6 +8912,39 @@ static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client)
 		client->ps.powerups[PW_BLUEFLAG] || client->ps.powerups[PW_NEUTRALFLAG]);
 }
 
+/*
+ * Route runners keep running: airborne bots on a recorded route finish the arc,
+ * flag carriers only fight after a push/pull/grip/knockdown or saber/melee hit,
+ * and bots heading for the enemy flag fight once they are hit (or meet a carrier).
+ */
+static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
+{
+	gclient_t *client;
+	playerState_t *ps;
+	qboolean carrying;
+	qboolean attackingFlag;
+	qboolean hardHit;
+	qboolean anyHurt;
+
+	if (!bs || bs->client < 0 || bs->client >= MAX_CLIENTS ||
+		!(client = g_entities[bs->client].client))
+		return qfalse;
+	ps = &client->ps;
+	if (ps->duelInProgress)
+		return qfalse;
+	carrying = BotSFJ_ClientCarriesFlag(client);
+	attackingFlag = (bs->sfjTravelGoalValid && bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK &&
+		!(bs->currentEnemy && BotSFJ_ClientCarriesFlag(bs->currentEnemy->client))) ? qtrue : qfalse;
+	hardHit = ((bs->lastHardHitTime && level.time - bs->lastHardHitTime < BOT_ROUTE_HARD_HIT_MS) ||
+		(client->pushEffectTime && client->pushEffectTime + BOT_ROUTE_HARD_HIT_MS > level.time) ||
+		ps->fd.forceGripBeingGripped > level.time ||
+		BG_InKnockDown(ps->legsAnim)) ? qtrue : qfalse;
+	anyHurt = (bs->lastHurtTime && level.time - bs->lastHurtTime < BOT_ROUTE_HARD_HIT_MS) ? qtrue : qfalse;
+	return BotNav_RouteCombatHold(bot_route_combathold.integer,
+		bs->sfjRoute > 0 && ps->groundEntityNum == ENTITYNUM_NONE,
+		carrying, attackingFlag, hardHit, anyHurt) ? qtrue : qfalse;
+}
+
 static void BotSFJ_UpdatePursuit(bot_state_t *bs)
 {
 	const float startDistance = BotSFJ_MinStrafeDistance();
@@ -8795,7 +8990,7 @@ static void BotSFJ_Reject(bot_state_t *bs, const char *reason)
  * of ending it. Returns qtrue while paused (the caller leaves the frame alone).
  */
 static qboolean BotSFJ_PauseRoute(bot_state_t *bs, playerState_t *ps, qboolean airborneHop,
-	const char *reason)
+	qboolean hardConflict, const char *reason)
 {
 	const qboolean recovering = bs->sfjLedgeUntil > level.time || bs->sfjWallRunStage ||
 		BG_InRoll(ps, ps->legsAnim) ? qtrue : qfalse;
@@ -8803,7 +8998,9 @@ static qboolean BotSFJ_PauseRoute(bot_state_t *bs, playerState_t *ps, qboolean a
 
 	if (!BotSFJ_RoutePauseAllows(bs->sfjRoute, recovering, airborneHop, pausedMs) &&
 		!BotSFJ_ElevatorPauseAllows(bs->sfjRoute, WaitingForNow(bs, bs->goalPosition),
-			airborneHop, pausedMs))
+			airborneHop, pausedMs) &&
+		!BotSFJ_ApproachPauseAllows(bs->sfjRoute, bs->sfjRouteHopLaunched || airborneHop,
+			hardConflict, pausedMs))
 		return qfalse;
 	if (!bs->sfjRoutePauseSince)
 	{
@@ -9071,6 +9268,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	qboolean retreating;
 	qboolean routeRetreat;
 	qboolean haveRoute;
+	qboolean holdCombat = qfalse;
 	qboolean airborneJump;
 	qboolean previousCorridorValid;
 	float aggression;
@@ -9114,7 +9312,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	conflict = BotSFJ_GetInputConflict(bs, ps, &queued, qtrue, &conflictReason);
 	if (conflict == BOT_SFJ_CONFLICT_HARD)
 	{
-		if (BotSFJ_PauseRoute(bs, ps, airborneJump, conflictReason))
+		if (BotSFJ_PauseRoute(bs, ps, airborneJump, qtrue, conflictReason))
 			return;
 		BotSFJ_Reject(bs, va("input/state conflict: %s", conflictReason));
 		return;
@@ -9129,7 +9327,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 				bs->sfjRollPauseTime = level.time;
 			bs->sfjOwnsInput = qfalse;
 		}
-		else if (!BotSFJ_PauseRoute(bs, ps, airborneJump, "roll"))
+		else if (!BotSFJ_PauseRoute(bs, ps, airborneJump, qfalse, "roll"))
 			BotSFJ_Reject(bs, "roll cannot initiate or indefinitely pause a strafe");
 		return;
 	}
@@ -9206,11 +9404,12 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	previousCorridorValid = bs->sfjCorridorValid;
 	bs->sfjCorridorValid = qfalse;
 	/* Fights take priority over recorded routes. */
+	holdCombat = BotNav_ShouldHoldCombat(bs);
 	if (bs->sfjRoute && enemyClient && bs->frame_Enemy_Vis &&
-		enemyDistance < BOT_SFJ_NAV_ENEMY_GUARD && !carryingFlag && !routeRetreat)
+		enemyDistance < BOT_SFJ_NAV_ENEMY_GUARD && !carryingFlag && !routeRetreat && !holdCombat)
 		BotSFJ_EndTrackRoute(bs, "enemy close, leaving recorded route");
 	haveRoute = (!enemyClient || !bs->frame_Enemy_Vis || enemyDistance >= BOT_SFJ_NAV_ENEMY_GUARD ||
-		carryingFlag || routeRetreat) ? BotSFJ_GetTrackRouteCorridor(bs, ps, effectiveDirection,
+		carryingFlag || routeRetreat || holdCombat) ? BotSFJ_GetTrackRouteCorridor(bs, ps, effectiveDirection,
 			routeRetreat && !carryingFlag ? enemyClient->ps.origin : NULL,
 			routeDirection, routeDestination) : qfalse;
 	if (!haveRoute)
@@ -9274,7 +9473,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	conflict = BotSFJ_GetInputConflict(bs, ps, &queued, qfalse, &conflictReason);
 	if (BotSFJ_ConflictBlocks(conflict, bs->sfjPhase))
 	{
-		if (BotSFJ_PauseRoute(bs, ps, airborneJump, conflictReason))
+		if (BotSFJ_PauseRoute(bs, ps, airborneJump, conflict == BOT_SFJ_CONFLICT_HARD, conflictReason))
 			return;
 		BotSFJ_Reject(bs, va("input/state conflict: %s", conflictReason));
 		return;
@@ -9302,7 +9501,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 				(enemyCarriesFlag && enemyDistance >= minStrafe)) &&
 			alignment > 0.5f && enemyDistance > stopDistance)
 			purpose = BOT_SFJ_INTENT_PURSUIT;
-		else if (!carryingFlag && bs->frame_Enemy_Vis &&
+		else if (!carryingFlag && !holdCombat && bs->frame_Enemy_Vis &&
 			(enemyDistance < BOT_SFJ_NAV_ENEMY_GUARD ||
 			 (enemyDistance < BOT_SFJ_CORRIDOR_LOOKAHEAD &&
 			  NewBotAI_GetEnemyClosingSpeed(bs) > BOT_SFJ_NAV_ENEMY_CLOSING_SPEED)))
@@ -9588,7 +9787,8 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		{
 			/* Hand control back to combat when an enemy gets into saber range. */
 			if (bs->frame_Enemy_Vis && separation < BOT_SFJ_NAV_ENEMY_GUARD * 0.5f &&
-				!BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+				!BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) &&
+				!BotNav_ShouldHoldCombat(bs))
 			{
 				eligible = qfalse;
 				conflictReason = "visible enemy in saber range";
@@ -9677,7 +9877,8 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	if (!BotSFJ_CanOwnInput(bot_strafejumps.integer, fresh, eligible, bs->sfjPhase))
 	{
 		if (bs->sfjRoute && BotSFJ_PauseRoute(bs, ps,
-			!grounded && BotSFJ_PhaseInProgress(bs->sfjPhase) ? qtrue : qfalse, conflictReason))
+			!grounded && BotSFJ_PhaseInProgress(bs->sfjPhase) ? qtrue : qfalse,
+			conflict == BOT_SFJ_CONFLICT_HARD, conflictReason))
 			return;
 		if (bs->sfjRoute)
 			BotSFJ_EndTrackRoute(bs, !fresh ? "expired recorded route intent" : "recorded route interrupted");
@@ -10493,7 +10694,7 @@ int PassStandardEnemyChecks(bot_state_t *bs, gentity_t *en)
 }
 
 //Notifies the bot that he has taken damage from "attacker".
-void BotDamageNotification(gclient_t *bot, gentity_t *attacker)
+void BotDamageNotification(gclient_t *bot, gentity_t *attacker, int mod)
 {
 	bot_state_t *bs;
 	bot_state_t *bs_a;
@@ -10558,6 +10759,10 @@ void BotDamageNotification(gclient_t *bot, gentity_t *attacker)
 
 	bs->lastHurt = attacker;
 	bs->lastHurtTime = level.time;
+	bs->lastHurtMod = mod;
+	/* Saber, melee and stun hits physically engage the bot; lightning and projectiles do not. */
+	if (mod == MOD_SABER || mod == MOD_MELEE || mod == MOD_STUN_BATON)
+		bs->lastHardHitTime = level.time;
 
 	if (bs->currentEnemy)
 	{ //we don't care about the guy attacking us if we have an enemy already
@@ -10839,7 +11044,7 @@ int WaitingForNow(bot_state_t *bs, vec3_t goalpos)
 	const playerState_t *ps;
 	gentity_t *mover = NULL;
 	vec3_t velocity;
-	int ground, atLowRest, goalAbove;
+	int ground, atLowRest, goalAbove, risingTransit, rising;
 
 	if (!bs || !g_entities[bs->client].client)
 		return 0;
@@ -10847,16 +11052,39 @@ int WaitingForNow(bot_state_t *bs, vec3_t goalpos)
 	ground = ps->groundEntityNum;
 	if (ground >= MAX_CLIENTS && ground < ENTITYNUM_WORLD)
 		mover = &g_entities[ground];
-	/* A close visible enemy is fought, not waited out on a lift. */
-	if (!mover || !mover->inuse || mover->s.eType != ET_MOVER ||
-		(bs->currentEnemy && bs->frame_Enemy_Vis && bs->frame_Enemy_Len < BOT_SFJ_NAV_ENEMY_GUARD))
+	if (mover && mover->inuse && mover->s.eType == ET_MOVER)
+	{
+		bs->navRideMover = ground;
+		bs->navRideOnTime = level.time;
+	}
+	else if (ground == ENTITYNUM_NONE && bs->navRideMover > 0 && bs->navRideMover < ENTITYNUM_WORLD &&
+		level.time - bs->navRideOnTime <= BOT_NAV_ELEVATOR_GROUND_GRACE_MS &&
+		g_entities[bs->navRideMover].inuse && g_entities[bs->navRideMover].s.eType == ET_MOVER &&
+		ps->origin[0] >= g_entities[bs->navRideMover].r.absmin[0] &&
+		ps->origin[0] <= g_entities[bs->navRideMover].r.absmax[0] &&
+		ps->origin[1] >= g_entities[bs->navRideMover].r.absmin[1] &&
+		ps->origin[1] <= g_entities[bs->navRideMover].r.absmax[1])
+		mover = &g_entities[bs->navRideMover];	/* lifted off the floor for a frame by the ride */
+	else
+		mover = NULL;
+	if (!mover || !mover->inuse || mover->s.eType != ET_MOVER)
+	{
+		bs->navRideStart = bs->navRideRestSince = 0;
+		bs->navRideMover = 0;
+		return 0;
+	}
+	BG_EvaluateTrajectoryDelta(&mover->s.pos, level.time, velocity);
+	risingTransit = mover->moverState == MOVER_1TO2 && mover->pos2[2] > mover->pos1[2] + 32.0f;
+	rising = risingTransit || velocity[2] > BOT_NAV_ELEVATOR_RISE_SPEED;
+	/* A close visible enemy is fought, not waited out on a resting lift; a rising lift is ridden. */
+	if (BotNav_ElevatorEnemyBreaksHold(bs->currentEnemy && bs->frame_Enemy_Vis &&
+		bs->frame_Enemy_Len < BOT_SFJ_NAV_ENEMY_GUARD, rising))
 	{
 		bs->navRideStart = bs->navRideRestSince = 0;
 		return 0;
 	}
 	if (!bs->navRideStart)
 		bs->navRideStart = level.time;
-	BG_EvaluateTrajectoryDelta(&mover->s.pos, level.time, velocity);
 	atLowRest = mover->moverState == MOVER_POS1 && mover->pos2[2] > mover->pos1[2] + 32.0f;
 	if (!atLowRest)
 		bs->navRideRestSince = 0;
@@ -10864,7 +11092,7 @@ int WaitingForNow(bot_state_t *bs, vec3_t goalpos)
 		bs->navRideRestSince = level.time;
 	goalAbove = (goalpos && goalpos[2] > ps->origin[2] + 48.0f) ||
 		(bs->sfjTravelGoalValid && bs->sfjTravelGoal[2] > ps->origin[2] + 48.0f);
-	return BotNav_ElevatorRideHolds(1, velocity[2], atLowRest, goalAbove,
+	return BotNav_ElevatorRideHolds(1, velocity[2], risingTransit, atLowRest, goalAbove,
 		atLowRest ? level.time - bs->navRideRestSince : -1, level.time - bs->navRideStart);
 }
 
@@ -11444,9 +11672,37 @@ int CTFTakesPriority(bot_state_t *bs)
 	/* Scoring outranks equipment gathering, forced roles and carrier pursuit. */
 	if (BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
 	{
+		const team_t team = level.clients[bs->client].sess.sessionTeam;
+		const wpobject_t *home = team == TEAM_RED ? oFlagRed : oFlagBlue;
+		gentity_t *drop = team == TEAM_RED ? droppedRedFlag : droppedBlueFlag;
+		const qboolean dropped = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM) ? qtrue : qfalse;
+		const int ownPowerup = team == TEAM_RED ? PW_REDFLAG : PW_BLUEFLAG;
+		qboolean stolen = qfalse;
+
 		bs->ctfState = CTFSTATE_GETFLAGHOME;
 		bs->isCamping = 0;
 		bs->wpCamping = NULL;
+		for (i = 0; i < MAX_CLIENTS && !stolen; i++)
+		{
+			ent = &g_entities[i];
+			if (ent->inuse && ent->client && ent->health > 0 &&
+				ent->client->sess.sessionTeam != TEAM_SPECTATOR &&
+				ent->client->ps.powerups[ownPowerup] && !OnSameTeam(&g_entities[bs->client], ent))
+				stolen = qtrue;
+		}
+		/* At base with our flag away we cannot score: go get it back instead of pacing the stand. */
+		if (home && (stolen || dropped) &&
+			BotSFJ_CarrierRecovers(1, 1, Distance(bs->origin, home->origin), 0.0f))
+		{
+			if (stolen && BotGetFlagBack(bs))
+				return 1;
+			if (dropped && (team == TEAM_RED ? flagRed : flagBlue))
+			{
+				GetNewFlagPoint(team == TEAM_RED ? flagRed : flagBlue, drop, team);
+				if (BotDefendFlag(bs))
+					return 1;
+			}
+		}
 		return BotGetFlagHome(bs);
 	}
 
@@ -11527,10 +11783,6 @@ int CTFTakesPriority(bot_state_t *bs)
 
 	if (bs->ctfState == CTFSTATE_GETFLAGHOME)
 		bs->ctfState = 0;
-	if (!bs->ctfState)
-	{
-		return 0;
-	}
 
 	i = 0;
 
@@ -11552,6 +11804,22 @@ int CTFTakesPriority(bot_state_t *bs)
 	if (bs->state_Forced)
 	{
 		bs->ctfState = bs->state_Forced;
+	}
+
+	/* No assigned role: never idle around our own safe flag. Recover it when it is
+	 * away, back up a teammate carrier, otherwise go for the enemy flag. */
+	if (!bs->ctfState)
+	{
+		const gentity_t *drop = myFlag == PW_REDFLAG ? droppedRedFlag : droppedBlueFlag;
+		const qboolean dropped = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM);
+
+		if ((ownCarrier >= 0 && BotGetFlagBack(bs)) || (dropped && BotDefendFlag(bs)))
+			goto success;
+		if (teammateCarrier >= 0 && BotGuardFlagCarrier(bs))
+			goto success;
+		if (BotGetEnemyFlag(bs))
+			goto success;
+		return 0;
 	}
 
 	if (bs->ctfState == CTFSTATE_DEFENDER)
@@ -11620,6 +11888,10 @@ int CTFTakesPriority(bot_state_t *bs)
 			goto success;
 		}
 	}
+
+	/* A role that found nothing to do falls back to attacking, not to our own stand. */
+	if (!bs->ctfState && BotGetEnemyFlag(bs))
+		goto success;
 
 	return 0;
 
@@ -12730,6 +13002,22 @@ void GetIdealDestination(bot_state_t *bs)
 				{
 					bs->wpDestSwitchTime = level.time + Q_irand(1000, 5000);
 				}
+			}
+		}
+	}
+	else if (!bs->wpCamping && !BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+	{
+		const float *hunt = BotNav_HuntTarget(bs, bs->origin);
+
+		/* Re-path the waypoint walk to the latest snapshot every hunt interval. */
+		if (hunt && (!bs->wpDestination || bs->wpDestSwitchTime < level.time))
+		{
+			VectorCopy(hunt, usethisvec);
+			tempInt = GetNearestVisibleWP(usethisvec, 0);
+			if (tempInt != -1 && TotalTrailDistance(bs->wpCurrent->index, tempInt, bs) != -1)
+			{
+				bs->wpDestination = gWPArray[tempInt];
+				bs->wpDestSwitchTime = level.time + bot_hunt_interval.integer;
 			}
 		}
 	}
@@ -28919,6 +29207,15 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 	if (!someonesHere && targetMode == NEWBOTAI_TARGET_HUMANS_ONLY)
 		return;
 
+	//Route runners (airborne on a route, flag carriers, enemy-flag runs) navigate instead of fighting.
+	if (NewBotAI_HasWaypointNavigation() && BotNav_ShouldHoldCombat(bs))
+	{
+		bs->doAttack = 0;
+		bs->doAltAttack = 0;
+		StandardBotAI(bs, thinktime);
+		return;
+	}
+
 	if (targetMode < 0)
 		closestID = NewBotAI_ScanForEnemies(bs); //This has been modified to take health into account, and ignore FOV, mindtrick, etc, when newBotAI is being used.
 	else {
@@ -30366,7 +30663,12 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		bs->doingFallback = qfalse;
 	}
 
-	if (bs->timeToReact < level.time && bs->currentEnemy && bs->enemySeenTime > level.time + (ENEMY_FORGET_MS - (ENEMY_FORGET_MS*0.2)))
+	if (BotNav_ShouldHoldCombat(bs))
+	{ //on a route run: no aiming or attacking, keep the route's view and input
+		bs->doAttack = 0;
+		bs->doAltAttack = 0;
+	}
+	else if (bs->timeToReact < level.time && bs->currentEnemy && bs->enemySeenTime > level.time + (ENEMY_FORGET_MS - (ENEMY_FORGET_MS*0.2)))
 	{
 		if (bs->frame_Enemy_Vis)
 		{

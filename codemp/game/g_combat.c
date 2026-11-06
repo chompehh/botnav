@@ -36,7 +36,7 @@ extern void G_LetGoOfWall( gentity_t *ent );
 extern void BG_ClearRocketLock( playerState_t *ps );
 extern qboolean SpotWouldTelefrag3( vec3_t spot );
 //rww - pd
-void BotDamageNotification(gclient_t *bot, gentity_t *attacker);
+void BotDamageNotification(gclient_t *bot, gentity_t *attacker, int mod);
 //end rww
 
 void ThrowSaberToAttacker(gentity_t *self, gentity_t *attacker);
@@ -6018,11 +6018,11 @@ void G_Damage( gentity_t *targ, gentity_t *inflictor, gentity_t *attacker, vec3_
 
 		if (attacker && attacker->client)
 		{
-			BotDamageNotification(client, attacker);
+			BotDamageNotification(client, attacker, mod);
 		}
 		else if (inflictor && inflictor->client)
 		{
-			BotDamageNotification(client, inflictor);
+			BotDamageNotification(client, inflictor, mod);
 		}
 	}
 

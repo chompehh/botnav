@@ -2968,21 +2968,30 @@ static inline int BotSFJ_FlightHazardVetoes(int hazardAhead, int trustedHop, int
 
 /* ---- Elevators ---- */
 #define BOT_NAV_ELEVATOR_RISE_SPEED 8.0f
-#define BOT_NAV_ELEVATOR_START_MS 1500
-#define BOT_NAV_ELEVATOR_MAX_MS 15000
+#define BOT_NAV_ELEVATOR_START_MS 4500
+#define BOT_NAV_ELEVATOR_MAX_MS 20000
+/* Riding a lift can lift the bot off the floor for a few frames; keep the hold that long. */
+#define BOT_NAV_ELEVATOR_GROUND_GRACE_MS 400
 
 /*
- * Ride a lift up: hold still while the mover underfoot rises, and briefly on a
- * lift resting at its low end (standing on it starts it) when the goal is above.
+ * Ride a lift up: hold still while the mover underfoot rises or is travelling
+ * up (accelerating frames included), and wait a few seconds on a lift resting
+ * at its low end (standing on it starts it) when the goal is above.
  */
-static inline int BotNav_ElevatorRideHolds(int onMover, float riseSpeed, int atLowRest,
+static inline int BotNav_ElevatorRideHolds(int onMover, float riseSpeed, int risingTransit, int atLowRest,
 	int goalAbove, int restMs, int rideMs)
 {
 	if (!onMover || rideMs < 0 || rideMs > BOT_NAV_ELEVATOR_MAX_MS)
 		return 0;
-	if (riseSpeed > BOT_NAV_ELEVATOR_RISE_SPEED)
+	if (riseSpeed > BOT_NAV_ELEVATOR_RISE_SPEED || (risingTransit && riseSpeed > -BOT_NAV_ELEVATOR_RISE_SPEED))
 		return 1;
 	return atLowRest && goalAbove && restMs >= 0 && restMs < BOT_NAV_ELEVATOR_START_MS;
+}
+
+/* A close enemy only breaks the wait on a lift that is not carrying the bot up. */
+static inline int BotNav_ElevatorEnemyBreaksHold(int enemyClose, int liftRising)
+{
+	return enemyClose && !liftRising;
 }
 
 #define BOT_SFJ_APPROACH_BLOCK_MS 250
@@ -3040,6 +3049,143 @@ static inline int BotSFJ_ForwardRouteBetter(float score, int backtrack,
 {
 	return score > 0.0f && (bestScore <= 0.0f || backtrack < bestBacktrack ||
 		(backtrack == bestBacktrack && score > bestScore));
+}
+
+/*
+ * Walking back to a route start must pay off: the route's gain toward the goal
+ * has to clearly beat the extra walk, otherwise the bot keeps going forward.
+ */
+#define BOT_SFJ_BACKTRACK_MIN_GAIN 384.0f
+
+static inline int BotSFJ_BacktrackPaysOff(float goalGain, float walkCost)
+{
+	return goalGain >= walkCost * 0.5f + BOT_SFJ_BACKTRACK_MIN_GAIN;
+}
+
+/*
+ * A planned walk to a route start is kept long enough to reach it; it is not
+ * wiped every second because the start lies behind the goal heading.
+ */
+#define BOT_SFJ_WALK_COMMIT_MIN_MS 2500
+#define BOT_SFJ_WALK_COMMIT_MAX_MS 6000
+
+static inline int BotSFJ_WalkCommitMs(float startDistance)
+{
+	int ms;
+
+	if (!isfinite(startDistance) || startDistance < 0.0f)
+		startDistance = 0.0f;
+	ms = 1500 + (int)(startDistance * 5.0f);
+	return ms < BOT_SFJ_WALK_COMMIT_MIN_MS ? BOT_SFJ_WALK_COMMIT_MIN_MS :
+		(ms > BOT_SFJ_WALK_COMMIT_MAX_MS ? BOT_SFJ_WALK_COMMIT_MAX_MS : ms);
+}
+
+static inline int BotSFJ_WalkCommitted(int commitUntil, int now)
+{
+	return commitUntil > 0 && now < commitUntil;
+}
+
+/* ---- Backtrack loop learning ---- */
+#define BOT_SFJ_LOOP_WINDOW_MS 12000
+#define BOT_SFJ_LOOP_REPLANS 3
+#define BOT_SFJ_LOOP_PROGRESS 64.0f
+#define BOT_SFJ_GOAL_STALL_MS 10000
+#define BOT_SFJ_GOAL_PROGRESS 128.0f
+#define BOT_SFJ_LOOP_RETRY_MS 30000
+
+/* Replans toward the same route without getting closer to its start count up. */
+static inline int BotSFJ_LoopReplanCount(int count, int since, int now, int sameRoute, int closer)
+{
+	if (!sameRoute || since <= 0 || now - since > BOT_SFJ_LOOP_WINDOW_MS || closer)
+		return 1;
+	return count + 1;
+}
+
+/* A loop: the same route replanned again and again, or no goal progress for long. */
+static inline int BotSFJ_LoopDetected(int replans, int goalStallMs)
+{
+	return replans >= BOT_SFJ_LOOP_REPLANS || goalStallMs >= BOT_SFJ_GOAL_STALL_MS;
+}
+
+/* Learned loops make a route's walk score fall off; a reached start earns trust back. */
+static inline float BotSFJ_LoopPenalty(int loops)
+{
+	float factor;
+
+	if (loops <= 0)
+		return 1.0f;
+	factor = 1.0f / (1.0f + 0.5f * (float)loops);
+	return factor < 0.15f ? 0.15f : factor;
+}
+
+/* ---- Route combat hold ---- */
+#define BOT_ROUTE_HARD_HIT_MS 2000
+
+/*
+ * Who keeps running instead of fighting:
+ *  - an airborne bot on a recorded route always finishes the arc (fights on landing);
+ *  - a flag carrier only fights after a push/pull/grip/knockdown or saber/melee hit
+ *    (lightning and projectiles do not stop a capture run);
+ *  - a bot heading to the enemy flag fights once it is hit at all.
+ */
+static inline int BotNav_RouteCombatHold(int enabled, int airborneOnRoute, int carrying,
+	int attackingFlag, int hardHitRecent, int anyHurtRecent)
+{
+	if (!enabled)
+		return 0;
+	if (airborneOnRoute)
+		return 1;
+	if (carrying)
+		return !hardHitRecent;
+	if (attackingFlag)
+		return !hardHitRecent && !anyHurtRecent;
+	return 0;
+}
+
+/* ---- Approach pauses ---- */
+/*
+ * Before the first hop a transient conflict (a queued attack, a block, a short
+ * stall) pauses the route instead of ending it; the bot picks it up again.
+ */
+#define BOT_SFJ_APPROACH_PAUSE_MAX_MS 1500
+
+static inline int BotSFJ_ApproachPauseAllows(int route, int launched, int hardConflict, int pausedMs)
+{
+	return route > 0 && !launched && !hardConflict &&
+		pausedMs >= 0 && pausedMs <= BOT_SFJ_APPROACH_PAUSE_MAX_MS;
+}
+
+/* ---- CTF goals ---- */
+#define BOT_CTF_CARRIER_BASE_RADIUS 512.0f
+
+/* A carrier at its base cannot score while its own flag is away: go and get it back. */
+static inline int BotSFJ_CarrierRecovers(int carrying, int ownUnsafe, float baseDistance, float ownCost)
+{
+	return carrying && ownUnsafe && ownCost >= 0.0f && baseDistance >= 0.0f &&
+		baseDistance < BOT_CTF_CARRIER_BASE_RADIUS;
+}
+
+/* ---- FFA hunting ---- */
+/* A bot with no goal re-targets the nearest opponent's live position every interval. */
+static inline int BotNav_HuntRefreshDue(int intervalMs, int lastRefresh, int now, int targetValid)
+{
+	if (intervalMs <= 0)
+		return 0;
+	return !targetValid || lastRefresh <= 0 || now - lastRefresh >= intervalMs || now < lastRefresh;
+}
+
+/* ---- Human yaw replay ---- */
+#define BOT_SFJ_HUMAN_TURN_DEG 45.0f
+#define BOT_SFJ_HUMAN_YAW_COLLISIONS 2
+
+/*
+ * Copying the human's view yaw is for problem solving: an obvious turn in the
+ * recorded data, a recorded wallrun, or repeated collisions that cost speed.
+ * Otherwise the bot's own strafe controller follows the human line.
+ */
+static inline int BotSFJ_HumanYawUseful(int clearTurn, int wallrun, int collisions, int speedLost)
+{
+	return clearTurn || wallrun || (collisions >= BOT_SFJ_HUMAN_YAW_COLLISIONS && speedLost);
 }
 
 /* ---- Edge dancing ---- */
