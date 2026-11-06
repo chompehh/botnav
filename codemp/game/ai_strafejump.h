@@ -10,7 +10,8 @@
 #define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
 #define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
-#define BOT_SFJ_MAX_TRACK_ROUTES 256
+#define BOT_SFJ_MAX_TRACK_ROUTES 384
+#define BOT_SFJ_ROUTE_FILE_MAX (24 * 1024 * 1024)
 #define BOT_SFJ_TRACK_MAX_NODES 32
 #define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
@@ -78,6 +79,12 @@ static inline int BotSFJ_WallRunAllows(int navigation, int grounded, int nearbyE
 static inline int BotSFJ_LedgeRecoveryAllows(int grounded, int exclusiveMovement)
 {
 	return grounded && !exclusiveMovement;
+}
+
+static inline int BotSFJ_DiscoverBeforeLedgeRecovery(int enabled, int trustHuman,
+	int grounded, int route, int walking, int recovering, int hazard)
+{
+	return enabled && trustHuman && grounded && !route && !walking && !recovering && hazard;
 }
 
 /* Preserve sustained speed; a single exceptional sample must not dominate. */
@@ -300,6 +307,13 @@ static inline int BotSFJ_TrackHopTrusted(int deaths, int failures, int passes)
 		(failures < BOT_SFJ_TRACK_TRUST_FAILURES || failures <= passes);
 }
 
+static inline int BotSFJ_TrackHopTrustedForSpeed(int deaths, int failures, int passes, int speed)
+{
+	if (speed)
+		return deaths <= 0 && (failures < 2 || failures <= passes / 2);
+	return BotSFJ_TrackHopTrusted(deaths, failures, passes);
+}
+
 /*
  * Recorded takeoffs are within about 12u of the stored start and run along the
  * start->first-landing heading. The circle jump starts only once the bot is on
@@ -414,6 +428,13 @@ static inline int BotSFJ_HopRetryDelay(int failures, int lethal)
 	return delay > 300000 ? 300000 : delay;
 }
 
+static inline int BotSFJ_HopRetryDelayForSpeed(int failures, int lethal, int speed)
+{
+	const int delay = BotSFJ_HopRetryDelay(failures, lethal);
+
+	return speed ? (delay < 150000 ? delay * 2 : 300000) : delay;
+}
+
 static inline float BotSFJ_HopReliability(int failures, int passes)
 {
 	return 0.25f + 0.75f *
@@ -455,6 +476,31 @@ static inline float BotSFJ_HopRangeEvidence(const int *failures, const int *pass
 		reliability += BotSFJ_HopReliability(failures[i], passes[i]);
 	}
 	return reliability / (float)(end - entry);
+}
+
+static inline float BotSFJ_SpeedReliability(float reliability, int speed)
+{
+	return speed ? reliability * reliability : reliability;
+}
+
+/* Keep the current takeoff, or the terminal landing until its momentum settles. */
+static inline int BotSFJ_PendingFailureNode(int completed, int acquiring, int launched,
+	int launchedNode, int currentNode, int count)
+{
+	const int node = launched ? launchedNode : (completed ? count - 1 : currentNode);
+
+	return !acquiring && node >= 0 && node < count ? node : -1;
+}
+
+#define BOT_SFJ_PENDING_DEATH_MS 5000
+#define BOT_SFJ_TERMINAL_DEATH_MS 1500
+
+static inline int BotSFJ_PendingDeathAllows(int pendingTime, int now, int stat, int statCount,
+	int completed)
+{
+	return pendingTime > 0 && now >= pendingTime &&
+		now - pendingTime <= (completed ? BOT_SFJ_TERMINAL_DEATH_MS : BOT_SFJ_PENDING_DEATH_MS) &&
+		stat >= 0 && stat < statCount;
 }
 
 static inline int BotSFJ_AvailablePrefixEnd(const int *available, int count, int entry)
@@ -1914,8 +1960,9 @@ static inline int BotSFJ_SlowedOut(float peakSpeed, float horizontalSpeed, float
  */
 #define BOT_SFJ_TRACK_MIN_YAW_RATE 90.0f
 #define BOT_SFJ_TRACK_END_MS 150
-#define BOT_SFJ_TRACK_MIN_NODES 2
-#define BOT_SFJ_TRACK_MIN_DISTANCE 256.0f
+#define BOT_SFJ_TRACK_MIN_NODES 1
+#define BOT_SFJ_TRACK_MIN_DISTANCE 128.0f
+#define BOT_SFJ_TRACK_CONNECTOR_DISTANCE 768.0f
 
 static inline int BotSFJ_TrackCircleJumpStart(int grounded, int forwardMove, int rightMove,
 	float yawRate, float horizontalSpeed, float groundSpeed, int jumpPressed)
@@ -1997,6 +2044,18 @@ static inline int BotSFJ_TrackKeep(int nodes, float pathDistance, int touchedHaz
 {
 	return !touchedHazard && nodes >= BOT_SFJ_TRACK_MIN_NODES &&
 		pathDistance >= BOT_SFJ_TRACK_MIN_DISTANCE;
+}
+
+static inline float BotSFJ_TrackConnectorScore(float distance, int durationMs, float evidence)
+{
+	float seconds;
+
+	if (!isfinite(distance) || distance < BOT_SFJ_TRACK_MIN_DISTANCE ||
+		distance > BOT_SFJ_TRACK_CONNECTOR_DISTANCE || durationMs <= 0 ||
+		!isfinite(evidence) || evidence <= 0.0f)
+		return 0.0f;
+	seconds = (float)durationMs / 1000.0f;
+	return evidence * distance / (seconds * (seconds + 0.25f));
 }
 
 /*
@@ -2239,7 +2298,7 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 /* Legacy fixed slots; new readers allocate only samples actually recorded. */
 #define BOT_SFJ_REPLAY_MAX_SAMPLES 256
 #define BOT_SFJ_REPLAY_ROUTE_SAMPLES 4096
-#define BOT_SFJ_REPLAY_TOTAL_SAMPLES 131072
+#define BOT_SFJ_REPLAY_TOTAL_SAMPLES 196608
 #define BOT_SFJ_REPLAY_MAX_SOURCE_SAMPLES 65536
 #define BOT_SFJ_REPLAY_MAX_WALLRUNS 4
 #define BOT_SFJ_REPLAY_FLAG_GROUNDED 1
@@ -2966,6 +3025,11 @@ static inline int BotSFJ_FlightHazardVetoes(int hazardAhead, int trustedHop, int
 	return hazardAhead && !(trustedHop && trustHuman);
 }
 
+static inline int BotSFJ_GroundPredictionVetoes(int unsafe, int trustedHop, int trustHuman)
+{
+	return unsafe && !(trustedHop && trustHuman);
+}
+
 /* ---- Elevators ---- */
 #define BOT_NAV_ELEVATOR_RISE_SPEED 8.0f
 #define BOT_NAV_ELEVATOR_START_MS 4500
@@ -3121,9 +3185,16 @@ static inline float BotSFJ_LoopPenalty(int loops)
 /* ---- Route combat hold ---- */
 #define BOT_ROUTE_HARD_HIT_MS 2000
 
+static inline int BotSFJ_RouteInputCommitted(int route, int grounded, int phase)
+{
+	return route > 0 && (!grounded || phase == BOT_SFJ_PHASE_TAKEOFF ||
+		phase == BOT_SFJ_PHASE_REJUMP || phase == BOT_SFJ_PHASE_LANDING ||
+		phase == BOT_SFJ_PHASE_AIR);
+}
+
 /*
  * Who keeps running instead of fighting:
- *  - an airborne bot on a recorded route always finishes the arc (fights on landing);
+ *  - a committed recorded hop keeps control through takeoff, flight and rejump;
  *  - a flag carrier only fights after a push/pull/grip/knockdown or saber/melee hit
  *    (lightning and projectiles do not stop a capture run);
  *  - a bot heading to the enemy flag fights once it is hit at all.

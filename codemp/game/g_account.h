@@ -357,12 +357,32 @@ typedef struct
 {
 	float start[3], end[3];
 	int forceJump, moveStyle, haveEnd;
+	float connectorScore;
 } strafetrack_export_coverage_t;
 
+static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverage_t *a,
+	const strafetrack_export_coverage_t *b)
+{
+	int axis;
+	float start = 0.0f, end = 0.0f;
+	const float radius = a->connectorScore > 0.0f || b->connectorScore > 0.0f ? 64.0f : 192.0f;
+
+	if (!a->haveEnd || !b->haveEnd || a->forceJump != b->forceJump || a->moveStyle != b->moveStyle)
+		return 0;
+	for (axis = 0; axis < 3; axis++)
+	{
+		const float ds = a->start[axis] - b->start[axis];
+		const float de = a->end[axis] - b->end[axis];
+		start += ds * ds;
+		end += de * de;
+	}
+	return start <= radius * radius && end <= radius * radius;
+}
+
 /*
- * Candidates are quality-sorted and already in the same speed group. Reserve
- * half the slots for start coverage, then cover distinct start/destination and
- * movement pairs before filling with additional high-quality recordings.
+ * Candidates are quality-sorted and in the same speed group. Reserve a quarter
+ * for quick short connectors, then half for start coverage (including those
+ * connectors), then distinct endpoints/movement before quality fills.
  */
 static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_coverage_t *routes,
 	int count, int maximum, unsigned char *picked)
@@ -370,6 +390,28 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 	int pass, i, j, selected = 0;
 
 	memset(picked, 0, count);
+	while (selected < maximum / 4)
+	{
+		int best = -1;
+
+		for (i = 0; i < count; i++)
+		{
+			int represented = 0;
+
+			if (picked[i] || !routes[i].haveEnd || routes[i].connectorScore <= 0.0f ||
+				(best >= 0 && routes[i].connectorScore <= routes[best].connectorScore))
+				continue;
+			for (j = 0; j < count && !represented; j++)
+				if (picked[j])
+					represented = G_StrafeTrackExportEquivalent(&routes[i], &routes[j]);
+			if (!represented)
+				best = i;
+		}
+		if (best < 0)
+			break;
+		picked[best] = 1;
+		selected++;
+	}
 	for (pass = 0; pass < 3; pass++)
 	{
 		const int limit = pass ? maximum : (maximum + 1) / 2;
@@ -394,10 +436,8 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 					}
 					represented = distance < 192.0f * 192.0f;
 				}
-				else if (routes[i].haveEnd && routes[j].haveEnd)
-					represented = G_StrafeTrackResetEquivalent(routes[i].start, routes[i].end,
-						routes[j].start, routes[j].end, 0, 0, routes[i].forceJump,
-						routes[j].forceJump, routes[i].moveStyle, routes[j].moveStyle);
+				else
+					represented = G_StrafeTrackExportEquivalent(&routes[i], &routes[j]);
 			}
 			if (!represented)
 			{

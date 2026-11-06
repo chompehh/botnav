@@ -642,6 +642,7 @@ typedef struct bot_state_s
 	int					sfjPendingHopNode;
 	int					sfjPendingHopTime;
 	qboolean			sfjPendingHopFailed;
+	qboolean			sfjPendingHopCompleted;
 	vec3_t				sfjTravelGoal;
 	qboolean			sfjTravelGoalValid;
 	int					sfjTravelGoalKind;
