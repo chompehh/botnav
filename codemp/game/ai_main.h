@@ -533,6 +533,8 @@ typedef struct bot_state_s
 	int					navObstacleUntil; // stay in waypoint nav mode until this time when an obstacle blocks path to enemy
 	int					combatNavHoldUntil; // remain in combat for 1500ms before returning to waypoint navigation
 	int					lastHurtTime;     // level.time when this bot last took damage (set in BotDamageNotification)
+	int					lastHurtMod;      // means of death of that damage (MOD_*)
+	int					lastHardHitTime;  // level.time of the last push/pull/grip/knockdown or saber/melee hit
 	int					enemyWaypointFallbackIndex; // cached nearest visible waypoint for currentEnemy when enemy->waypoint is unavailable
 	int					enemyWaypointFallbackTime; // when enemyWaypointFallbackIndex should be refreshed
 	int					enemyWaypointFallbackEnemyNum; // enemy entity number associated with enemyWaypointFallbackIndex
@@ -655,6 +657,16 @@ typedef struct bot_state_s
 	int					sfjWalkCheckTime;
 	float				sfjWalkBest;
 	qboolean			sfjWalking;
+	int					sfjWalkCommitUntil;	// planned walk chain is kept (no backtrack wipe) until then
+	int					sfjLoopRoute;		// route the bot keeps replanning toward (loop learning)
+	int					sfjLoopCount;
+	int					sfjLoopSince;
+	float				sfjLoopBestDist;
+	int					sfjGoalProgressTime;	// last time the travel goal got closer
+	float				sfjGoalProgressBest;
+	int					huntClient;			// FFA: hunted opponent's client number + 1 (0 none)
+	int					huntRefreshTime;
+	vec3_t				huntOrigin;			// snapshot of that opponent's position
 	int					sfjWallRunUntil;
 	int					sfjWallRunStage;
 	int					sfjWallRunRetryUntil;
@@ -697,6 +709,8 @@ typedef struct bot_state_s
 	qboolean			sfjReplaySteer;		// human yaw/keys steer this frame (data turn, wallrun or trouble)
 	int					navRideStart;		// standing on a lift since (0 = not riding)
 	int					navRideRestSince;	// lift underfoot resting at its low end since
+	int					navRideMover;		// lift entity being ridden (0 = none)
+	int					navRideOnTime;		// last time the bot stood on navRideMover
 	int					sfjRouteWallStage;	// recorded wallrun replay: 0 idle, 1 trigger, 2 on wall, 3 exit
 	int					sfjRouteWallIndex;
 	int					sfjRouteWallStart;

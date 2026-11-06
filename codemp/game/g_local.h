@@ -1873,7 +1873,7 @@ void G_StrafeTrackFrame( gentity_t *ent );
 void G_StrafeTrackReset( int clientNum );
 void BotSFJ_ReloadRouteHints( void );
 void BotSFJ_SaveRouteStats( void );
-void G_StrafeTrackExportCurrentMap( qboolean reload );
+qboolean G_StrafeTrackExportCurrentMap( qboolean reload );
 void G_StrafeTrackCommand( gentity_t *ent );
 void G_StrafeTrackFlushAll( void );
 void Svcmd_ResetStrafeTrack_f( void );

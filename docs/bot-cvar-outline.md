@@ -238,6 +238,18 @@ Unreachable/distant starts fall back to ordinary navigation. Progress timeouts
 discard stalled plans. Walking acquisition does not depend on a queued legacy
 movement direction and never treats a walk connector as a jump permission.
 
+Backtracking: a walk to a route start is committed for 2.5-6 s (by distance) and
+is not wiped by heading changes before then. A start behind the goal heading is
+only chosen when its goal gain is at least half the walk cost plus 384 units.
+Bots learn backtrack loops: three replans to the same start within 12 s without
+getting 64 units closer, or 10 s without 128 units of progress toward a flag
+goal, records a loop on that route (persisted in `.botroute_stats`) and blocks
+it for that bot for 30 s. Each learned loop lowers the route's walk score
+(1/(1+0.5×loops), floor 0.15); actually starting the route removes one loop.
+CTF bots with no assigned role attack the enemy flag (or recover their own flag
+when it is away) instead of returning to their safe own flag; a carrier near
+home whose own flag is taken goes to recover it.
+
 Whole-route scoring combines 65% mean and 35% peak speed, with completion,
 per-hop reliability and measured performance. New exports include `max_speed`
 and `average_speed` (distance / elapsed time); older files use all landing-node
@@ -438,7 +450,7 @@ and re-enable recording. The cleanup regenerates `.botroute` files, preserves
 hand-authored blocks and `.botroute_stats`, and does not clear combat learning
 or CTF objective evidence. Export/back up first; pruning is not reversible.
 
-With `bot_strafetrack_autoexport 1` (default), each saved route immediately rewrites the current map's `botroutes/<map>.botroute` and reloads it, and the file is rewritten again at map end/shutdown, so bots use new routes without a manual export. `0` restores the manual `exportStrafeTrack` workflow.
+With `bot_strafetrack_autoexport 1` (default), a saved route marks the current map's `botroutes/<map>.botroute` dirty; the file is rewritten and reloaded at most once every `bot_strafetrack_exportinterval` seconds (default `60`, minimum 10) while no human route is being recorded and no save is pending, and again at map end/shutdown, so bots use new routes without a manual export. Earlier builds rewrote the whole file and reloaded every bot's route state on each route finish, which caused the hitch at circle-jump start/route end. Route rows are also saved in smaller batches (128 inputs per frame). `0` restores the manual `exportStrafeTrack` workflow. To shrink the data without losing good routes, run `resetstrafetrack preview` and then `resetstrafetrack` (above): objective-success routes, sole connectors and distinct movement types are kept, while redundant demonstrations and bot comparison recordings are removed.
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at 24 MB, like `exportDuelTrack`);
@@ -485,7 +497,7 @@ Flags: 1 grounded, 2 jump held, 4 on a wall (`BOTH_FORCEWALLRUNFLIP_START`), 8 f
 
 While airborne on a route with samples, a bot matches its position to the human path (monotonically, so looping routes do not snap back) and copies the human's movement keys and the human's view angle **relative to velocity** at that point, plus a correction that steers the bot's velocity onto the human's travel direction (75% of the heading error) and path (up to 15°), capped at ±45°. The resulting wish (view minus the key axes) always stays within 90° of the bot's velocity, so an overturned bot turns back and a bot late into a corner turns harder without braking the hop. Replay matching continues while flying near or past a landing; it does not freeze until touchdown. A per-hop clock advances through stationary samples only as their recorded time becomes due, avoiding a stalled cursor without skipping pauses or later visits to the same location. Matching stays on the current hop, with up to 50 ms of lookahead that stops before key, flag or node transitions. Legacy hops without samples use their landing corridor. Each corner therefore gets the human's own yaw, not a fixed corner rule, and the view is not rate-limited during replay. Grounded repositioning before a new circle jump replays the human's absolute yaw and keys.
 
-Human yaw is copied only where it solves a problem: the recorded travel direction turns by 25° or more within the next 400 ms (an obvious corner), the human wallran there, the bot has had a momentum collision on the hop, or it has lost speed. Otherwise the bot's own strafe controller follows the human line (keys and path matching still apply). Grounded repositioning before a circle jump always replays the human's yaw.
+Human yaw is copied only where it solves a problem: the recorded travel direction turns by 45° or more within the next 400 ms (an obvious corner), the human wallran there, or the bot has had two or more momentum collisions on the hop and is losing speed. Otherwise the bot's own strafe controller follows the human line (keys and path matching still apply). Grounded repositioning before a circle jump always replays the human's yaw.
 
 When the bot is more than 160 units off the human path, more than 80 units for 300 ms, or below 1.05× normal speed (or under 60% of the human's speed) for 350 ms where the human was above 1.15× normal speed, the route is kept and the hop is steered by the corner controller (with corner anticipation) instead of the human's yaw. Replay resumes once the bot is back within 40 units and has its speed again. Routes without samples use 256 / 192 units for 400 ms. Trusted hops get twice the time. Only a drift of more than 256 units (384 without samples) for 500 ms gives the route up, and drifting never counts as a hop failure or costs trust. Approaches, grounded restarts the human also made, samples where the human was on the ground or a wall, and hops not yet launched are exempt.
 
@@ -501,7 +513,11 @@ Bots copy each hop: the first key side (when the route is within 20° of the vel
 
 Travel goals: legacy CTF navigation and strafe-route goals share the defender recovery/escort priorities above. There is no 512-unit base exclusion or 320-unit arrival cutoff: a route that makes worthwhile progress toward the goal remains eligible even on the final capture approach. Explicit goals survive route completion, so chaining remains goal-directed rather than reverting to free-run selection near the flag. A goal change keeps the recently-run route memory, preventing an immediate run back along the same route.
 
-Elevators: a bot standing on a rising mover (`ET_MOVER`) holds still and skips ledge escape until the lift stops (at most 15 s), pausing (not ending) an active recorded route; on a lift resting at its low end with the goal above, it waits up to 1.5 s for the lift to start. A close visible enemy cancels the wait.
+Elevators: a bot standing on a rising mover (`ET_MOVER`, including one moving from its low to its high position) holds still and skips ledge escape until the lift reaches the top (at most 20 s), pausing (not ending) an active recorded route; brief ground flicker on the platform (up to 400 ms) does not end the ride. On a lift resting at its low end with the goal above, it waits up to 4.5 s for the lift to start. A close visible enemy cancels the wait only while the lift is not rising.
+
+Route runners hold combat (`bot_route_combathold 1`, default): a bot airborne on a recorded route finishes the arc and may fight after landing; a flag carrier keeps running unless pushed, pulled, gripped, knocked down or hit by saber/melee (lightning and projectiles do not stop a capture run); a bot heading for the enemy flag keeps going until it takes any damage or meets the enemy carrier. Holding bots do not aim or attack and do not end routes for close enemies. Before the first hop, soft conflicts (queued attack, short stall) pause a route for up to 1.5 s instead of ending it. `0` restores the old behaviour.
+
+FFA hunting: in FFA-style modes (not CTF/CTY/siege/duel) a bot with no other goal targets the nearest opponent's live position, refreshed every `bot_hunt_interval` ms (default `3000`, `0` disables), for both recorded-route goals and legacy waypoint destinations.
 
 Recommended test cfg (fewest interferences, most route attempts): `bot_strafejumps 1`, `bot_onlystrafes 1`, `bot_strafejumpfrequency 100`, `bot_strafe_loosen 1`, `bot_strafe_tolerance 128`, `bot_strafe_wallmargin 24`, `bot_strafejumpwaypoints 192`, `bot_strafe_nodetimeout 6000`, `bot_minstrafe 0` (navigation only) or `448` (combat), `bot_strafes_backwards 0` or `1` (backward retreat), `bot_strafetrack 1`, `bot_strafetrack_autoexport 1`, `bot_strafejumps_debug 1`, bots at skill 10 first.
 
@@ -630,15 +646,15 @@ Route choice and chaining:
 - Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by recording
   ID, creation time, start and last landing, and execution speed context so
   re-exports retain history without contaminating different recordings.
-  The versioned format begins with `botroute_stats 7`; each route stores start x/y/z, last landing x/y/z,
+  The versioned format begins with `botroute_stats 8`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
   traversal deaths, unsafe-arc rejections, and 32 groups of hop failures, passes,
   successful force-jump hold height, and successful yaw correction, followed by
   recording ID and creation time, then 32 groups of hop deaths, recent failures,
-  and recent passes.
+  and recent passes, then (version 8) the learned backtrack-loop count.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
-  unknown legacy history. Legacy eight-field and versions 2-6
+  unknown legacy history. Legacy eight-field and versions 2-7
   remain readable. Version 3 files are migrated once: hop failures, stalls
   and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
   cleared, while deaths, passes and completions are kept. Older formats cannot
@@ -660,7 +676,7 @@ Route choice and chaining:
   scan, decides trusted hops: a predicted hazard, mover or open drop on a
   trusted hop is logged but does not block the takeoff, and a hazard seen in
   flight does not abort the hop. A trusted hop survives two momentum
-  collisions (the bot copies the human's yaw after the first) and ends on the
+  collisions (the bot copies the human's yaw after the second if it is losing speed) and ends on the
   third; replay on a trusted hop is abandoned only at 1.5x the drift for twice
   as long. A hop loses that trust after a death on it (falling, `trigger_hurt`,
   lava, slime), or after five or more real

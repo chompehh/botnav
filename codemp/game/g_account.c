@@ -11607,7 +11607,7 @@ botroutes/<map>.botroute so bots start using them.
 #define STRAFETRACK_MAX_INPUTS 4096
 #define STRAFETRACK_PREROLL 32
 #define STRAFETRACK_PREROLL_MS 150
-#define STRAFETRACK_SAVE_BATCH 512
+#define STRAFETRACK_SAVE_BATCH 128
 #define STRAFETRACK_ROUTES_PER_MAP 256
 #define STRAFETRACK_EXPORT_CANDIDATES 4096
 #define STRAFETRACK_COVERAGE_SPACING 192.0f
@@ -11717,6 +11717,10 @@ typedef struct
 
 static strafetrack_client_t g_strafeTrack[MAX_CLIENTS];
 static int g_strafeTrackRouteCounter;
+/* New routes mark the map dirty; the .botroute rewrite + bot reload runs at most once per
+ * bot_strafetrack_exportinterval seconds, never while a human is mid-route, and at map end. */
+static qboolean g_strafeTrackExportDirty;
+static int g_strafeTrackLastExport;
 
 typedef struct
 {
@@ -11905,7 +11909,7 @@ void G_CTFTrackEvent(gentity_t *player, int event, int flagTeam, const vec3_t or
 	if (result != SQLITE_OK)
 		goto error;
 	if (journey && G_CTFTrackSuccess(event, team) && bot_strafetrack_autoexport.integer)
-		G_StrafeTrackExportCurrentMap(qtrue);
+		g_strafeTrackExportDirty = qtrue;
 	return;
 error:
 	G_TrackedDBError("CTF objective event", db, result);
@@ -12238,7 +12242,7 @@ static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, con
 				"Routes are kept in the database across restarts.\n\"", (long long)routeId, track->nodeCount,
 				track->routeNum));
 			if (bot_strafetrack_autoexport.integer)
-				G_StrafeTrackExportCurrentMap(qtrue);
+				g_strafeTrackExportDirty = qtrue;
 		}
 		else
 			trap->SendServerCommand(ent - g_entities, va("print \"Strafe route (session #%i) NOT saved: database unavailable.\n\"",
@@ -12459,6 +12463,33 @@ static void G_StrafeTrackTakePreroll(strafetrack_client_t *track)
 }
 
 //Called once per server frame for every client (ClientEndFrame).
+/* Deferred route export: one rewrite per interval instead of one per finished route. */
+static void G_StrafeTrackMaybeExport(void)
+{
+	static int lastCheck = -1;
+	int i, intervalMs;
+
+	if (lastCheck == level.time)
+		return;
+	lastCheck = level.time;
+	if (g_strafeTrackLastExport > level.time)
+		g_strafeTrackLastExport = 0;
+	if (!g_strafeTrackExportDirty || !bot_strafetrack_autoexport.integer)
+		return;
+	intervalMs = bot_strafetrack_exportinterval.integer * 1000;
+	if (intervalMs < 10000)
+		intervalMs = 10000;
+	if (g_strafeTrackLastExport && level.time - g_strafeTrackLastExport < intervalMs)
+		return;
+	for (i = 0; i < MAX_CLIENTS; i++)
+		if ((g_strafeTrack[i].active && !g_strafeTrack[i].bot) || g_strafeTrack[i].pendingSave)
+			return;
+	/* A failed export stays dirty and is retried after the next interval. */
+	g_strafeTrackLastExport = level.time;
+	if (G_StrafeTrackExportCurrentMap(qtrue))
+		g_strafeTrackExportDirty = qfalse;
+}
+
 void G_StrafeTrackFrame(gentity_t *ent)
 {
 	strafetrack_client_t *track;
@@ -12473,6 +12504,7 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	clientNum = ent - g_entities;
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
 		return;
+	G_StrafeTrackMaybeExport();
 	track = &g_strafeTrack[clientNum];
 	client = ent->client;
 	/* One batch of a finished route's input rows per frame keeps saving hitch-free. */
@@ -13271,7 +13303,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 
 /* Rewrite the current map's route file from the database so bots see new routes without
  * a manual exportStrafeTrack. */
-void G_StrafeTrackExportCurrentMap(qboolean reload)
+/* qfalse only when the export failed and should be retried. */
+qboolean G_StrafeTrackExportCurrentMap(qboolean reload)
 {
 	sqlite3 *db = G_GetTrackedPersistDB();
 	sqlite3_stmt *count = NULL;
@@ -13279,11 +13312,11 @@ void G_StrafeTrackExportCurrentMap(qboolean reload)
 	int routes = 0;
 
 	if (!db || !G_EnsureStrafeTrackSchema(db))
-		return;
+		return qfalse;
 	trap->Cvar_VariableStringBuffer("mapname", mapname, sizeof(mapname));
 	Q_strlwr(mapname);
 	if (!mapname[0])
-		return;
+		return qtrue;
 	if (sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM LocalStrafeRoute WHERE lower(mapname) = ? AND node_count >= ? "
 		"AND COALESCE(bot, 0) = 0",
 		-1, &count, NULL) == SQLITE_OK)
@@ -13295,9 +13328,12 @@ void G_StrafeTrackExportCurrentMap(qboolean reload)
 	}
 	sqlite3_finalize(count);
 	if (routes <= 0)
-		return;
-	if (G_StrafeTrackWriteRouteFile(db, mapname, qtrue) >= 0 && reload)
+		return qtrue;
+	if (G_StrafeTrackWriteRouteFile(db, mapname, qtrue) < 0)
+		return qfalse;
+	if (reload)
 		BotSFJ_ReloadRouteHints();
+	return qtrue;
 }
 
 void Svcmd_ExportStrafeTrack_f(void)

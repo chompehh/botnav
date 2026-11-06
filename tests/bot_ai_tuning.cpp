@@ -4638,21 +4638,109 @@ BOOST_AUTO_TEST_CASE( recorded_evidence_overrides_predicted_hazards )
 
 BOOST_AUTO_TEST_CASE( bots_ride_rising_elevators )
 {
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(0, 200.0f, 0, 1, -1, 0) );
-	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 200.0f, 0, 0, -1, 1000) );
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, -1, 1000) );
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, -200.0f, 0, 1, -1, 1000) );
-	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 0.0f, 1, 1, 200, 200) );
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 1, 0, 200, 200) );
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 1, 1, BOT_NAV_ELEVATOR_START_MS, 2000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(0, 200.0f, 0, 0, 1, -1, 0) );
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 200.0f, 0, 0, 0, -1, 1000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 0, 0, 1, -1, 1000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, -200.0f, 0, 0, 1, -1, 1000) );
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, 1, 200, 200) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, 0, 200, 200) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, 1, BOT_NAV_ELEVATOR_START_MS, 2000) );
+	/* Waiting for a lift to start lasts seconds, not a moment. */
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 0.0f, 0, 1, 1, 3000, 3000) );
+	/* A lift travelling up holds the bot even on its slow first frames. */
+	BOOST_CHECK( BotNav_ElevatorRideHolds(1, 2.0f, 1, 0, 0, -1, 1000) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, -200.0f, 1, 0, 0, -1, 1000) );
 	/* A stuck lift never holds the bot forever. */
-	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 200.0f, 0, 1, -1, BOT_NAV_ELEVATOR_MAX_MS + 1) );
+	BOOST_CHECK( !BotNav_ElevatorRideHolds(1, 200.0f, 0, 0, 1, -1, BOT_NAV_ELEVATOR_MAX_MS + 1) );
+	/* An enemy only pulls the bot off a lift that is not rising. */
+	BOOST_CHECK( BotNav_ElevatorEnemyBreaksHold(1, 0) );
+	BOOST_CHECK( !BotNav_ElevatorEnemyBreaksHold(1, 1) );
+	BOOST_CHECK( !BotNav_ElevatorEnemyBreaksHold(0, 0) );
 
 	BOOST_CHECK( BotSFJ_ElevatorPauseAllows(1, 1, 0, 5000) );
 	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 0, 0, 0) );
 	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(0, 1, 0, 0) );
 	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 1, 1, 0) );
 	BOOST_CHECK( !BotSFJ_ElevatorPauseAllows(1, 1, 0, BOT_NAV_ELEVATOR_MAX_MS + 1) );
+}
+
+BOOST_AUTO_TEST_CASE( bots_commit_to_route_walks_and_learn_loops )
+{
+	BOOST_CHECK( !BotSFJ_BacktrackPaysOff(300.0f, 0.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackPaysOff(400.0f, 0.0f) );
+	BOOST_CHECK( !BotSFJ_BacktrackPaysOff(600.0f, 600.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackPaysOff(800.0f, 600.0f) );
+
+	BOOST_CHECK_EQUAL( BotSFJ_WalkCommitMs(0.0f), BOT_SFJ_WALK_COMMIT_MIN_MS );
+	BOOST_CHECK_EQUAL( BotSFJ_WalkCommitMs(400.0f), 3500 );
+	BOOST_CHECK_EQUAL( BotSFJ_WalkCommitMs(5000.0f), BOT_SFJ_WALK_COMMIT_MAX_MS );
+	BOOST_CHECK_EQUAL( BotSFJ_WalkCommitMs(-5.0f), BOT_SFJ_WALK_COMMIT_MIN_MS );
+	BOOST_CHECK( BotSFJ_WalkCommitted(2000, 1000) );
+	BOOST_CHECK( !BotSFJ_WalkCommitted(2000, 2000) );
+	BOOST_CHECK( !BotSFJ_WalkCommitted(0, 1000) );
+
+	BOOST_CHECK_EQUAL( BotSFJ_LoopReplanCount(2, 1000, 2000, 1, 0), 3 );
+	BOOST_CHECK_EQUAL( BotSFJ_LoopReplanCount(2, 1000, 2000, 0, 0), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_LoopReplanCount(2, 1000, 2000, 1, 1), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_LoopReplanCount(2, 1000, 1000 + BOT_SFJ_LOOP_WINDOW_MS + 1, 1, 0), 1 );
+	BOOST_CHECK( !BotSFJ_LoopDetected(2, 0) );
+	BOOST_CHECK( BotSFJ_LoopDetected(BOT_SFJ_LOOP_REPLANS, 0) );
+	BOOST_CHECK( BotSFJ_LoopDetected(0, BOT_SFJ_GOAL_STALL_MS) );
+
+	BOOST_CHECK_EQUAL( BotSFJ_LoopPenalty(0), 1.0f );
+	BOOST_CHECK( BotSFJ_LoopPenalty(1) < 1.0f );
+	BOOST_CHECK( BotSFJ_LoopPenalty(2) < BotSFJ_LoopPenalty(1) );
+	BOOST_CHECK_EQUAL( BotSFJ_LoopPenalty(100), 0.15f );
+}
+
+BOOST_AUTO_TEST_CASE( route_runners_hold_combat )
+{
+	/* disabled */
+	BOOST_CHECK( !BotNav_RouteCombatHold(0, 1, 1, 1, 0, 0) );
+	/* airborne on a route always finishes the arc */
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 1, 0, 0, 1, 1) );
+	/* carriers ignore lightning/projectiles, not saber/push/grip */
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 0, 1, 0, 0, 1) );
+	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 1, 0, 1, 1) );
+	/* enemy-flag runners fight once hit at all */
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 0, 0, 1, 0, 0) );
+	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 0, 1, 0, 1) );
+	/* grounded, no flag business: normal combat */
+	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 0, 0, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( route_approach_pauses_and_goals )
+{
+	BOOST_CHECK( BotSFJ_ApproachPauseAllows(1, 0, 0, 0) );
+	BOOST_CHECK( BotSFJ_ApproachPauseAllows(1, 0, 0, BOT_SFJ_APPROACH_PAUSE_MAX_MS) );
+	BOOST_CHECK( !BotSFJ_ApproachPauseAllows(1, 0, 0, BOT_SFJ_APPROACH_PAUSE_MAX_MS + 1) );
+	BOOST_CHECK( !BotSFJ_ApproachPauseAllows(1, 1, 0, 0) );
+	BOOST_CHECK( !BotSFJ_ApproachPauseAllows(1, 0, 1, 0) );
+	BOOST_CHECK( !BotSFJ_ApproachPauseAllows(0, 0, 0, 0) );
+
+	BOOST_CHECK( BotSFJ_CarrierRecovers(1, 1, 200.0f, 1000.0f) );
+	BOOST_CHECK( !BotSFJ_CarrierRecovers(1, 1, 900.0f, 1000.0f) );
+	BOOST_CHECK( !BotSFJ_CarrierRecovers(1, 0, 200.0f, 1000.0f) );
+	BOOST_CHECK( !BotSFJ_CarrierRecovers(0, 1, 200.0f, 1000.0f) );
+	BOOST_CHECK( !BotSFJ_CarrierRecovers(1, 1, 200.0f, -1.0f) );
+
+	BOOST_CHECK( BotNav_HuntRefreshDue(3000, 0, 5000, 1) );
+	BOOST_CHECK( !BotNav_HuntRefreshDue(3000, 4000, 5000, 1) );
+	BOOST_CHECK( BotNav_HuntRefreshDue(3000, 2000, 5000, 1) );
+	BOOST_CHECK( BotNav_HuntRefreshDue(3000, 4000, 5000, 0) );
+	BOOST_CHECK( BotNav_HuntRefreshDue(3000, 6000, 5000, 1) );
+	BOOST_CHECK( !BotNav_HuntRefreshDue(0, 0, 5000, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( human_yaw_is_for_problem_solving )
+{
+	BOOST_CHECK( !BotSFJ_HumanYawUseful(0, 0, 0, 0) );
+	BOOST_CHECK( !BotSFJ_HumanYawUseful(0, 0, 0, 1) );
+	BOOST_CHECK( !BotSFJ_HumanYawUseful(0, 0, 1, 1) );
+	BOOST_CHECK( !BotSFJ_HumanYawUseful(0, 0, BOT_SFJ_HUMAN_YAW_COLLISIONS, 0) );
+	BOOST_CHECK( BotSFJ_HumanYawUseful(0, 0, BOT_SFJ_HUMAN_YAW_COLLISIONS, 1) );
+	BOOST_CHECK( BotSFJ_HumanYawUseful(1, 0, 0, 0) );
+	BOOST_CHECK( BotSFJ_HumanYawUseful(0, 1, 0, 0) );
 }
 
 BOOST_AUTO_TEST_SUITE_END()
