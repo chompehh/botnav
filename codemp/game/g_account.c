@@ -10439,7 +10439,7 @@ static void G_SanitizeTrackedExportPrefix(const char *in, char *out, int outSize
 	out[outIndex] = '\0';
 }
 
-static void G_ExportTrackedTable(sqlite3 *db, qboolean wantExport, const char *sql, const char *baseName,
+static qboolean G_ExportTrackedTable(sqlite3 *db, qboolean wantExport, const char *sql, const char *baseName,
 	const char *dbDir, char pathSep, const char *safePrefix, const char *exportSuffix)
 {
 	char exportFileName[96];
@@ -10448,14 +10448,21 @@ static void G_ExportTrackedTable(sqlite3 *db, qboolean wantExport, const char *s
 
 	G_BuildTrackedExportPartName(baseName, exportSuffix, 1, exportFileName, sizeof(exportFileName));
 	if (!wantExport)
+	{
 		G_RemoveTrackedExportParts(dbDir, pathSep, safePrefix, baseName, exportSuffix, 1);
+		return qtrue;
+	}
 	else if (!G_ExportTrackedQueryCSV(db, sql, dbDir, pathSep, safePrefix, baseName, exportSuffix, &rows, &parts))
+	{
 		trap->Print("Duel tracking: %s export failed, kept any previous %s.\n", baseName, exportFileName);
+		return qfalse;
+	}
 	else if (parts > 1)
 		trap->Print("Exported tracked %s (%d rows) split into %d files under 25MB: %s ... %s%s_part%d.csv\n",
 			baseName, rows, parts, exportFileName, baseName, exportSuffix, parts);
 	else
 		trap->Print("Exported tracked %s (%d rows): %s\n", baseName, rows, exportFileName);
+	return qtrue;
 }
 
 static void G_BuildTrackedExportSuffix(qboolean timestamped, char *out, int outSize)
@@ -11689,6 +11696,11 @@ typedef struct
 	qboolean pendingSave;
 	sqlite3_int64 pendingRouteId;
 	int pendingInput;
+	qboolean pendingRouteFinish;
+	float pendingEndSpeed;
+	int pendingEndTime;
+	int pendingFinishTime;
+	char pendingFinishWhy[32];
 
 	qboolean active;
 	qboolean hazard;
@@ -12215,44 +12227,57 @@ static qboolean G_StrafeTrackSave(const gentity_t *ent, strafetrack_client_t *tr
 static void G_StrafeTrackFinish(gentity_t *ent, strafetrack_client_t *track, const char *why, qboolean discard,
 	float endSpeed)
 {
-	const qboolean verbose = (!track->bot || bot_strafetrack.integer >= 2) ? qtrue : qfalse;
-
 	if (!track->active)
 		return;
 	track->active = qfalse;
 	if (!discard && BotSFJ_TrackKeep(track->nodeCount, track->distance, track->hazard))
 	{
-		sqlite3_int64 routeId = 0;
-		const qboolean saved = G_StrafeTrackSave(ent, track, endSpeed, level.time, &routeId);
-
-		if (verbose)
-			trap->Print("Strafe route (session #%i) by %s%s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f, %i commands%s\n",
-				track->routeNum, track->bot ? "bot " : "", ent->client->pers.netname, why, track->nodeCount,
-				track->distance, (float)(level.time - track->startTime) / 1000.0f, track->maxSpeed, track->inputCount,
-				saved ? va(", saved as database route #%lld", (long long)routeId) : ", NOT saved (database unavailable)");
-		if (saved && !track->inputCount)
-			trap->Print(S_COLOR_YELLOW "Strafe route #%lld has no recorded inputs; check that the server runs the current game module.\n",
-				(long long)routeId);
-		if (track->bot)
-			return;
-		if (saved)
-		{
-			trap->SendServerCommand(ent - g_entities, va("print \"Saved strafe route #%lld (%i landings, this session's #%i). "
-				"Routes are kept in the database across restarts.\n\"", (long long)routeId, track->nodeCount,
-				track->routeNum));
-			if (bot_strafetrack_autoexport.integer)
-				g_strafeTrackExportDirty = qtrue;
-		}
-		else
-			trap->SendServerCommand(ent - g_entities, va("print \"Strafe route (session #%i) NOT saved: database unavailable.\n\"",
-				track->routeNum));
+		track->pendingRouteFinish = qtrue;
+		track->pendingEndSpeed = endSpeed;
+		track->pendingEndTime = level.time;
+		track->pendingFinishTime = level.time;
+		Q_strncpyz(track->pendingFinishWhy, why, sizeof(track->pendingFinishWhy));
 	}
-	else if (verbose)
+	else if (!track->bot || bot_strafetrack.integer >= 2)
 	{
 		trap->Print("Strafe route (session #%i) by %s%s discarded (%s): %i landing(s), %.0f units%s\n",
 			track->routeNum, track->bot ? "bot " : "", ent->client->pers.netname, why, track->nodeCount,
 			track->distance, track->hazard ? ", touched a hazard" : "");
 	}
+}
+
+static void G_StrafeTrackSavePending(gentity_t *ent, strafetrack_client_t *track)
+{
+	const qboolean verbose = (!track->bot || bot_strafetrack.integer >= 2) ? qtrue : qfalse;
+	sqlite3_int64 routeId = 0;
+	const qboolean saved = G_StrafeTrackSave(ent, track, track->pendingEndSpeed,
+		track->pendingEndTime, &routeId);
+
+	track->pendingRouteFinish = qfalse;
+	if (verbose)
+		trap->Print("Strafe route (session #%i) by %s%s ended (%s): %i landing(s), %.0f units, %.1f s, top speed %.0f, %i commands%s\n",
+			track->routeNum, track->bot ? "bot " : "", ent->client->pers.netname,
+			track->pendingFinishWhy, track->nodeCount, track->distance,
+			(float)(track->pendingEndTime - track->startTime) / 1000.0f, track->maxSpeed,
+			track->inputCount,
+			saved ? va(", saved as database route #%lld", (long long)routeId) :
+				", NOT saved (database unavailable)");
+	if (saved && !track->inputCount)
+		trap->Print(S_COLOR_YELLOW "Strafe route #%lld has no recorded inputs; check that the server runs the current game module.\n",
+			(long long)routeId);
+	if (track->bot)
+		return;
+	if (saved)
+	{
+		trap->SendServerCommand(ent - g_entities, va("print \"Saved strafe route #%lld (%i landings, this session's #%i). "
+			"Routes are kept in the database across restarts.\n\"", (long long)routeId, track->nodeCount,
+			track->routeNum));
+		if (bot_strafetrack_autoexport.integer)
+			g_strafeTrackExportDirty = qtrue;
+	}
+	else
+		trap->SendServerCommand(ent - g_entities, va("print \"Strafe route (session #%i) NOT saved: database unavailable.\n\"",
+			track->routeNum));
 }
 
 static qboolean G_StrafeTrackClientRecorded(const gentity_t *ent)
@@ -12481,12 +12506,37 @@ static void G_StrafeTrackMaybeExport(void)
 	if (g_strafeTrackLastExport && level.time - g_strafeTrackLastExport < intervalMs)
 		return;
 	for (i = 0; i < MAX_CLIENTS; i++)
-		if ((g_strafeTrack[i].active && !g_strafeTrack[i].bot) || g_strafeTrack[i].pendingSave)
+		if ((g_strafeTrack[i].active && !g_strafeTrack[i].bot) ||
+			g_strafeTrack[i].pendingSave || g_strafeTrack[i].pendingRouteFinish)
 			return;
 	/* A failed export stays dirty and is retried after the next interval. */
 	g_strafeTrackLastExport = level.time;
 	if (G_StrafeTrackExportCurrentMap(qtrue))
 		g_strafeTrackExportDirty = qfalse;
+}
+
+static void G_StrafeTrackSaveOnePending(void)
+{
+	static int lastCheckTime = -1;
+	static int cursor;
+	int i;
+
+	if (lastCheckTime == level.time)
+		return;
+	lastCheckTime = level.time;
+	for (i = 0; i < MAX_CLIENTS; i++)
+	{
+		const int clientNum = (cursor + i) % MAX_CLIENTS;
+		gentity_t *ent = &g_entities[clientNum];
+		strafetrack_client_t *track = &g_strafeTrack[clientNum];
+
+		if (!track->pendingRouteFinish || track->pendingFinishTime >= level.time ||
+			!ent->inuse || !ent->client)
+			continue;
+		G_StrafeTrackSavePending(ent, track);
+		cursor = (clientNum + 1) % MAX_CLIENTS;
+		return;
+	}
 }
 
 void G_StrafeTrackFrame(gentity_t *ent)
@@ -12503,9 +12553,10 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	clientNum = ent - g_entities;
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
 		return;
-	G_StrafeTrackMaybeExport();
 	track = &g_strafeTrack[clientNum];
 	client = ent->client;
+	G_StrafeTrackSaveOnePending();
+	G_StrafeTrackMaybeExport();
 	/* One batch of a finished route's input rows per frame keeps saving hitch-free. */
 	if (track->pendingSave)
 		G_StrafeTrackSaveInputs(track, STRAFETRACK_SAVE_BATCH);
@@ -12587,7 +12638,7 @@ void G_StrafeTrackFrame(gentity_t *ent)
 				client->pers.cmd.rightmove, track->yawRate, speed, groundSpeed, client->pers.cmd.upmove > 0)) ?
 				qtrue : qfalse;
 		/* A new route waits until the previous one's inputs are in the database. */
-		if (start && !track->pendingSave)
+		if (start && !track->pendingSave && !track->pendingRouteFinish)
 		{
 			char mapname[MAX_QPATH];
 
@@ -12669,9 +12720,23 @@ void G_StrafeTrackFrame(gentity_t *ent)
 	track->prevTeleport = teleport;
 }
 
-/* Writes every route's remaining input rows (shutdown, disconnect). */
-static void G_StrafeTrackFlushClient(strafetrack_client_t *track)
+/* Writes a finished route and its remaining input rows (shutdown, disconnect). */
+static void G_StrafeTrackFlushClient(int clientNum)
 {
+	gentity_t *ent = &g_entities[clientNum];
+	strafetrack_client_t *track = &g_strafeTrack[clientNum];
+
+	if (track->pendingRouteFinish)
+	{
+		if (ent->client)
+			G_StrafeTrackSavePending(ent, track);
+		else
+		{
+			trap->Print("Strafe tracking: could not save pending route for client slot %i; client data is unavailable.\n",
+				clientNum);
+			track->pendingRouteFinish = qfalse;
+		}
+	}
 	while (track->pendingSave && G_StrafeTrackSaveInputs(track, STRAFETRACK_MAX_INPUTS))
 		;
 }
@@ -12681,7 +12746,34 @@ void G_StrafeTrackFlushAll(void)
 	int i;
 
 	for (i = 0; i < MAX_CLIENTS; i++)
-		G_StrafeTrackFlushClient(&g_strafeTrack[i]);
+		G_StrafeTrackFlushClient(i);
+}
+
+void G_StrafeTrackEndMatch(void)
+{
+	int i;
+
+	for (i = 0; i < MAX_CLIENTS; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+		strafetrack_client_t *track = &g_strafeTrack[i];
+
+		if (track->active && ent->client)
+		{
+			const playerState_t *ps = &ent->client->ps;
+			const float speed = sqrtf(ps->velocity[0] * ps->velocity[0] +
+				ps->velocity[1] * ps->velocity[1]);
+
+			G_StrafeTrackFinish(ent, track, "match ended", qfalse, speed);
+		}
+	}
+	G_StrafeTrackFlushAll();
+	if (bot_strafetrack_autoexport.integer && g_strafeTrackExportDirty)
+	{
+		g_strafeTrackLastExport = level.time;
+		if (G_StrafeTrackExportCurrentMap(qtrue))
+			g_strafeTrackExportDirty = qfalse;
+	}
 }
 
 //Disconnect / map change: drop any half-recorded route for this slot.
@@ -12689,7 +12781,7 @@ void G_StrafeTrackReset(int clientNum)
 {
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
 		return;
-	G_StrafeTrackFlushClient(&g_strafeTrack[clientNum]);
+	G_StrafeTrackFlushClient(clientNum);
 	g_strafeTrack[clientNum].active = qfalse;
 	g_strafeTrack[clientNum].havePrev = qfalse;
 	g_strafeTrack[clientNum].haveCmd = qfalse;
@@ -13345,17 +13437,85 @@ qboolean G_StrafeTrackExportCurrentMap(qboolean reload)
 	return qtrue;
 }
 
+static qboolean G_ExportStrafeTrackTables(sqlite3 *db, const char *effectiveDbPath,
+	const char *safePrefix)
+{
+	sqlite3_stmt *routes = NULL;
+	char dbDir[MAX_OSPATH];
+	char *slashPos;
+	char *backslashPos;
+	char exportSuffix[32];
+	char pathSep;
+	qboolean ok = qtrue;
+
+	if (!db || !effectiveDbPath || !effectiveDbPath[0])
+		return qfalse;
+	G_BuildTrackedExportSuffix(qfalse, exportSuffix, sizeof(exportSuffix));
+	Q_strncpyz(dbDir, effectiveDbPath, sizeof(dbDir));
+	slashPos = strrchr(dbDir, '/');
+	backslashPos = strrchr(dbDir, '\\');
+	if (backslashPos && (!slashPos || backslashPos > slashPos))
+		slashPos = backslashPos;
+	if (slashPos)
+		*slashPos = '\0';
+	else
+		dbDir[0] = '\0';
+#if defined(_WIN32)
+	pathSep = '\\';
+#else
+	pathSep = '/';
+#endif
+
+	if (sqlite3_prepare_v2(db, "SELECT id FROM LocalStrafeRoute WHERE EXISTS "
+		"(SELECT 1 FROM LocalStrafeRouteNode WHERE route_id=LocalStrafeRoute.id AND takeoff_x IS NULL)",
+		-1, &routes, NULL) == SQLITE_OK)
+	{
+		while (sqlite3_step(routes) == SQLITE_ROW)
+			G_StrafeTrackBackfillTakeoffs(db, sqlite3_column_int64(routes, 0));
+	}
+	else
+	{
+		G_TrackedDBError("Strafe tracking backfill query", db, sqlite3_errcode(db));
+		ok = qfalse;
+	}
+	sqlite3_finalize(routes);
+
+	g_trackedExportKind = "strafetrack";
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT id, created, mapname, player, start_x, start_y, start_z, start_speed, "
+		"max_speed, end_speed, node_count, distance, duration_ms, bot, pmove_fixed, pmove_msec, move_style, per_command, "
+		"speed_active, speed_level,session_id,journey_id,objective_success,start_ms,end_ms "
+		"FROM LocalStrafeRoute ORDER BY id", "routes", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT route_id, node_index, x, y, z, speed, side, air_ms, time_ms, "
+		"side_only_pct, switch_pct, first_side, takeoff_yaw_rate, air_yaw_rate, force_jump, force_height, "
+		"speed_active, speed_level,takeoff_x,takeoff_y,takeoff_z,ground_ms "
+		"FROM LocalStrafeRouteNode ORDER BY route_id, node_index", "nodes", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT * FROM LocalCTFTrackSession ORDER BY id",
+		"objective_sessions", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT * FROM LocalCTFTrackJourney ORDER BY id",
+		"objective_journeys", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT CASE event WHEN 1 THEN 'pickup' WHEN 2 THEN 'drop' "
+		"WHEN 3 THEN 'return' WHEN 4 THEN 'capture' END AS event_name,* "
+		"FROM LocalCTFObjectiveEvent ORDER BY id", "objectives", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	if (!G_ExportTrackedTable(db, qtrue, "SELECT route_id, frame, time_ms, msec, forwardmove, rightmove, upmove, yaw, "
+		"yaw_delta, x, y, z, speed, grounded, cmd_time, pitch, vel_x, vel_y, jump_held, force_jump, "
+		"speed_active, speed_level, wall_run FROM LocalStrafeRouteInput ORDER BY route_id, frame",
+		"inputs", dbDir, pathSep, safePrefix, exportSuffix))
+		ok = qfalse;
+	g_trackedExportKind = "dueltrack";
+	return ok;
+}
+
 void Svcmd_ExportStrafeTrack_f(void)
 {
 	sqlite3 *db;
-	sqlite3_stmt *maps = NULL;
-	char dbDir[MAX_OSPATH];
 	char effectiveDbPath[MAX_OSPATH];
 	char safePrefix[64];
-	char exportSuffix[32];
-	char *slashPos;
-	char *backslashPos;
-	char pathSep;
+	sqlite3_stmt *maps = NULL;
 	int mapCount = 0, routeCount = 0;
 
 	safePrefix[0] = '\0';
@@ -13376,57 +13536,9 @@ void Svcmd_ExportStrafeTrack_f(void)
 		CALL_SQLITE(close(db));
 		return;
 	}
-	G_BuildTrackedExportSuffix(qfalse, exportSuffix, sizeof(exportSuffix));
-	Q_strncpyz(dbDir, effectiveDbPath, sizeof(dbDir));
-	slashPos = strrchr(dbDir, '/');
-	backslashPos = strrchr(dbDir, '\\');
-	if (backslashPos && (!slashPos || backslashPos > slashPos))
-		slashPos = backslashPos;
-	if (slashPos)
-		*slashPos = '\0';
-	else
-		dbDir[0] = '\0';
-#if defined(_WIN32)
-	pathSep = '\\';
-#else
-	pathSep = '/';
-#endif
 
-	if (sqlite3_prepare_v2(db, "SELECT id FROM LocalStrafeRoute WHERE EXISTS "
-		"(SELECT 1 FROM LocalStrafeRouteNode WHERE route_id=LocalStrafeRoute.id AND takeoff_x IS NULL)",
-		-1, &maps, NULL) == SQLITE_OK)
-	{
-		while (sqlite3_step(maps) == SQLITE_ROW)
-			G_StrafeTrackBackfillTakeoffs(db, sqlite3_column_int64(maps, 0));
-	}
-	else
-		G_TrackedDBError("Strafe tracking backfill query", db, sqlite3_errcode(db));
-	sqlite3_finalize(maps);
-	maps = NULL;
-	g_trackedExportKind = "strafetrack";
-	G_ExportTrackedTable(db, qtrue, "SELECT id, created, mapname, player, start_x, start_y, start_z, start_speed, "
-		"max_speed, end_speed, node_count, distance, duration_ms, bot, pmove_fixed, pmove_msec, move_style, per_command, "
-		"speed_active, speed_level,session_id,journey_id,objective_success,start_ms,end_ms "
-		"FROM LocalStrafeRoute ORDER BY id", "routes",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	G_ExportTrackedTable(db, qtrue, "SELECT route_id, node_index, x, y, z, speed, side, air_ms, time_ms, "
-		"side_only_pct, switch_pct, first_side, takeoff_yaw_rate, air_yaw_rate, force_jump, force_height, "
-		"speed_active, speed_level,takeoff_x,takeoff_y,takeoff_z,ground_ms "
-		"FROM LocalStrafeRouteNode ORDER BY route_id, node_index", "nodes",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	G_ExportTrackedTable(db, qtrue, "SELECT * FROM LocalCTFTrackSession ORDER BY id", "objective_sessions",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	G_ExportTrackedTable(db, qtrue, "SELECT * FROM LocalCTFTrackJourney ORDER BY id", "objective_journeys",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	G_ExportTrackedTable(db, qtrue, "SELECT CASE event WHEN 1 THEN 'pickup' WHEN 2 THEN 'drop' "
-		"WHEN 3 THEN 'return' WHEN 4 THEN 'capture' END AS event_name,* "
-		"FROM LocalCTFObjectiveEvent ORDER BY id", "objectives",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	G_ExportTrackedTable(db, qtrue, "SELECT route_id, frame, time_ms, msec, forwardmove, rightmove, upmove, yaw, "
-		"yaw_delta, x, y, z, speed, grounded, cmd_time, pitch, vel_x, vel_y, jump_held, force_jump, "
-		"speed_active, speed_level, wall_run FROM LocalStrafeRouteInput ORDER BY route_id, frame", "inputs",
-		dbDir, pathSep, safePrefix, exportSuffix);
-	g_trackedExportKind = "dueltrack";
+	if (!G_ExportStrafeTrackTables(db, effectiveDbPath, safePrefix))
+		trap->Print("exportStrafeTrack: one or more CSV exports failed; previous files were retained where possible.\n");
 
 	if (sqlite3_prepare_v2(db, "SELECT DISTINCT lower(mapname) FROM LocalStrafeRoute WHERE mapname <> ''",
 		-1, &maps, NULL) == SQLITE_OK)
@@ -13678,22 +13790,26 @@ void Svcmd_ResetStrafeTrack_f(void)
 	char token[32];
 	int mapCount, mapIndex = 0, keepCount = 0;
 	int deletedRoutes = 0, deletedNodes = 0, deletedInputs = 0;
-	int preview = 0, i, result, mapKept;
+	int deletedObjectives = 0, deletedJourneys = 0, deletedSessions = 0;
+	int preview = 0, purgeAll = 0, i, argIndex, result, mapKept;
 
-	if (trap->Argc() > 2)
+	if (trap->Argc() > 3)
 	{
-		trap->Print("Usage: resetstrafetrack [preview]\n");
+		trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack all [preview]\n");
 		return;
 	}
-	if (trap->Argc() == 2)
+	for (argIndex = 1; argIndex < trap->Argc(); argIndex++)
 	{
-		trap->Argv(1, token, sizeof(token));
-		if (Q_stricmp(token, "preview"))
+		trap->Argv(argIndex, token, sizeof(token));
+		if (!Q_stricmp(token, "all") && !purgeAll)
+			purgeAll = 1;
+		else if (!Q_stricmp(token, "preview") && !preview)
+			preview = 1;
+		else
 		{
-			trap->Print("Usage: resetstrafetrack [preview]\n");
+			trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack all [preview]\n");
 			return;
 		}
-		preview = 1;
 	}
 	for (i = 0; i < MAX_CLIENTS; i++)
 		if (g_strafeTrack[i].active || g_strafeTrack[i].pendingSave)
@@ -13722,13 +13838,14 @@ void Svcmd_ResetStrafeTrack_f(void)
 	if (mapCount > 0)
 	{
 		mapNames = (char (*)[MAX_QPATH])malloc((size_t)mapCount * sizeof(*mapNames));
-		keepIds = (sqlite3_int64 *)malloc((size_t)mapCount * STRAFETRACK_EXPORT_CANDIDATES *
-			sizeof(*keepIds));
-		if (!mapNames || !keepIds ||
+		if (!purgeAll)
+			keepIds = (sqlite3_int64 *)malloc((size_t)mapCount * STRAFETRACK_EXPORT_CANDIDATES *
+				sizeof(*keepIds));
+		if (!mapNames || (!purgeAll && !keepIds) ||
 			sqlite3_prepare_v2(db, "SELECT DISTINCT lower(mapname) FROM LocalStrafeRoute "
 				"WHERE mapname <> '' ORDER BY lower(mapname)", -1, &maps, NULL) != SQLITE_OK)
 		{
-			trap->Print("resetstrafetrack failed: unable to allocate route keeper set.\n");
+			trap->Print("resetstrafetrack failed: unable to allocate map list or route keeper set.\n");
 			sqlite3_finalize(maps);
 			free(mapNames);
 			free(keepIds);
@@ -13750,16 +13867,20 @@ void Svcmd_ResetStrafeTrack_f(void)
 				return;
 			}
 			Q_strncpyz(mapNames[mapIndex], mapname, sizeof(mapNames[mapIndex]));
-			mapKept = G_StrafeTrackSelectResetKeep(db, mapNames[mapIndex],
-				&keepIds[keepCount], STRAFETRACK_EXPORT_CANDIDATES);
-			if (mapKept < 0)
+			mapKept = 0;
+			if (!purgeAll)
 			{
-				trap->Print("resetstrafetrack failed: unable to rank route keeper set.\n");
-				sqlite3_finalize(maps);
-				free(mapNames);
-				free(keepIds);
-				CALL_SQLITE(close(db));
-				return;
+				mapKept = G_StrafeTrackSelectResetKeep(db, mapNames[mapIndex],
+					&keepIds[keepCount], STRAFETRACK_EXPORT_CANDIDATES);
+				if (mapKept < 0)
+				{
+					trap->Print("resetstrafetrack failed: unable to rank route keeper set.\n");
+					sqlite3_finalize(maps);
+					free(mapNames);
+					free(keepIds);
+					CALL_SQLITE(close(db));
+					return;
+				}
 			}
 			keepCount += mapKept;
 			mapIndex++;
@@ -13775,16 +13896,26 @@ void Svcmd_ResetStrafeTrack_f(void)
 			return;
 		}
 	}
-	result = G_ResetStrafeTrackData(db, keepIds, keepCount, preview,
-		&deletedRoutes, &deletedNodes, &deletedInputs);
+	if (purgeAll)
+		result = G_ResetAllStrafeTrackData(db, preview, &deletedRoutes, &deletedNodes,
+			&deletedInputs, &deletedObjectives, &deletedJourneys, &deletedSessions);
+	else
+		result = G_ResetStrafeTrackData(db, keepIds, keepCount, preview,
+			&deletedRoutes, &deletedNodes, &deletedInputs);
 	if (result != SQLITE_OK)
 	{
 		G_TrackedDBError("resetstrafetrack transaction", db, result);
 		trap->Print("resetstrafetrack failed: no route rows were changed.\n");
 	}
 	else if (preview)
-		trap->Print("resetstrafetrack preview: keep %i human route(s); remove %i route(s), %i node(s), and %i input row(s). No data was changed.\n",
-			keepCount, deletedRoutes, deletedNodes, deletedInputs);
+	{
+		if (purgeAll)
+			trap->Print("resetstrafetrack all preview: remove %i route(s), %i node(s), %i input row(s), %i objective event(s), %i journey(s), and %i session(s). No data was changed.\n",
+				deletedRoutes, deletedNodes, deletedInputs, deletedObjectives, deletedJourneys, deletedSessions);
+		else
+			trap->Print("resetstrafetrack preview: keep %i human route(s); remove %i route(s), %i node(s), and %i input row(s). No data was changed.\n",
+				keepCount, deletedRoutes, deletedNodes, deletedInputs);
+	}
 	else
 	{
 		int failedFiles = 0;
@@ -13793,8 +13924,14 @@ void Svcmd_ResetStrafeTrack_f(void)
 			if (G_StrafeTrackWriteRouteFile(db, mapNames[i], qfalse) < 0)
 				failedFiles++;
 		BotSFJ_ReloadRouteHints();
-		trap->Print("resetstrafetrack: kept %i human route(s); removed %i route(s), %i node(s), and %i input row(s). Learned data, CTF objective events, route outcomes, and non-recorded botroute blocks were not reset.\n",
-			keepCount, deletedRoutes, deletedNodes, deletedInputs);
+		if (!G_ExportStrafeTrackTables(db, effectiveDbPath, ""))
+			trap->Print("resetstrafetrack: cleanup committed, but some CSV exports could not be refreshed; run exportStrafeTrack after resolving the reported errors.\n");
+		if (purgeAll)
+			trap->Print("resetstrafetrack all: removed %i route(s), %i node(s), %i input row(s), %i objective event(s), %i journey(s), and %i session(s). Duel tracking, learned data, route outcomes, and hand-authored botroute blocks were preserved.\n",
+				deletedRoutes, deletedNodes, deletedInputs, deletedObjectives, deletedJourneys, deletedSessions);
+		else
+			trap->Print("resetstrafetrack: kept %i human route(s); removed %i route(s), %i node(s), and %i input row(s). Learned data, CTF objective events, route outcomes, and non-recorded botroute blocks were not reset.\n",
+				keepCount, deletedRoutes, deletedNodes, deletedInputs);
 		if (failedFiles)
 			trap->Print("resetstrafetrack: database cleanup committed, but %i route file(s) could not be regenerated; fix the reported file errors and run exportStrafeTrack.\n", failedFiles);
 	}

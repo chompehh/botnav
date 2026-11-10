@@ -672,4 +672,73 @@ static inline int G_ResetStrafeTrackData(sqlite3 *db,
 	return SQLITE_OK;
 }
 
+static inline int G_ResetAllStrafeTrackData(sqlite3 *db, int preview,
+	int *deletedRoutes, int *deletedNodes, int *deletedInputs,
+	int *deletedObjectives, int *deletedJourneys, int *deletedSessions)
+{
+	static const char *const tables[] = {
+		"LocalStrafeRoute", "LocalStrafeRouteNode", "LocalStrafeRouteInput",
+		"LocalCTFObjectiveEvent", "LocalCTFTrackJourney", "LocalCTFTrackSession"
+	};
+	static const char *const deleteTables[] = {
+		"LocalStrafeRouteInput", "LocalStrafeRouteNode", "LocalStrafeRoute",
+		"LocalCTFObjectiveEvent", "LocalCTFTrackJourney", "LocalCTFTrackSession"
+	};
+	const int tableCount = (int)(sizeof(tables) / sizeof(tables[0]));
+	int *deleted[] = {
+		deletedRoutes, deletedNodes, deletedInputs,
+		deletedObjectives, deletedJourneys, deletedSessions
+	};
+	int result = SQLITE_OK, i;
+
+	if (!db || !deletedRoutes || !deletedNodes || !deletedInputs ||
+		!deletedObjectives || !deletedJourneys || !deletedSessions)
+		return SQLITE_MISUSE;
+	for (i = 0; i < tableCount; i++)
+		*deleted[i] = 0;
+	if (sqlite3_get_autocommit(db) == 0)
+		return SQLITE_BUSY;
+	if (preview)
+	{
+		for (i = 0; i < tableCount && result == SQLITE_OK; i++)
+			result = G_StrafeTrackResetCount(db, tables[i], i == 1 || i == 2,
+				NULL, 0, deleted[i]);
+		return result;
+	}
+
+	result = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+	for (i = 0; result == SQLITE_OK && i < tableCount; i++)
+	{
+		char sql[160];
+
+		sqlite3_snprintf(sizeof(sql), sql, "DELETE FROM main.%s", deleteTables[i]);
+		result = sqlite3_exec(db, sql, NULL, NULL, NULL);
+		if (result == SQLITE_OK)
+		{
+			if (i == 0)
+				*deletedInputs = sqlite3_changes(db);
+			else if (i == 1)
+				*deletedNodes = sqlite3_changes(db);
+			else if (i == 2)
+				*deletedRoutes = sqlite3_changes(db);
+			else if (i == 3)
+				*deletedObjectives = sqlite3_changes(db);
+			else if (i == 4)
+				*deletedJourneys = sqlite3_changes(db);
+			else
+				*deletedSessions = sqlite3_changes(db);
+		}
+	}
+	if (result == SQLITE_OK)
+		result = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+	if (result != SQLITE_OK)
+	{
+		if (!sqlite3_get_autocommit(db))
+			sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+		for (i = 0; i < tableCount; i++)
+			*deleted[i] = 0;
+	}
+	return result;
+}
+
 #endif

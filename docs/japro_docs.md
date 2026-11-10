@@ -24,6 +24,7 @@
 	g_redDamageScale		1	
 	g_redDFADamageScale		1
 	d_saberSPStyleDamage		0	//Toggle use of SP style damage in normal game.
+	g_hitDetectionSubsteps	1	//1-4 swept saber/Force Grip aim samples per update; improves hit registration without changing damage values.
 
 #### Force 
 	g_tweakForce		0	//Configured with /tweakForce command.
@@ -644,4 +645,3 @@ Added spawnflag "KEEP_VELOCITY" (2) to preserve momentum after teleport.
 
 ### target_teleporter
 Added spawnflag "KEEP_VELOCITY" (1) to preserve momentum after teleport.  
-

@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "ai_combat_tuning.h"
+#include "g_hit_detection.h"
 #include "ai_strafejump.h"
 #include "ai_traversal.h"
 
@@ -15,6 +16,17 @@
 BOOST_AUTO_TEST_SUITE( bot_ai )
 
 BOOST_AUTO_TEST_SUITE( tuning )
+
+BOOST_AUTO_TEST_CASE( hit_detection_substeps_are_bounded_and_interpolate_short_angles )
+{
+	BOOST_CHECK_EQUAL(G_HitDetectionSubsteps(-1), 1);
+	BOOST_CHECK_EQUAL(G_HitDetectionSubsteps(0), 1);
+	BOOST_CHECK_EQUAL(G_HitDetectionSubsteps(1), 1);
+	BOOST_CHECK_EQUAL(G_HitDetectionSubsteps(3), 3);
+	BOOST_CHECK_EQUAL(G_HitDetectionSubsteps(99), G_HIT_DETECTION_MAX_SUBSTEPS);
+	BOOST_CHECK_CLOSE(G_HitDetectionInterpolateAngle(359.0f, 1.0f, 0.5f), 360.0f, 0.001f);
+	BOOST_CHECK_CLOSE(G_HitDetectionInterpolateAngle(1.0f, 359.0f, 0.5f), 0.0f, 0.001f);
+}
 
 BOOST_AUTO_TEST_CASE( strafe_forward_acquisition_beats_higher_rated_backtracking )
 {

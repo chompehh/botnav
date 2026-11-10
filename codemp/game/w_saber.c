@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "bg_local.h"
 #include "w_saber.h"
 #include "ai_combat_tuning.h"
+#include "g_hit_detection.h"
 #include "ai_main.h"
 #include "ghoul2/G2.h"
 
@@ -5574,14 +5575,18 @@ void G_SPSaberDamageTraceLerped( gentity_t *self, int saberNum, int bladeNum, ve
 			curDirFrac = 1.0f;
 		}
 		//NOTE: if saber spun at least 180 degrees since last damage trace, this is not reliable...!
-		if ( fabs(curDirFrac) < 1.0f - MAX_SABER_SWING_INC )
-		{//the saber blade spun more than 33 degrees since the last damage trace
-			curDirFrac = dirInc = 1.0f/((1.0f - curDirFrac)/MAX_SABER_SWING_INC);
-		}
-		else
 		{
-			curDirFrac = 1.0f;
-			dirInc = 0.0f;
+			const float maxSwingInc = MAX_SABER_SWING_INC /
+				(float)G_HitDetectionSubsteps(g_hitDetectionSubsteps.integer);
+			if ( fabs(curDirFrac) < 1.0f - maxSwingInc )
+		{//the saber blade spun more than 33 degrees since the last damage trace
+				curDirFrac = dirInc = 1.0f/((1.0f - curDirFrac)/maxSwingInc);
+			}
+			else
+			{
+				curDirFrac = 1.0f;
+				dirInc = 0.0f;
+			}
 		}
 		//qboolean hit_saber = qfalse;
 
