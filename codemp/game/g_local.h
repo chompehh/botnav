@@ -1023,6 +1023,9 @@ struct gclient_s {
 	int			lastCmdTime;		// level.time of last usercmd_t, for EF_CONNECTION
 									// we can't just use pers.lastCommand.time, because
 									// of the g_sycronousclients case
+	vec3_t		forceGripCheckViewAngles;
+	int			forceGripCheckTime;
+	qboolean	forceGripCheckValid;
 	int			buttons;
 	int			oldbuttons;
 	int			latched_buttons;
@@ -1871,6 +1874,7 @@ void G_JVMApplyClass( gentity_t *ent, qboolean loadout );
 qboolean G_JVMCanReceive( gentity_t *ent, qboolean health, qboolean armor, qboolean ammo );
 void G_StrafeTrackFrame( gentity_t *ent );
 void G_StrafeTrackReset( int clientNum );
+void G_StrafeTrackEndMatch( void );
 void BotSFJ_ReloadRouteHints( void );
 void BotSFJ_SaveRouteStats( void );
 qboolean G_StrafeTrackExportCurrentMap( qboolean reload );

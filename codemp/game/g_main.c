@@ -3104,6 +3104,8 @@ void BeginIntermission( void ) {
 		return;		// already active
 	}
 
+	G_StrafeTrackEndMatch();
+
 	// if in tournament mode, change the wins / losses
 	if ( level.gametype == GT_DUEL || level.gametype == GT_POWERDUEL ) {
 		trap->SetConfigstring ( CS_CLIENT_DUELWINNER, "-1" );

@@ -75,13 +75,17 @@ static void CreateStrafeResetFixture(sqlite3 *db)
 		"CREATE TABLE LocalStrafeRouteInput(route_id INTEGER, frame INTEGER);"
 		"CREATE TABLE LocalBotLearnedSequence(sequence TEXT);"
 		"CREATE TABLE LocalBotLearnedEvidence(sequence TEXT);"
-		"CREATE TABLE LocalCTFObjectiveEvent(route_id INTEGER);"
+		"CREATE TABLE LocalCTFTrackSession(id INTEGER PRIMARY KEY);"
+		"CREATE TABLE LocalCTFTrackJourney(id INTEGER PRIMARY KEY);"
+		"CREATE TABLE LocalCTFObjectiveEvent(id INTEGER PRIMARY KEY, route_id INTEGER);"
 		"INSERT INTO LocalStrafeRoute VALUES (1, 'map_a'), (2, 'map_a'), (3, 'map_b');"
 		"INSERT INTO LocalStrafeRouteNode VALUES (1, 0), (1, 1), (2, 0), (3, 0);"
 		"INSERT INTO LocalStrafeRouteInput VALUES (1, 0), (1, 1), (2, 0), (3, 0);"
 		"INSERT INTO LocalBotLearnedSequence VALUES ('learned');"
 		"INSERT INTO LocalBotLearnedEvidence VALUES ('evidence');"
-		"INSERT INTO LocalCTFObjectiveEvent VALUES (2)",
+		"INSERT INTO LocalCTFTrackSession VALUES (1);"
+		"INSERT INTO LocalCTFTrackJourney VALUES (1);"
+		"INSERT INTO LocalCTFObjectiveEvent VALUES (1, 2)",
 		NULL, NULL, NULL), SQLITE_OK);
 }
 
@@ -147,6 +151,42 @@ BOOST_AUTO_TEST_CASE( strafe_track_reset_refuses_outer_transaction_and_can_clear
 	BOOST_CHECK_EQUAL(inputs, 4);
 	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalBotLearnedSequence"), 1);
 	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalCTFObjectiveEvent"), 1);
+	BOOST_CHECK_EQUAL(sqlite3_close(db), SQLITE_OK);
+}
+
+BOOST_AUTO_TEST_CASE( strafe_track_full_reset_only_clears_strafe_tables )
+{
+	sqlite3 *db = NULL;
+	int routes, nodes, inputs, objectives, journeys, sessions;
+
+	BOOST_REQUIRE_EQUAL(sqlite3_open(":memory:", &db), SQLITE_OK);
+	CreateStrafeResetFixture(db);
+	BOOST_CHECK_EQUAL(G_ResetAllStrafeTrackData(db, 1, &routes, &nodes, &inputs,
+		&objectives, &journeys, &sessions), SQLITE_OK);
+	BOOST_CHECK_EQUAL(routes, 3);
+	BOOST_CHECK_EQUAL(nodes, 4);
+	BOOST_CHECK_EQUAL(inputs, 4);
+	BOOST_CHECK_EQUAL(objectives, 1);
+	BOOST_CHECK_EQUAL(journeys, 1);
+	BOOST_CHECK_EQUAL(sessions, 1);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalStrafeRoute"), 3);
+
+	BOOST_CHECK_EQUAL(G_ResetAllStrafeTrackData(db, 0, &routes, &nodes, &inputs,
+		&objectives, &journeys, &sessions), SQLITE_OK);
+	BOOST_CHECK_EQUAL(routes, 3);
+	BOOST_CHECK_EQUAL(nodes, 4);
+	BOOST_CHECK_EQUAL(inputs, 4);
+	BOOST_CHECK_EQUAL(objectives, 1);
+	BOOST_CHECK_EQUAL(journeys, 1);
+	BOOST_CHECK_EQUAL(sessions, 1);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalStrafeRoute"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalStrafeRouteNode"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalStrafeRouteInput"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalCTFObjectiveEvent"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalCTFTrackJourney"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalCTFTrackSession"), 0);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalBotLearnedSequence"), 1);
+	BOOST_CHECK_EQUAL(StrafeResetCount(db, "SELECT COUNT(*) FROM LocalBotLearnedEvidence"), 1);
 	BOOST_CHECK_EQUAL(sqlite3_close(db), SQLITE_OK);
 }
 

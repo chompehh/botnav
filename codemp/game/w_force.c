@@ -22,6 +22,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "b_local.h"
 #include "w_saber.h"
+#include "g_hit_detection.h"
 #include "ai_main.h"
 #include "ghoul2/G2.h"
 
@@ -1512,7 +1513,22 @@ void ForceTeamForceReplenish( gentity_t *self )
 void ForceGrip( gentity_t *self )
 {
 	trace_t tr;
-	vec3_t tfrom, tto, fwd;
+	vec3_t tfrom, tto, fwd, currentAngles, previousAngles;
+	int targetNum = ENTITYNUM_NONE;
+	int sample, samples;
+	qboolean havePrevious;
+
+	if (!self || !self->client)
+		return;
+	VectorCopy(self->client->ps.viewangles, currentAngles);
+	havePrevious = self->client->forceGripCheckValid &&
+		level.time > self->client->forceGripCheckTime &&
+		level.time - self->client->forceGripCheckTime <= 100;
+	if (havePrevious)
+		VectorCopy(self->client->forceGripCheckViewAngles, previousAngles);
+	VectorCopy(currentAngles, self->client->forceGripCheckViewAngles);
+	self->client->forceGripCheckTime = level.time;
+	self->client->forceGripCheckValid = qtrue;
 
 	if ( self->health <= 0 )
 	{
@@ -1552,35 +1568,60 @@ void ForceGrip( gentity_t *self )
 
 	VectorCopy(self->client->ps.origin, tfrom);
 	tfrom[2] += self->client->ps.viewheight;
-	AngleVectors(self->client->ps.viewangles, fwd, NULL, NULL);
-	tto[0] = tfrom[0] + fwd[0]*MAX_GRIP_DISTANCE;
-	tto[1] = tfrom[1] + fwd[1]*MAX_GRIP_DISTANCE;
-	tto[2] = tfrom[2] + fwd[2]*MAX_GRIP_DISTANCE;
-
-	JP_Trace(&tr, tfrom, NULL, NULL, tto, self->s.number, MASK_PLAYERSOLID, qfalse, 0, 0);
-
-	if ( tr.fraction != 1.0 &&
-		tr.entityNum != ENTITYNUM_NONE &&
-		g_entities[tr.entityNum].client &&
-		!g_entities[tr.entityNum].client->ps.fd.forceGripCripple &&
-		g_entities[tr.entityNum].client->ps.fd.forceGripBeingGripped < level.time &&
-		ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_GRIP) &&
-		(g_friendlyFire.value|| !OnSameTeam(self, &g_entities[tr.entityNum])) ) //don't grip someone who's still crippled
+	samples = havePrevious ? G_HitDetectionSubsteps(g_hitDetectionSubsteps.integer) : 1;
+	for (sample = 1; sample <= samples; sample++)
 	{
-		if (g_entities[tr.entityNum].s.number < MAX_CLIENTS && g_entities[tr.entityNum].client->ps.m_iVehicleNum)
-		{ //a player on a vehicle
-			gentity_t *vehEnt = &g_entities[g_entities[tr.entityNum].client->ps.m_iVehicleNum];
+		vec3_t sampleAngles;
+		const float fraction = (float)sample / (float)samples;
+
+		if (havePrevious)
+		{
+			sampleAngles[PITCH] = G_HitDetectionInterpolateAngle(previousAngles[PITCH],
+				currentAngles[PITCH], fraction);
+			sampleAngles[YAW] = G_HitDetectionInterpolateAngle(previousAngles[YAW],
+				currentAngles[YAW], fraction);
+			sampleAngles[ROLL] = G_HitDetectionInterpolateAngle(previousAngles[ROLL],
+				currentAngles[ROLL], fraction);
+		}
+		else
+			VectorCopy(currentAngles, sampleAngles);
+		AngleVectors(sampleAngles, fwd, NULL, NULL);
+		tto[0] = tfrom[0] + fwd[0] * MAX_GRIP_DISTANCE;
+		tto[1] = tfrom[1] + fwd[1] * MAX_GRIP_DISTANCE;
+		tto[2] = tfrom[2] + fwd[2] * MAX_GRIP_DISTANCE;
+
+		JP_Trace(&tr, tfrom, NULL, NULL, tto, self->s.number, MASK_PLAYERSOLID, qfalse, 0, 0);
+
+		if (tr.fraction != 1.0 && tr.entityNum != ENTITYNUM_NONE &&
+			g_entities[tr.entityNum].client &&
+			!g_entities[tr.entityNum].client->ps.fd.forceGripCripple &&
+			g_entities[tr.entityNum].client->ps.fd.forceGripBeingGripped < level.time &&
+			ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_GRIP) &&
+			(g_friendlyFire.value || !OnSameTeam(self, &g_entities[tr.entityNum])))
+		{
+			targetNum = tr.entityNum;
+			break;
+		}
+	}
+
+	if (targetNum != ENTITYNUM_NONE)
+	{
+		if (g_entities[targetNum].s.number < MAX_CLIENTS &&
+			g_entities[targetNum].client->ps.m_iVehicleNum)
+		{
+			gentity_t *vehEnt = &g_entities[g_entities[targetNum].client->ps.m_iVehicleNum];
 			if (vehEnt->inuse && vehEnt->client && vehEnt->m_pVehicle)
 			{
 				if (vehEnt->m_pVehicle->m_pVehicleInfo->type == VH_SPEEDER ||
 					vehEnt->m_pVehicle->m_pVehicleInfo->type == VH_ANIMAL)
 				{ //push the guy off
-					vehEnt->m_pVehicle->m_pVehicleInfo->Eject(vehEnt->m_pVehicle, (bgEntity_t *)&g_entities[tr.entityNum], qfalse);
+					vehEnt->m_pVehicle->m_pVehicleInfo->Eject(vehEnt->m_pVehicle,
+						(bgEntity_t *)&g_entities[targetNum], qfalse);
 				}
 			}
 		}
-		self->client->ps.fd.forceGripEntityNum = tr.entityNum;
-		g_entities[tr.entityNum].client->ps.fd.forceGripStarted = level.time;
+		self->client->ps.fd.forceGripEntityNum = targetNum;
+		g_entities[targetNum].client->ps.fd.forceGripStarted = level.time;
 		self->client->ps.fd.forceGripDamageDebounceTime = 0;
 
 		self->client->ps.forceHandExtend = HANDEXTEND_FORCE_HOLD;
