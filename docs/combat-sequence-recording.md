@@ -47,7 +47,9 @@ and rates; all eligible examples contribute the success denominator.
 
 Normal cache refresh extracts up to 64 previously unprocessed version-14 duels, transactionally.
 `resetdueltrack` first preserves all outstanding eligible motor evidence and refuses to delete
-tracking if preservation fails. Durable evidence survives raw tracking resets.
+tracking if preservation fails (the console shows the SQLite cause). `resetdueltrack force` resets
+anyway and gives up only the unextracted motor evidence; learned sequences, learning evidence,
+preserved motor rows and strafe routes are always kept. Durable evidence survives raw tracking resets.
 `resetlearningtrack` clears it and marks retained raw participants processed, so cleared learning
 does not immediately reappear. `exportDuelTrack` includes `dueltrack_learned_motor.csv`.
 
@@ -73,3 +75,13 @@ These are statistical timing/rate preferences, not raw key or trajectory playbac
 attack timing still follows engine acceptance and animation recovery. `bot_combatdebug` labels
 pooled motor evidence `source=aggregate`, reports successful/total examples, and never names a
 teacher for pooled data. Individual provenance remains auditable in the exported evidence.
+
+## Learned-sequence outcome
+
+The `net_damage` of a learned stimulus -> response -> follow-up sequence is no longer only
+damage rows in the 2 s window. `BotLearn_ResourceOutcome` (`g_bot_learning.h`) adds a heal
+correction (snapshot HP+AP edge minus the damage net, clamped to +/-40) and, in force duels,
+0.11 x the FP edge. Snapshots come from the raw event stream before repeat collapsing. In the
+latest duel tracks, damage events matched the HP+AP snapshots in saber-only duels (correlation
+0.995) but missed drain heals in force duels (correlation 0.78). Each point of FP edge was
+worth about 0.11 HP+AP over the next 4 s.

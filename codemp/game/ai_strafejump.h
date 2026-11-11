@@ -3008,6 +3008,16 @@ static inline int BotSFJ_CollisionEndsRoute(int trusted, int collisions)
 }
 
 /*
+ * Routes only replay vertical wallruns. A side or diagonal wallrun
+ * (BOTH_WALL_RUN_LEFT/RIGHT) during a launched route hop means the bot drifted
+ * into the wall with strafe held: the takeoff failed, whatever its trust.
+ */
+static inline int BotSFJ_SideWallRunFailsHop(int sideWallRun, int hopLaunched, int replayingWallRun)
+{
+	return sideWallRun && hopLaunched && !replayingWallRun;
+}
+
+/*
  * Recorded evidence, not the bot's own scan, decides human hops. With
  * bot_strafe_trusthuman a trusted hop (no recorded death, failures within
  * bounds) is attempted even when the bot predicts a hazard, a mover or an open

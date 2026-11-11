@@ -717,7 +717,8 @@ static qboolean G_IsAllowedTrackedColumnName(const char *columnName)
 		"saber_defense_state", "enemy_saber_defense_state", "saber_blocked", "enemy_saber_blocked",
 		"aim_mask", "aim_endpoint_valid", "self_footing", "enemy_footing", "torso_timer", "torso_anim",
 		"span_id", "span_kind", "span_outcome", "command_time", "command_msec",
-		"command_source", "command_yaw", "command_pitch"
+		"command_source", "command_yaw", "command_pitch",
+		"elo_key", "motor_extracted"
 	};
 	const char *p;
 	int i;
@@ -4120,7 +4121,8 @@ static qboolean G_BotLearnRecordPerspective(sqlite3 *db, sqlite3_int64 summaryId
 	const int maxRows = self->eventCount + opponent->eventCount;
 	const int sourceKind = (self->identityKind == DUEL_TRACK_ID_BOT) ? BOTLEARN_SOURCE_BOT : BOTLEARN_SOURCE_HUMAN;
 	const int skillBand = G_BotLearnSkillBand(self);
-	int count = 0, sequenceCount, i;
+	int count = 0, sequenceCount, i, rawCount;
+	botlearn_event_t *rawEvents;
 	qboolean ok = qtrue;
 
 	if (!self->events || !opponent->events || maxRows <= 0 ||
@@ -4146,8 +4148,19 @@ static qboolean G_BotLearnRecordPerspective(sqlite3 *db, sqlite3_int64 summaryId
 	{
 		events[i] = rows[i].ev;
 	}
+	rawCount = count;
+	rawEvents = (botlearn_event_t *)malloc(sizeof(*rawEvents) * (rawCount > 0 ? rawCount : 1));
+	if (rawEvents)
+		memcpy(rawEvents, events, sizeof(*rawEvents) * rawCount);
 	count = BotLearn_CollapseRepeats(events, count);
 	sequenceCount = BotLearn_ExtractSequences(events, count, won ? 1 : 0, sequences, BOTLEARN_MAX_DUEL_SEQUENCES);
+	if (rawEvents)
+	{
+		BotLearn_ApplyResourceOutcome(sequences, sequenceCount, rawEvents, rawCount,
+			self->duelType == 1 ? 1 : 0);
+		free(rawEvents);
+		rawEvents = NULL;
+	}
 
 	if (sequenceCount > 0 &&
 		sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO LocalBotLearnedSequence(source_kind, skill_band, ctx_key, stimulus, response, follow1, follow2) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -4254,7 +4267,8 @@ static qboolean G_BotLearnLoadMotorCache(sqlite3 *db, qboolean preserveAll)
 		BUTTON_ATTACK, BUTTON_ALT_ATTACK, MOD_SABER, &loaded);
 	extracted = rc == SQLITE_OK ? qtrue : qfalse;
 	if (rc != SQLITE_OK)
-		G_TrackedDBError("extract motor evidence", db, rc);
+		trap->Print("Duel tracking: extract motor evidence failed (%i: %s)\n", rc,
+			G_ExtractLearnedMotorError()[0] ? G_ExtractLearnedMotorError() : sqlite3_errmsg(db));
 	G_BotLearnMotorCacheClear();
 	rc = sqlite3_prepare_v2(db, "SELECT ctx_key,kind,stance,throw_level,participant_key,"
 		"hold_ms,yaw_rate,pitch_rate,net_damage FROM LocalBotLearnedMotor WHERE capture_version>=14",
@@ -11315,10 +11329,19 @@ void Svcmd_ResetDuelTrack_f(void)
 	int i;
 	int trackedRows = 0;
 	int result;
+	qboolean force = qfalse;
 
-	if (trap->Argc() != 1)
+	if (trap->Argc() == 2)
 	{
-		trap->Print("Usage: resetdueltrack\n");
+		char arg[16];
+
+		trap->Argv(1, arg, sizeof(arg));
+		force = !Q_stricmp(arg, "force") ? qtrue : qfalse;
+	}
+	if (trap->Argc() > 2 || (trap->Argc() == 2 && !force))
+	{
+		trap->Print("Usage: resetdueltrack [force]\n"
+			"  force: reset even if unextracted human motor evidence cannot be preserved\n");
 		return;
 	}
 
@@ -11348,9 +11371,14 @@ void Svcmd_ResetDuelTrack_f(void)
 	G_EnsureLocalDuelTrackingSchema(db);
 	if (!G_BotLearnLoadMotorCache(db, qtrue))
 	{
-		trap->Print("resetdueltrack refused: motor evidence could not be preserved; tracking data was not reset.\n");
-		sqlite3_close(db);
-		return;
+		if (!force)
+		{
+			trap->Print("resetdueltrack refused: motor evidence could not be preserved; tracking data was not reset.\n"
+				"Use \"resetdueltrack force\" to reset anyway (learned sequences and strafe routes are always kept).\n");
+			sqlite3_close(db);
+			return;
+		}
+		trap->Print("resetdueltrack force: continuing without preserving unextracted motor evidence.\n");
 	}
 	for (i = 0; i < (int)ARRAY_LEN(g_trackedDuelTableNames); i++)
 	{
