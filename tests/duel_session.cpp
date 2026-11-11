@@ -116,6 +116,32 @@ BOOST_AUTO_TEST_CASE( strafe_track_reset_preview_and_commit_keep_selected_raw_de
 	BOOST_CHECK_EQUAL(sqlite3_close(db), SQLITE_OK);
 }
 
+BOOST_AUTO_TEST_CASE( aggressive_strafe_reset_enforces_hard_budget_in_rank_order )
+{
+	const int ranked[] = { 3, 1, 4, 0, 2 };
+	const unsigned char selected[] = { 1, 1, 1, 1, 1 };
+	unsigned char bounded[5];
+
+	BOOST_CHECK_EQUAL(G_StrafeTrackResetApplyHardBudget(ranked, 5, selected, 3,
+		bounded), 3);
+	BOOST_CHECK_EQUAL(bounded[3], 1);
+	BOOST_CHECK_EQUAL(bounded[1], 1);
+	BOOST_CHECK_EQUAL(bounded[4], 1);
+	BOOST_CHECK_EQUAL(bounded[0], 0);
+	BOOST_CHECK_EQUAL(bounded[2], 0);
+
+	{
+		const unsigned char sparse[] = { 0, 1, 0, 0, 1 };
+		BOOST_CHECK_EQUAL(G_StrafeTrackResetApplyHardBudget(ranked, 5, sparse, 3,
+			bounded), 2);
+		BOOST_CHECK_EQUAL(bounded[1], 1);
+		BOOST_CHECK_EQUAL(bounded[4], 1);
+		BOOST_CHECK_EQUAL(bounded[0], 0);
+		BOOST_CHECK_EQUAL(bounded[2], 0);
+		BOOST_CHECK_EQUAL(bounded[3], 0);
+	}
+}
+
 BOOST_AUTO_TEST_CASE( strafe_track_reset_distinguishes_sole_connectors_and_force_speed_types )
 {
 	const float start[] = { 0, 0, 0 };

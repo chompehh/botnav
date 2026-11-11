@@ -1256,6 +1256,11 @@ static inline float BotSFJ_AxesYaw(int forward, int right)
 	return atan2f((float)right, (float)forward) * 57.29577951308232f;
 }
 
+static inline float BotSFJ_WorldWishYaw(float viewYaw, int forward, int right)
+{
+	return viewYaw - BotSFJ_AxesYaw(forward, right);
+}
+
 static inline float BotSFJ_ViewYawForAxes(float wishYaw, int forward, int right)
 {
 	return wishYaw + BotSFJ_AxesYaw(forward, right);
@@ -3244,7 +3249,7 @@ static inline int BotSFJ_RouteInputCommitted(int route, int grounded, int phase)
 
 /*
  * Who keeps running instead of fighting:
- *  - a committed recorded hop keeps control through takeoff, flight and rejump;
+ *  - an airborne recorded hop keeps movement, but permits combat reactions;
  *  - a flag carrier only fights after a push/pull/grip/knockdown or saber/melee hit
  *    (lightning and projectiles do not stop a capture run);
  *  - a bot heading to the enemy flag fights once it is hit at all.
@@ -3252,10 +3257,8 @@ static inline int BotSFJ_RouteInputCommitted(int route, int grounded, int phase)
 static inline int BotNav_RouteCombatHold(int enabled, int airborneOnRoute, int carrying,
 	int attackingFlag, int hardHitRecent, int anyHurtRecent)
 {
-	if (!enabled)
+	if (!enabled || airborneOnRoute)
 		return 0;
-	if (airborneOnRoute)
-		return 1;
 	if (carrying)
 		return !hardHitRecent;
 	if (attackingFlag)
@@ -3293,6 +3296,71 @@ static inline int BotNav_HuntRefreshDue(int intervalMs, int lastRefresh, int now
 	if (intervalMs <= 0)
 		return 0;
 	return !targetValid || lastRefresh <= 0 || now - lastRefresh >= intervalMs || now < lastRefresh;
+}
+
+/* Private-duel participants are not FFA hunt targets unless they are our partner. */
+static inline int BotNav_HuntTargetAvailable(int connected, int alive, int spectator,
+	int following, int sameTeam, int targetClient, int targetDueling, int targetDuelIndex,
+	int selfDueling, int selfDuelIndex, int selfClient)
+{
+	return connected && alive && !spectator && !following && !sameTeam &&
+		(!targetDueling || targetDuelIndex == selfClient) &&
+		(!selfDueling || targetClient == selfDuelIndex);
+}
+
+/* 1 selects Push, 2 selects Pull; legality and lethal-path probes are supplied by the caller. */
+static inline int BotNav_HazardForceChoice(int pushLegal, int pullLegal,
+	int pushBehindEnemy, int pullHazard, int groundedStun, int pullCanDisplace)
+{
+	if (!pushBehindEnemy && !pullHazard)
+		return 0;
+	if (pushLegal && groundedStun && !pullCanDisplace)
+		return 1;
+	if (pushLegal && pushBehindEnemy)
+		return 1;
+	if (pullLegal && pullHazard)
+		return 2;
+	return 0;
+}
+
+static inline float BotNav_HazardDisplacementAxis(float toEnemyAxis, int pull)
+{
+	return pull ? -toEnemyAxis : toEnemyAxis;
+}
+
+static inline int BotNav_HazardMayOverride(int bully, int queuedAction, int emergency)
+{
+	return !emergency && (!queuedAction || bully);
+}
+
+static inline int BotNav_WallGrabRecoveryAllows(int stuckToWall, int forceJumpLegal,
+	int safeLanding, int exclusiveInput)
+{
+	return stuckToWall && forceJumpLegal && safeLanding && !exclusiveInput;
+}
+
+static inline int BotNav_WallLedgeReachable(float originZ, float landingZ,
+	float clearanceZ, float maximumZ)
+{
+	return isfinite(originZ) && isfinite(landingZ) && isfinite(clearanceZ) &&
+		isfinite(maximumZ) && landingZ > originZ + 8.0f &&
+		landingZ < clearanceZ && clearanceZ <= maximumZ;
+}
+
+static inline int BotNav_WallRecoveryHoldJump(int stuck, int jumpHeld, int legal,
+	float targetHeight, float height, float verticalSpeed)
+{
+	return !stuck && jumpHeld &&
+		BotSFJ_ForceJumpHold(1, targetHeight, legal, 0, height, verticalSpeed);
+}
+
+static inline int BotNav_ForceAimArcAllows(float yawDelta, float pitchDelta,
+	float visionArc, float forwardDot)
+{
+	return isfinite(yawDelta) && isfinite(pitchDelta) && isfinite(visionArc) &&
+		isfinite(forwardDot) && forwardDot >= 0.6f &&
+		visionArc >= 0.0f && fabsf(yawDelta) <= visionArc * 0.5f &&
+		fabsf(pitchDelta) <= visionArc * 0.5f;
 }
 
 /* ---- Human yaw replay ---- */

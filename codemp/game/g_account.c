@@ -11769,6 +11769,7 @@ botroutes/<map>.botroute so bots start using them.
 #define STRAFETRACK_PREROLL_MS 150
 #define STRAFETRACK_SAVE_BATCH 128
 #define STRAFETRACK_ROUTES_PER_MAP BOT_SFJ_MAX_TRACK_ROUTES
+#define STRAFETRACK_AGGRESSIVE_RESET_ROUTES_PER_MAP STRAFETRACK_ROUTES_PER_MAP
 #define STRAFETRACK_EXPORT_CANDIDATES 4096
 #define STRAFETRACK_ROUTE_FILE_MAX BOT_SFJ_ROUTE_FILE_MAX
 #define STRAFETRACK_BEGIN_MARKER "// BEGIN recorded strafe routes (exportStrafeTrack)"
@@ -13748,17 +13749,20 @@ static int G_StrafeTrackCompareResetScore(const void *a, const void *b)
 }
 
 static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
-	sqlite3_int64 *keepIds, int keepCapacity)
+	sqlite3_int64 *keepIds, int keepCapacity, qboolean aggressive)
 {
 	static strafetrack_export_coverage_t coverageRoutes[STRAFETRACK_EXPORT_CANDIDATES];
 	static int coverageIndices[STRAFETRACK_EXPORT_CANDIDATES];
 	static unsigned char coveragePicked[STRAFETRACK_EXPORT_CANDIDATES];
 	static unsigned char candidatePicked[STRAFETRACK_EXPORT_CANDIDATES];
+	static unsigned char hardBudgetPicked[STRAFETRACK_EXPORT_CANDIDATES];
 	int groupCounts[5] = {0, 0, 0, 0, 0};
 	int groupQuotas[5], group;
 	sqlite3_stmt *routes = NULL;
 	int candidates = 0, successCount = 0, target, selectSuccessful;
 	int c, kept = 0, result;
+	const int budget = aggressive ? STRAFETRACK_AGGRESSIVE_RESET_ROUTES_PER_MAP :
+		STRAFETRACK_ROUTES_PER_MAP;
 
 	if (sqlite3_prepare_v2(db,
 		"SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
@@ -13827,17 +13831,17 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 	qsort(g_strafeResetOrder, candidates, sizeof(g_strafeResetOrder[0]),
 		G_StrafeTrackCompareResetScore);
 	memset(candidatePicked, 0, sizeof(candidatePicked));
-	if (successCount <= STRAFETRACK_ROUTES_PER_MAP)
+	if (successCount <= budget)
 	{
 		for (c = 0; c < candidates; c++)
 			if (g_strafeResetCandidates[c].objectiveSuccess)
 				candidatePicked[c] = 1;
-		target = STRAFETRACK_ROUTES_PER_MAP - successCount;
+		target = budget - successCount;
 		selectSuccessful = 0;
 	}
 	else
 	{
-		target = STRAFETRACK_ROUTES_PER_MAP;
+		target = budget;
 		selectSuccessful = 1;
 	}
 	if (target > candidates - (selectSuccessful ? 0 : successCount))
@@ -13876,9 +13880,9 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 			if (coveragePicked[c])
 				candidatePicked[coverageIndices[c]] = 1;
 	}
-	/* The normal budget is soft: never discard an untested sole connector, a
-	 * distinct force/movement type, or the only objective-successful example. */
-	for (c = 0; c < candidates; c++)
+	/* Normal cleanup is preservation-first and may exceed its route budget.
+	 * Aggressive cleanup deliberately skips those soft-budget exceptions. */
+	for (c = 0; !aggressive && c < candidates; c++)
 	{
 		const int k = g_strafeResetOrder[c];
 		const strafetrack_reset_candidate_t *candidate = &g_strafeResetCandidates[k];
@@ -13909,6 +13913,15 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 		}
 		if (!represented)
 			candidatePicked[k] = 1;
+	}
+	if (aggressive)
+	{
+		kept = G_StrafeTrackResetApplyHardBudget(g_strafeResetOrder, candidates,
+			candidatePicked, budget, hardBudgetPicked);
+		if (kept < 0)
+			return -1;
+		memcpy(candidatePicked, hardBudgetPicked, (size_t)candidates);
+		kept = 0;
 	}
 	for (c = 0; c < candidates; c++)
 		if (candidatePicked[c])
@@ -13944,11 +13957,11 @@ void Svcmd_ResetStrafeTrack_f(void)
 	int mapCount, mapIndex = 0, keepCount = 0;
 	int deletedRoutes = 0, deletedNodes = 0, deletedInputs = 0;
 	int deletedObjectives = 0, deletedJourneys = 0, deletedSessions = 0;
-	int preview = 0, purgeAll = 0, i, argIndex, result, mapKept;
+	int preview = 0, purgeAll = 0, aggressive = 0, i, argIndex, result, mapKept;
 
 	if (trap->Argc() > 3)
 	{
-		trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack all [preview]\n");
+		trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack aggressive [preview] | resetstrafetrack all [preview]\n");
 		return;
 	}
 	for (argIndex = 1; argIndex < trap->Argc(); argIndex++)
@@ -13956,13 +13969,20 @@ void Svcmd_ResetStrafeTrack_f(void)
 		trap->Argv(argIndex, token, sizeof(token));
 		if (!Q_stricmp(token, "all") && !purgeAll)
 			purgeAll = 1;
+		else if (!Q_stricmp(token, "aggressive") && !aggressive)
+			aggressive = 1;
 		else if (!Q_stricmp(token, "preview") && !preview)
 			preview = 1;
 		else
 		{
-			trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack all [preview]\n");
+			trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack aggressive [preview] | resetstrafetrack all [preview]\n");
 			return;
 		}
+	}
+	if (purgeAll && aggressive)
+	{
+		trap->Print("Usage: resetstrafetrack [preview] | resetstrafetrack aggressive [preview] | resetstrafetrack all [preview]\n");
+		return;
 	}
 	for (i = 0; i < MAX_CLIENTS; i++)
 		if (g_strafeTrack[i].active || g_strafeTrack[i].pendingSave)
@@ -14024,7 +14044,8 @@ void Svcmd_ResetStrafeTrack_f(void)
 			if (!purgeAll)
 			{
 				mapKept = G_StrafeTrackSelectResetKeep(db, mapNames[mapIndex],
-					&keepIds[keepCount], STRAFETRACK_EXPORT_CANDIDATES);
+					&keepIds[keepCount], STRAFETRACK_EXPORT_CANDIDATES,
+					aggressive ? qtrue : qfalse);
 				if (mapKept < 0)
 				{
 					trap->Print("resetstrafetrack failed: unable to rank route keeper set.\n");
@@ -14065,9 +14086,17 @@ void Svcmd_ResetStrafeTrack_f(void)
 		if (purgeAll)
 			trap->Print("resetstrafetrack all preview: remove %i route(s), %i node(s), %i input row(s), %i objective event(s), %i journey(s), and %i session(s). No data was changed.\n",
 				deletedRoutes, deletedNodes, deletedInputs, deletedObjectives, deletedJourneys, deletedSessions);
+		else if (aggressive)
+			trap->Print("resetstrafetrack aggressive preview: keep %i human route(s), at most %i per map; remove %i route(s), %i node(s), and %i input row(s). No data was changed.\n",
+				keepCount, STRAFETRACK_AGGRESSIVE_RESET_ROUTES_PER_MAP,
+				deletedRoutes, deletedNodes, deletedInputs);
 		else
+		{
 			trap->Print("resetstrafetrack preview: keep %i human route(s); remove %i route(s), %i node(s), and %i input row(s). No data was changed.\n",
 				keepCount, deletedRoutes, deletedNodes, deletedInputs);
+			trap->Print("Preservation-first target: %i routes per map; sole connectors and distinct force/speed/movement contexts may exceed it. Use resetstrafetrack aggressive preview for the hard %i-route limit.\n",
+				STRAFETRACK_ROUTES_PER_MAP, STRAFETRACK_AGGRESSIVE_RESET_ROUTES_PER_MAP);
+		}
 	}
 	else
 	{
@@ -14089,6 +14118,10 @@ void Svcmd_ResetStrafeTrack_f(void)
 		if (purgeAll)
 			trap->Print("resetstrafetrack all: removed %i route(s), %i node(s), %i input row(s), %i objective event(s), %i journey(s), and %i session(s). Duel tracking, learned data, route outcomes, and hand-authored botroute blocks were preserved.\n",
 				deletedRoutes, deletedNodes, deletedInputs, deletedObjectives, deletedJourneys, deletedSessions);
+		else if (aggressive)
+			trap->Print("resetstrafetrack aggressive: kept %i human route(s), at most %i per map; removed %i route(s), %i node(s), and %i input row(s). Learned data, CTF objective events, route outcomes, and non-recorded botroute blocks were not reset.\n",
+				keepCount, STRAFETRACK_AGGRESSIVE_RESET_ROUTES_PER_MAP,
+				deletedRoutes, deletedNodes, deletedInputs);
 		else
 			trap->Print("resetstrafetrack: kept %i human route(s); removed %i route(s), %i node(s), and %i input row(s). Learned data, CTF objective events, route outcomes, and non-recorded botroute blocks were not reset.\n",
 				keepCount, deletedRoutes, deletedNodes, deletedInputs);

@@ -68,8 +68,8 @@ Chance weights are clamped to 0-100 by `BotGetChanceBiasPercent()`. Legacy attac
 | `bot_lightningdistance` | `400` | Minimum range for lightning usage. Bot must be at least this far from the enemy. |
 | `bot_mistakebias` | `0` | Chance weight (0-100) for imperfect combat decisions. Gripkick escapes use `bot_gkmistakebias` instead. Saber choices account for spacing, recovery, recent trades, and opponent pressure: countering or continuing after a hit is useful only when the opening supports it. Lower skill and higher bias favor weaker timing, positioning, and combinations rather than persistent inactivity. Level 10 has no configured mistake roll, but can still select another credible legal option; good-option variety is independent of mistakes. |
 | `bot_gkmistakebias` | `0` | Chance weight (0-100) for gripkick escape mistakes only: delayed or never-attempted pull-outs, push instead of pull, mis-aimed escape pulls and being rattled by a fast gripkick (scaled by how fast the gripper moves the bot). Scales with skill the same way as `bot_mistakebias`; level 10 never makes them and `0` disables them at every level. Tune it separately to keep high-level bots clean while lower levels still fumble. |
-| `bot_learning` | `1` | Enables learned sequence weights. Compatible `LocalBotLearnedSequence` rows enter an in-memory table on map load and between duels; force reactions, combo follow-ups, throw decisions and saber-controller attack preferences receive bounded bonuses. `0` keeps built-in choices only (recording still happens while duel tracking is on). |
-| `bot_learningstrength` | `1` | Scales the learned bonus (`0` disables it). After scaling by strength and skill the bonus is capped at ±30 weight, so data can tip a close choice but cannot override hard safety gates. |
+| `bot_learning` | `1` | Enables learned sequence weights from compatible `LocalBotLearnedSequence` rows loaded on map load and between duels; force reactions, combo follow-ups, throw decisions and saber-controller attack preferences receive bounded bonuses. `0` disables these live learned weights but does not disable recording or the separate `bot_learningbaseline`. |
+| `bot_learningstrength` | `1` | Scales the live learned bonus (`0` disables it). After scaling by strength and skill the bonus is capped at ±30 weight, so data can tip a close choice but cannot override hard safety gates. The separate baked baseline is controlled by `bot_learningbaseline`. |
 | `bot_learninghumansonly` | `0` | `0` learns from every tracked participant, but bot-performed rows count a quarter of a human row so poor bot execution does not teach that an action loses. `1` loads only human-performed sequences. |
 | `bot_learningminsamples` | `4` | Minimum recorded samples before a context/response entry influences choices. Below this the bot pools similar contexts (neighbouring HP+armor/force buckets, see Learned Sequences), then falls back to the coarse (force/range only) context, then to the baked baseline (`bot_learningbaseline`), then to built-in weights. |
 | `bot_learningbaseline` | `1` | Strength (`0` disables) of the built-in baseline baked from the last exported learning (`dueltrack_learned.csv`). It applies only where live learned data has fewer than `bot_learningminsamples` samples, so a `resetlearningtrack` no longer drops bots back to unlearned choices. Pools every context of a duel mode (saber-only vs full force) per stimulus/response/follow-up, and is withheld while the bot's own defense is broken/knocked down/lost, in return recovery or airborne. Works independently of `bot_learning`. |
@@ -97,7 +97,11 @@ The human-technique controller owns saber movement, primary inputs and technique
 
 Broken-parry recovery remains active through engine lockout and nearby enemy follow-up, rather than ending solely when the ordinary exit timer expires. Follow-up pressure uses current and short-horizon predicted range; distant swings no longer prolong a successful disengagement indefinitely. It suppresses offensive inputs and aim offsets, but permits a safety-checked escape jump once the engine is ready, even while waiting for nearby follow-up to clear. Safe retreat/lateral lanes and approach footing are held through meaningful phase boundaries; outside engine-sensitive swing selection, movement remains world-relative even while the view is offset. Bounded poke counter-yaw follows the accepted horizontal swing direction, rather than an arbitrary strafe direction on vertical attacks, and is composed separately from sweep smoothing and wiggle. These control curves are conservative approximations, not measured human motor templates.
 
-Steerable throws use launch, bypass, rear placement, cut-through and recall phases. Ready saber defense selects a bypass immediately; broken defense, knockdown, an unavailable blade or a different weapon selects direct interception. Rear placement is relative to the opponent's facing. Both side lanes are tried before raised, narrower overhead alternatives. Candidate lanes must pass both the actual 4096u, level-dependent view trace and the saber-to-endpoint route check; unsafe or stale opportunities request recall. A deliberate bypass/rear detour can remain held when flight points away from the opponent, within bounded level-dependent budgets and safety gates. Cut-through redirects through the opponent, not farther behind them. Level 2 steering follows the engine's 400ms cadence and level 3 its 100ms cadence; level 1 is not steerable. Close committed interceptions and knockdown finishes receive a protected completion window independent of aggression soft recall. Optional longer commitments require contextual range, flight progress, force reserves and an opening; they are not an unconditional timeout increase. Force legality, unsafe routes, return state, drainlock exposure and lethal-danger recalls retain priority. Validate guarded targets near obstacles and live drain/flipkick interactions in game.
+Steerable throws use launch, bypass, rear placement, cut-through and recall phases. When the power is legal and not globally disabled, bots at skill 1–3 configure throw level 2; skill above 3 configures level 3. Level 1 remains non-steerable. Before launch, a saber-sized hull trace starts from the recent cached hand/bolt position when available, checks 96 units forward with ±16-unit side lanes and a 12-unit vertical clearance, then requires the clearance to remain stable for 150ms. The final outgoing attack input repeats the clearance check and is removed if it no longer passes.
+
+Ready saber defense selects a bypass immediately; broken defense, knockdown, an unavailable blade or a different weapon selects direct interception. Rear placement is relative to the opponent's facing. During the first 450ms after launch, raised overhead lanes are tried before horizontal alternatives; the order then favors the horizontal lanes first. Bypass/rear steering aims along the saber-to-waypoint tangent rather than the eye-to-waypoint line, avoiding off-axis eye-parallax. The view ray can extend to its 4096-unit endpoint, but the saber hull's collision horizon is limited to the next steering interval plus a 48-unit margin; a distant wall beyond that horizon alone does not reject the waypoint. Bypass/rear waypoints also require hull-clear paths to the waypoint and cut-through endpoint. Unsafe or stale opportunities request recall.
+
+Enemy travel lead uses current distance divided by 500 units/s, bounded below by the steering cadence and capped at 450ms. If the target disappears, level-2/3 throws may reacquire for up to 600ms from the last visible time; during that window the bot tests hull-clear tangential isolation directions derived from its own saber position, not aim at the unseen target. A deliberate bypass/rear detour can remain held when flight points away from the opponent, within bounded level-dependent budgets and safety gates. Cut-through redirects through the opponent, not farther behind them. Level 2 steering follows the engine's 400ms cadence and level 3 its 100ms cadence. Close committed interceptions and knockdown finishes receive a protected completion window independent of aggression soft recall. Optional longer commitments require contextual range, flight progress, force reserves and an opening; they are not an unconditional timeout increase. Force legality, unsafe routes, return state, drainlock exposure and lethal-danger recalls retain priority. These are control rules, not a measured guarantee against throw stalls or collisions.
 
 ### Human throw evidence
 
@@ -189,8 +193,8 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 
 | Cvar | Default | Description |
 |------|---------|-------------|
-| `bot_strafefrequency` | `0` | Percentage chance (0-100) per think tick to enter a random strafe. 0 = disabled. |
-| `bot_strafeduration` | `50` | Duration scale (0-100) for random strafes. 50 = 80-2500ms range. |
+| `bot_strafefrequency` | `0` | Base percentage chance (0-100) per think tick for the random strafe overlay; combat context can adjust it. In grounded saber-only idle footwork it also partly adjusts lateral-direction timing, so `0` does not disable that controller behavior. It does not choose attacks or change air inputs. |
+| `bot_strafeduration` | `50` | Scale (0-100) for sampled random-strafe duration: bounds are 80–300ms at 0, 290–1400ms at 50, and 500–2500ms at 100. In grounded saber-only idle footwork, the sampled value (capped at 900ms) partly adjusts lateral-direction timing; it does not choose attacks or change air inputs. |
 | `bot_strafeOffset` | `0` | Legacy strafe offset. |
 | `bot_strafejumps` | `1` | Enables human-shaped strafe jumping with circle-jump starts and landing chains. The strafe key matches the turn side (left turn: W+A or A, right turn: W+D or D), so the view stays within about 25° of the velocity like a human's. Each hop keeps turning toward the route (the side survives landings unless the route bends the other way), uses full beat below 400 u/s and half beat / side-only above, and may switch side mid-air at the recorded point. Aim is rate-limited by skill: a flick on the ground, a fast settle for 150 ms after takeoff (200 + 20 x skill °/s, unlimited at skill 10), then a slow tracking turn (60 + 6 x skill °/s), raised to the recorded human rates. While the view catches up, the keys whose direction is closest to the wanted wish (including W only) are pressed. Validated waypoint lookahead allows gentle curves; direct enemy corridors remain straight. In CTF, carrying a flag counts as escape and chasing an enemy flag carrier counts as chase. |
 | `bot_strafejumpfrequency` | `100` | Initiation frequency scale, clamped to 1–1000 when enabled: `100` waits 1000 ms before starting a new eligible sequence, `200` waits 500 ms, `50` waits 2000 ms. `0` or negative disables strafe jumping. No per-frame random rolls; established safe chains are not delayed. |
@@ -204,9 +208,11 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
 | `bot_onlystrafes` | `0` | Test preference: starts eligible strafe navigation without the frequency wait and also considers safe direct enemy corridors without requiring increasing separation. Requires enabled strafe jumps and positive frequency. Does not force jumping: combat, required interactions, physics, proximity, collision and hazard checks still take priority, with ordinary navigation as fallback. |
-| `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; an improvised jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe after an engagement. Uncommitted navigation strafes with a visible enemy are held back inside close-combat range (~384 units) or when the enemy is closing fast; committed recorded hops finish without opponent-distance cancellation when `bot_route_combathold 1`. |
+| `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; an improvised jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe after an engagement. Uncommitted navigation strafes with a visible enemy are held back inside close-combat range (~384 units) or when the enemy is closing fast; committed airborne recorded hops retain their trajectory without opponent-distance cancellation. |
 | `bot_strafetrack` | `1` | Records human strafe-jump routes. `0` off, `1` record (the console prints when a route begins on a circle jump and when it ends), `2` also prints each landing with its hop style. Spectators are never recorded; bots only with `bot_strafetrack_bots`. See "Recorded strafe routes" below. |
 | `bot_strafetrack_bots` | `0` | Comparison mode: `1` also records bot strafe jumps (from the bot's own takeoff) into the same tables with `bot = 1` and the player name prefixed `[bot] `, so bot and human keys/yaw can be compared command by command after `exportStrafeTrack`. Bot recordings never go into `.botroute` files and are quiet unless `bot_strafetrack 2`. |
+| `bot_strafetrack_autoexport` | `1` | Automatically rewrites and reloads generated `.botroute` data after saved human routes or confirmed CTF objectives. `0` leaves database capture enabled but requires manual `exportStrafeTrack` to regenerate route files. |
+| `bot_strafetrack_exportinterval` | `60` | Minimum seconds between automatic route-file refreshes while the server is running; values below 10 are clamped to 10 seconds. End-of-match/map/shutdown refreshes are separate. |
 | `bot_trackexport_partmb` | `2000` | Size in MB at which `exportDuelTrack` and `exportStrafeTrack` start a new `_partN` CSV. Values outside 1–2000 use 2000 (GitHub release assets must be under 2 GiB). Use `24` for repository uploads. |
 | `bot_strafe_trusthuman` | `1` | `1` lets recorded human evidence decide trusted route hops (no recorded death, failures within bounds): predicted hazards, movers or open drops are advisory throughout the hop, including circle preparation, landing-release commands and rejumps. Legacy ledge recovery does not interrupt these trusted transitions, and both think-time and final-input flight checks honor trust. Recorded deaths make the hop untrusted, restoring every check. `0` restores strict hazard prediction. Ordinary walking approaches/connections and improvised jumps always keep their hazard checks. |
 | `bot_strafejumps_debug` | `0` | Levels are separate views. `1`: decisions only - coloured `[SFJ reject]`, `[SFJ start]` (route, Force Speed, goal), `[SFJ end]` (route, node, reason; an enemy-close end names the enemy as `[name]`), with start/walk/no-pick lines naming the goal player or flag instead of a generic "enemy", `[SFJ trust]` and `[SFJ speed]`. `2`: level 1 plus route planning and following - `[SFJ goal]` (goal type and player/flag, distance, route chain toward it, whether the next start is ahead or a ^3BACKTRACK^7), `[SFJ approach]`, replay and pick explanations. `3`: level 1 plus execution - `[SFJ yaw]` corner/replay yaw traces, `[SFJ edge]` ledge-escape candidates, hazard vetoes, and lines drawn to the goal (cyan) and next start/landing (green ahead, yellow backtrack). Colours: ^5cyan plan/goal, ^2green start/trust, ^3yellow end/reject, ^1red hazard, ^6magenta yaw, ^8orange edge. Older detail: `2` also reports starts and selected recorded-route explanations (goal, chosen/next-best route, entry, speed summary, replay sample and wallrun counts, reliability and prior results), `trusting human route hop` with node, deviation and bot/human speed, a 1 s `[SFJ replay]` heartbeat (sample, deviation, cross-track, speeds, copied keys and yaw), route ends for going off course or losing momentum, and recorded wallrun trigger/jump-off timings; `3+` adds hop traces. All levels print to the server console and every client console, and turning the cvar on prints a banner with the loaded route, replay and wallrun counts. Rejections are rate-limited to once per second per bot, level-2 info to every 250 ms. Includes initiation waits, final-input conflicts, and waypoint-skip rejection reasons. |
@@ -414,7 +420,7 @@ A bot uses a route when it is within 96 units of `start_pos`, or alongside the r
 With `bot_strafetrack 1` (default), the server records human strafe jumps on every map:
 - **Start:** a circle jump. On the ground holding forward plus a strafe key, view turning at least 90°/s, faster than ground speed, then jumping. The console prints `Strafe route (session #N) began: <player> circle-jumped on <map> at (x y z), speed S` and the player sees `Recording strafe route (session #N ...)`. `N` is only a per-session counter that restarts whenever the game module loads; it is not the database id.
 - **While recording:** every usercmd the server processes (about every 8 ms at 125 fps, not once per server frame) stores forward/strafe/jump input, yaw, pitch, yaw change, command time and msec, position, horizontal velocity, speed, grounded state, jump-held, force-jump state, and Force Speed active state and level. The last 150 ms before the start (the takeoff flick) are kept from a short pre-roll buffer and have negative `time_ms`. Ground-to-air and air-to-ground transitions are measured at command resolution, so a landing and its hop style cannot be lost when multiple hops occur between server frames. Each landing becomes a route node (position, speed, strafe key held on that hop, air time) plus the hop's style: side-only share of the air time, side-switch point (% of the air time), first key side, takeoff and in-air yaw speed, and whether the player force jumped and how high. Each landing is the bots' next goal.
-- **No lag:** recording only copies numbers into a fixed per-player buffer. Finished route/node records are saved on a later server frame, at most one route per frame, outside the capture handler; input rows are written in batches of 128 per frame. A new route from the same player starts once its previous route and inputs are persisted. Pending route and input saves are flushed on disconnect, match end, map change and shutdown.
+- **Capture/save separation:** each processed usercmd copies route measurements into a fixed per-player buffer; database writes happen later. Finished routes are saved at most one per server frame, and input rows are written in batches of up to 128 per frame. A new route from the same player starts once its previous route and inputs are persisted. Pending route and input saves are flushed on disconnect, match end, map change and shutdown. This describes the write schedule, not a guarantee of zero frame-time impact.
 - **End:** the player has been on the ground at or below normal ground speed for 150 ms. The console prints the result. Routes with no completed landing or under 128 units, or that touch lava/slime/no-drop, are discarded, as are routes cut short by death, teleporting, spectating or forced movement. Valid single-hop recordings can therefore supply short connectors.
 
 Kept routes go into the local tracking database (`LocalStrafeRoute`, `LocalStrafeRouteNode`, `LocalStrafeRouteInput`, the same file as duel tracking) and are never deleted by restarts, map changes or `resetdueltrack`. The player sees `Saved strafe route #<database id>`. Map names are stored in lower case, so `MP/FFA3` and `mp/ffa3` share routes; export also matches older mixed-case rows. A route saved with no input rows prints a warning, which usually means the server runs an older game module.
@@ -445,27 +451,110 @@ Filtering human `mp/ctf4` rows to at least 250 ms finds 231 intervals across 122
 routes; this measures ground time, not the intent of each pause.
 
 `resetstrafetrack preview` reports a preservation-first cleanup without deleting
-recordings. `resetstrafetrack` targets 256 human demonstrations per map,
+recordings. `resetstrafetrack` targets 384 human demonstrations per map,
 prioritizing objective success and diversifying speed contexts, start areas and
 directions. Sole connectors and distinct force/speed/movement types survive
 beyond that soft target; redundant routes require nearby starts and endpoints.
 Bot comparison recordings are removed. Maps exceeding 4,096 human candidates
 cause cleanup to abort rather than discard unseen routes. Kept demonstrations
 retain their raw inputs and ground/takeoff measurements.
-Both commands refuse while recordings or pending input saves are active: stop
-recording with `bot_strafetrack 0`, let pending saves finish, then run the command
-and re-enable recording. The cleanup regenerates `.botroute` files, preserves
-hand-authored blocks and `.botroute_stats`, and does not clear combat learning
-or CTF objective evidence. Export/back up first; pruning is not reversible.
+
+For a hard limit on the retained set, use `resetstrafetrack aggressive preview`
+then `resetstrafetrack aggressive`. Aggressive mode uses the same ranking and
+coverage selection but has a hard maximum of 384 human routes per map: unlike the
+default cleanup, it may discard sole connectors, distinct movement types, or
+objective-success routes when they exceed that budget. It still removes bot
+comparison recordings and aborts if the 4,096-candidate work limit is exceeded.
+Preview reports the retained total and the 384-per-map cap without changing data.
+The `all` purge remains a separate mode and cannot be combined with `aggressive`.
+
+All reset variants refuse while recordings or pending input saves are active:
+stop recording with `bot_strafetrack 0`, let pending saves finish, then run the
+command and re-enable recording if desired. Cleanup regenerates `.botroute`
+files, preserves hand-authored blocks and `.botroute_stats`, and does not clear
+combat learning or CTF objective evidence (except `resetstrafetrack all`, which
+removes CTF objective/session/journey rows). Export/back up first; pruning is
+not reversible.
 Either non-preview cleanup regenerates the strafe-track CSV snapshots,
 removes stale split parts and VACUUMs `dueltracks.db`, printing its size
 before and after (without the VACUUM the file never shrank); preview variants only report what would change.
+The non-preview command performs its transaction, VACUUM, route-file regeneration
+and CSV refresh during the command call; the preview avoids those writes. There
+is no measured duration or no-stall guarantee, so inspect with `bot_perfwarn`
+and run destructive cleanup during maintenance.
 `resetstrafetrack all preview` reports a full strafe-data purge;
 `resetstrafetrack all` removes all recorded routes, route nodes/inputs and CTF
 objective tracking rows, while preserving duel tracking, learned data, route
 outcomes and hand-authored route blocks.
 
-With `bot_strafetrack_autoexport 1` (default), a saved route marks the current map's `botroutes/<map>.botroute` dirty; while running, the file is rewritten and reloaded at most once every `bot_strafetrack_exportinterval` seconds (default `60`, minimum 10) when no human route is being recorded and no save is pending. Pending records are flushed at match end, disconnect, map change and shutdown; autoexport also refreshes the route file at match end/map change/shutdown. Route/node inserts are deferred from capture handling and staggered to at most one route per server frame; CTF objective events still persist at the event boundary. Earlier builds rewrote the whole file and reloaded every bot's route state on each route finish, which caused the hitch at circle-jump start/route end. Route inputs are saved in batches of 128 per frame. `0` restores the manual `exportStrafeTrack` workflow. To shrink the data without losing good routes, run `resetstrafetrack preview` and then `resetstrafetrack` (above): objective-success routes, sole connectors and distinct movement types are kept, while redundant demonstrations and bot comparison recordings are removed.
+With `bot_strafetrack_autoexport 1` (default), a saved route marks the current map's `botroutes/<map>.botroute` dirty; while running, the file is rewritten and reloaded at most once every `bot_strafetrack_exportinterval` seconds (default `60`, minimum 10) when no human route is being recorded and no save is pending. Pending records are flushed at match end, disconnect, map change and shutdown; autoexport also refreshes the route file at match end/map change/shutdown. Route/node inserts are deferred from capture handling and staggered to at most one route per server frame; CTF objective events still persist at the event boundary. Route inputs are saved in batches of 128 per frame. The interval limits refresh frequency, not work duration; no no-stall guarantee is implied. Setting autoexport to `0` leaves saved route data in the database but disables automatic route-file refresh; run `exportStrafeTrack` to regenerate files manually.
+
+For conservative capture settings (not a measured performance guarantee), use
+these server console commands:
+
+```
+set bot_dueltracking 0
+set bot_dueltracking_geometry 0
+set bot_learninglog 0
+set bot_strafetrack 0
+set bot_strafetrack_bots 0
+set bot_strafetrack_autoexport 0
+set bot_learning 1
+set bot_learningstrength 1
+set bot_learningbaseline 1
+botlearn reload
+```
+
+This turns off duel recording, optional geometry, public-chat logging, human/bot
+route recording, and automatic route-file refresh. Existing learned data still
+loads: `bot_learning 1`, `bot_learningstrength 1`, and `bot_learningbaseline 1`
+can remain enabled. This preset does not turn off bot route-result statistics
+or CTF objective-event recording; those are separate stores.
+`botlearn reload` explicitly refreshes stored combat preferences if learning was
+previously disabled; run reloads/exports during a quiet moment rather than
+repeatedly during fights.
+To checkpoint routes before switching to this preset, run `exportStrafeTrack`
+during maintenance after pending captures finish. It regenerates and reloads
+route files; route-hint reload also saves accumulated bot outcome statistics.
+Recording off does not freeze those in-memory outcomes or disable route use.
+There is no separate cvar to freeze only outcome learning; its normal file writes
+occur on route reload/shutdown, not on every hop. An unclean process exit can
+still lose outcomes accumulated since the last save.
+
+For a fuller capture session, use:
+
+```
+set bot_dueltracking 1
+set bot_dueltracking_geometry 2
+set bot_learninglog 0
+set bot_strafetrack 1
+set bot_strafetrack_bots 1
+set bot_strafetrack_autoexport 1
+set bot_strafetrack_exportinterval 60
+```
+
+This captures eligible duels, the full
+non-command-sample geometry event set, human and bot
+strafe-jump demonstrations, and automatic route-file refreshes. `bot_learning`
+and its strength/baseline settings govern use of stored sequence preferences,
+not whether those demonstrations are recorded. For bot use of stored sequence
+preferences, set `bot_learning 1`, `bot_learningstrength 1`, and
+`bot_learningbaseline 1`; optionally, `bot_learninglog 1` separately records
+accepted public chat, not combat sequences. Combat sequence learning is
+not live aim learning: it uses action-token sequences and outcomes, not human
+aim or key playback. Separate motor evidence remains a distinct bounded
+preference path.
+
+With `bot_strafetrack 0`, neither human nor bot strafe-jump demonstrations are
+captured, even if `bot_strafetrack_bots 1`; existing routes remain in the
+database. Bot success/failure outcomes for routes they use are kept separately
+in `botroutes/<map>.botroute_stats` and are not disabled by those recording
+cvars; the stats file is loaded with the map's route hints and saved when route
+hints are reloaded or the game shuts down. Resetting recorded routes does not
+clear these outcome rows; entries for routes no longer present may remain unused
+in the stats file. CTF objective/session/journey events are also tracked
+separately from strafe route capture. `resetstrafetrack` preserves both stores;
+`resetstrafetrack all` removes the CTF rows but still preserves `.botroute_stats`.
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at `bot_trackexport_partmb`, like `exportDuelTrack`);
@@ -534,7 +623,16 @@ Travel goals: legacy CTF navigation and strafe-route goals share the defender re
 
 Elevators: a bot standing on a rising mover (`ET_MOVER`, including one moving from its low to its high position) holds still and skips ledge escape until the lift reaches the top (at most 20 s), pausing (not ending) an active recorded route; brief ground flicker on the platform (up to 400 ms) does not end the ride. On a lift resting at its low end with the goal above, it waits up to 4.5 s for the lift to start. A close visible enemy cancels the wait only while the lift is not rising.
 
-Route runners hold combat (`bot_route_combathold 1`, default): a recorded route owns aim and movement throughout takeoff, flight, landing-release and immediate rejump transitions. Nearby/visible enemies cannot change the route's intent, goal, aim, keys or backward-facing policy; saber techniques/defense and combat Force presses are suppressed at command dispatch, while route-required Force Speed remains allowed. Normal combat can resume once the bot leaves the committed hop chain. A flag carrier keeps running unless pushed, pulled, gripped, knocked down or hit by saber/melee (lightning and projectiles do not stop a capture run); a bot heading for the enemy flag keeps going until it takes any damage or meets the enemy carrier. Genuine engine-state conflicts still apply. Before the first hop, soft conflicts (queued attack, short stall) pause a route for up to 1.5 s instead of ending it. `0` restores the old combat policy.
+Committed airborne recorded hops own movement, not combat aim: bots can face and
+react to nearby enemies while preserving the planned world-space input. After
+landing, `bot_route_combathold 1` (default) prioritizes flag goals: a carrier keeps
+running unless pushed, pulled, gripped, knocked down or hit by saber/melee
+(lightning and projectiles do not stop a capture run); a bot heading for the
+enemy flag keeps going until it takes damage or meets the enemy carrier.
+`0` disables those grounded goal-based combat holds, not airborne trajectory
+preservation. Genuine engine-state conflicts still apply. Before the first hop,
+soft conflicts (queued attack, short stall) pause a route for up to 1.5 s instead
+of ending it.
 
 FFA hunting: in FFA-style modes (not CTF/CTY/siege/duel) a bot with no other goal targets the nearest opponent's live position, refreshed every `bot_hunt_interval` ms (default `3000`, `0` disables), for both recorded-route goals and legacy waypoint destinations.
 
@@ -794,7 +892,7 @@ When a retreating bot (hard/soft retreat, or backing off from a fast incoming en
 | Cvar | Default | Description |
 |------|---------|-------------|
 | `bot_gripkickdwell` | `100` | Percent scaling of grip phase durations: the aim-down/hold phases (holding the target gripped with forward-only movement before the flipkick approach, and the dwell after a failed kick attempt) run at 1.5x this scaling, while the upward jerk phases run at 1x. 100 = default timings. Higher = longer dwell per phase, lower = faster cycling. Each upward jerk also rolls its own random pitch between 45 and 80 degrees so the swing height of the gripped target varies jerk to jerk. |
-| `bot_bully` | `0` | 1 = bully mode: while gripping a knocked-down target that is falling fast enough to splat, release grip early to let them splat; and when the bot's back is to lava or a lethal fall, release grip after the first jerk phase begins so the jerk hurls the target off the edge. 0 (default) = keep holding the grip instead of releasing for the splat/hazard. |
+| `bot_bully` | `0` | 1 = bully mode: while gripping a knocked-down target that is falling fast enough to splat, release grip early to let them splat; and when the bot's back is to lava or a lethal fall, release grip after the first jerk phase begins so the jerk hurls the target off the edge. Lethal-hazard push/pull can also take priority over nonemergency queued attacks. 0 (default) = keep holding grip rather than releasing for the splat/hazard; legal hazard push/pull remains available when no higher-priority action is queued. |
 
 ## Duel & FFA Exploration (`g_newBotAITarget` -3 / -4)
 
@@ -802,7 +900,7 @@ When a retreating bot (hard/soft retreat, or backing off from a fast incoming en
 |------|---------|-------------|
 | `bot_duelcountmax` | `3` | Completed duels before a -3/-4 bot returns to FFA to find a new opponent: duel issuing/acceptance is suppressed while the bot explores. |
 | `bot_ffaexploretime` | `180000` | How long (ms) a -4 bot keeps exploring for a new non-dueling opponent once the post-duel FFA window begins (default 3 minutes), before it may duel again. |
-| `bot_perfwarn` | `0` | Performance diagnostics: when `> 0`, logs any game frame, bot AI frame, or duel-save/learning-cache step that takes at least this many milliseconds. Use it to confirm that duel-end saves no longer cause lag spikes. |
+| `bot_perfwarn` | `0` | Performance diagnostics: when `> 0`, logs any game frame, bot AI frame, or duel-save/learning-cache step that takes at least this many milliseconds. Use it to inspect measured durations on the running server; it does not itself establish a performance guarantee. |
 
 Notes:
 - `-4` bots fight normally once a duel actually starts (`duelInProgress`); the force-duel-only approach only applies while finding/challenging.
@@ -813,7 +911,7 @@ Notes:
 - Each bot remembers the last duel type (saber or force) a human offered it and uses that type for its own offers to humans until a human offers a different one. Bot-vs-bot offers and acceptances are always force duels.
 - `-4` bots roam via waypoints during the explore window instead of walking up to the nearest bot and idling. If two bots stand near each other for ~4 seconds without a duel or an offer, they blacklist each other for 20 seconds and roam apart; bots that neither side can currently challenge are skipped when picking a target, so newcomers don't join idle groups.
 - After a bot-vs-bot duel ends, both bots temporarily blacklist each other so they search for a new opponent instead of immediately rematching.
-- Recorded duels are saved in small steps over several frames after the duel ends (summary, events in chunks, aggregates, learning), on one persistent database connection in WAL mode, so the end of a duel no longer causes a lag spike. Pending saves are flushed on map change or shutdown. The bot-learning cache reload is also deferred to quiet frames.
+- Recorded duels are saved in small steps over several frames after the duel ends (summary, events in chunks, aggregates, learning), on one persistent database connection in WAL mode. Pending saves are flushed on map change or shutdown. The bot-learning cache reload is also deferred to quiet frames. This describes persistence scheduling, not a measured guarantee against frame stalls.
 - Persistence acquires its write lock before each step; transient BUSY/LOCKED errors retain queued saves and retry later. Queue-overflow draining is bounded (128 steps / 10ms, apart from an individual database call), rather than spinning on a blocked writer. If all eight slots remain occupied, the new incoming duel is explicitly rejected and logged; existing queued saves are not overwritten. Shutdown flushing has a one-second budget; remaining unsaved recordings are reported as lost and their snapshots freed, while committed learning is unchanged. Avoid prolonged external writer locks and inspect these warnings before resetting or shutting down.
 - Ranked bot-vs-bot ELO progression is limited to 5 ranked duels per bot level per UTC day/session bucket; extra bot-vs-bot duels still run but are logged unranked.
 
@@ -824,8 +922,8 @@ Notes:
 | `bot_nochat` | `0` | Disable bot chat. |
 | `bot_tutorial` | `0` | Enable concise trainer tells from bots after tracked duels; at `1` tells are private, at `2+` tells may broadcast publicly. Messages are capped to 3 per burst with a 7s cooldown between sends, and unregistered reminders are sent once per session. |
 | `bot_learninglog` | `0` | Opt-in recording of accepted public chat in the existing events export, independently of tutorial chat and learned weight consumption. Private tells, team, clan and admin chat are excluded. Human explanations remain untrusted annotations, not automatic behavior rules. |
-| `bot_dueltracking` | `0` | Record duel summaries, per-player force-spend stats, and sequential duel events for human-vs-human and human-vs-bot duels only (bot-vs-bot excluded). |
-| `bot_dueltracking_geometry` | `0` | Optional geometry capture for tracked duel events. `1` logs only key spatial events (damage/range/air/knockdown), `2` logs all tracked events. Off by default to keep overhead low. |
+| `bot_dueltracking` | `1` | Record duel summaries, per-player force-spend stats, and sequential duel events for eligible human-vs-human and human-vs-bot duels (bot-vs-bot excluded). `0` disables this recording; it does not disable use of already stored learned preferences. |
+| `bot_dueltracking_geometry` | `2` | Optional geometry on tracked duel events. `0` disables geometry; `1` captures it for damage/range/air/knockdown, attack and swing, counter/punish/follow-up, input, throw, dodge, defense, attack-sample and decision events; `2` captures geometry for all tracked non-command-sample events. Geometry is supplementary to duel recording and does not enable tracking by itself. |
 | `bot_yawswitch` | `10` | Legacy/unused cvar; current wall-escape yaw behavior is hardcoded in `ai_main.c`. |
 | `bot_forcepowers` | `1` | Enable bots using force powers. |
 | `bot_forgimmick` | `0` | Force gimmick mode. |
@@ -1108,9 +1206,183 @@ Technique evidence and limitations:
 - Historical geometry is event-sampled, and many old rows lack measured swing sweep. Direction/sequence choices are evidence-backed; bounded phase-aware yaw is a controller approximation, not an exact replay or a proven optimal early/extra-damage curve. Validate new yaw trajectories and damage trades in fresh, stance-matched recordings before tuning them.
 - The same Sugar Kane yellow-stance sequence has only two geometry samples per interval: approximately -15.8 degrees over 25.377–25.707s and +31.5 degrees over 25.707–25.938s. BK's full-force yellow sequence has seven samples per 300ms interval and approximately -190.6/+238.8 degrees of accumulated yaw. These different shapes are not interchangeable; sparse endpoints cannot establish exact active-blade timing. The initial controller used a conservative 18-degree offset envelope and a 240-degrees/second turn limit. Neither that fallback nor the newer bounded counter-yaw is a replay of BK's large spins.
 
+### Throw clearance and counterpressure controls
+
+Legal saber throws use level 2 for bot skills 1-3 and level 3 above skill 3;
+private-duel restrictions and the saber-throw disable bit still apply. Launch
+clearance now sweeps the thrown saber's hull from the cached hand position, not
+just point rays from the eye. A clear launch lane must settle for 150ms, and
+the final emitted aim is checked again before alt-attack reaches the engine.
+Normal movement continues while a wall prevents a throw.
+
+The engine steers toward the endpoint of a 4096-unit view ray, not an arbitrary
+point beside the opponent. Bypass and interception steering compensate for the saber's
+off-axis position; otherwise an apparently correct aim offset can drag it back
+through the opponent's front. After a pass, leading a moving target can
+deliberately require looking away from the target to send the saber back through
+them; movement remains in world space during that turn. Collision checks cover the next 100/400ms steering
+interval plus margin, while the intended bypass and cut-through waypoints must
+also be clear. A distant wall beyond that interval no longer causes an immediate
+recall. Guarded targets try the overhead lane first during the first 450ms, with
+checked horizontal fallbacks; exposed targets still get direct interception.
+Motion lead uses distance from the flying saber, bounded at 450ms.
+
+A brief loss of sight can preserve a steerable throw for at most 600ms, using
+the saber's own position and checked tangential turns rather than aiming at the
+unseen opponent's current position. Return state, lethal danger, drain-lock
+exposure, illegal powers and blocked flight still override holding. The existing
+travel protection also covers a saber heading back through the target after
+its first pass; a sticky "passed once" flag no longer cancels that cut-through.
+Bounded motor hold extensions (at most 250ms) are no longer discarded by the
+older 1400ms completion clamp; their completion cap is 1650ms. These are control
+budgets, not measurements of an optimal human throw duration.
+
+Saber-only bots no longer automatically retreat just because an opponent closes
+faster than 420 units/second. Their controller can counter point-blank pressure
+within 64 units without waiting for a long swing to finish. At 64-120 units,
+a late counter is considered 400-700ms after the accepted attack start (not
+the earlier windup), only while the opponent is closing. Both require predicted
+reach and respect engine readiness, blocked defense and recovery. These are
+bounded controller heuristics, not an optimal timing fitted from the recordings.
+A legal pressure counter can end an optional grounded retreat,
+and successful short chains are not abandoned merely because the opponent
+starts attacking. Recovery gaps also receive counter priority. Existing
+red/horizontal/poke/wiggle selections remain responsible for the actual attack;
+this is not an instruction to trade into every incoming swing.
+
+Idle grounded saber footing blends `bot_strafeduration` into its randomized
+side-switch timing when `bot_strafefrequency` is positive. Higher frequency also
+shortens that interval. Committed attack selection and airborne route inputs
+are not randomized by this adjustment.
+
+### Route reactions, lethal hazards and wall grabs
+
+FFA hunting, pursuit and fallback opponent waypoints exclude players in somebody
+else's private duel. A bot in a private duel still targets its own partner.
+
+An airborne recorded-route hop retains its planned world-space movement while
+turning toward a visible opponent. This includes flag carriers and flag attackers:
+they can use legal attacks or push/pull without converting an aim turn into a
+different jump direction. After landing, `bot_route_combathold` resumes its
+goal-priority rules. Carriers continue toward their goal unless recently hit by
+a hard attack, pushed/pulled, gripped or knocked down; attackers can also respond
+to ordinary damage or an encountered enemy carrier.
+
+Lethal-hazard push/pull selection is available without `bot_bully`.
+`bot_bully 1` lets it take priority over nonemergency queued attacks; it does not
+bypass force costs, power restrictions, target legality, actual aim arcs or
+emergency defense. Checked displacement behind the opponent favors push; a
+checked hazard between the opponent and bot favors pull. When both powers would
+only stun a grounded countering opponent, push is preferred. A hazard behind the
+bot also favors a preemptive pull before an enemy push, not a promised pull-over
+kill. A hazard is required,
+and a wall blocking the displacement invalidates the probe. These short probes
+are tactical estimates, not a guarantee of displacement or a kill.
+
+Wall-grab recovery searches for a reachable, safe ledge over the grabbed wall
+instead of requiring a floor beneath the rebound over a void. It checks the
+rebound arc, ceiling, ledge hull and lethal volumes, releases the wall latch,
+then holds legal force jump while steering back toward the ledge. Recovery has
+a height target and timeout; without a safe ledge, it does not launch a blind
+recovery jump and can fall back toward a recent safe position after releasing.
+
+### Release recheck: throws and saber-only pressure
+
+The following is a bounded historical cohort from capture revision `31c39eb21`,
+not a before/after test of the current changes. Download event parts 30-40,
+geometry part 8, sessions and participants from the release. With local aliases
+`events30.csv` through `events40.csv`, `geometry8.csv`, `sessions.csv` and
+`participants.csv`, reproduce every figure below with:
+
+```bash
+D=/path/to/downloaded-csvs
+python3 scripts/analysis/analyze_dueltrack_combat.py \
+  --events "$D"/events{30..40}.csv \
+  --geometry "$D"/geometry8.csv --sessions "$D"/sessions.csv \
+  --participants "$D"/participants.csv \
+  --summary-ids 697 698 699 701 704 711 724 712 715 716 \
+  --revision 31c39eb21 --trace-output "$D"/throw-trace.csv
+```
+
+The script prints the query definition before each result. It rejects ambiguous
+session/revision joins and malformed numbers; missing telemetry remains unknown.
+Actual-flight measurements exclude pre-launch frames even when the motor span
+started earlier. Geometry must be within 60ms of the command sample.
+
+**Saber-only pressure:** summaries 697, 698, 699, 701, 704, 711 and 724 have
+complete bot/human event capture: 110 paired accepted bot swings and 24 human
+`counter_success` events. Negative forward input occurred in 2,966/8,042 bot
+command samples (36.9%); only 11 of those also had attack pressed. This supports
+examining passive back-input behavior, but view-relative back input is not proof
+of a world-space retreat. Human attack input included 118 observed runs, 43
+lasting at least 500ms; median duration was 315ms and maximum 7,600ms.
+
+Of the 24 human successes, 19 matched an accepted bot swing or its next 1,000ms:
+10 occurred during the swing and nine after it ended. Only three were
+400-700ms after accepted start, all in summary 704 and all **after** the swing
+ended. They do not validate a universal late live-swing counter rule.
+Summary 724 contains closer live-swing examples: at 4,150ms, a counter landed
+150ms after accepted start at 49.4u; at 18,100ms, one landed after 25ms at
+43.7u. Both had self-defense/recovery state 0. Other live counters included
+already-recovering or broken-defense actors. These are damage-outcome times,
+not the time the human decided to press attack. The controller therefore
+preserves successful own chains, prioritizes recovery gaps and permits
+engine-ready point-blank aggression rather than fitting a fixed reaction delay.
+Exported swing-side labels do not establish red/fan/poke/wiggle animations.
+
+**Full-force throws:** summaries 712, 715 and 716 contain 47 observed human
+launches: 21 hits, 16 misses, nine unknown outcomes and one without an end.
+They also contain 36 bot launches: 10 hits, 25 misses and one without an end.
+Human capture retained only 31.3%, 56.1% and 55.7% of event rows respectively;
+these are retained-event counts, not complete match totals or comparable win
+rates. Their bot event captures are complete.
+
+| Actual-flight observation | Human hits | Human misses |
+|---|---:|---:|
+| Launches | 21 | 16 |
+| Sampled button windows with endpoints/gaps within 100ms | 18 | 10 |
+| Median longest observed alt-attack run | 700ms | 512.5ms |
+| Early pitch above horizontal by >5 degrees | 1/21 | 1/15 |
+| Saber sampled >24u behind opponent's facing plane | 3/21 | 2/14 |
+| Saber sampled >96u above opponent origin | 3/21 | 4/14 |
+
+Unknown measurements are excluded from each denominator. The successful human
+flight medians were 1,050ms, 825ms and 512.5ms by duel. A miss in 715 lasted
+2,425ms, with an observed 2,300ms alt-attack run: simply holding longer is not
+sufficient. In contrast, the 25 bot misses had **zero alt-attack samples out of
+678 known actual-flight samples**. This historical command pattern matters
+because the engine begins auto-return after 500ms without alt-attack, but does
+not prove the current build has the same defect. Bounded hold protection and
+final emitted input must remain consistent with steering, force and safety.
+
+Closer geometry alone also fails to classify throws: in 715, median closest
+recorded saber/opponent separation was 44.8u for hits and 38.3u for misses.
+Human rear/overhead observations above do not support making every throw higher
+or longer. Guarded-target bypasses remain conditional and hull-checked; exposed
+targets receive direct interception. Enemy defense was exported as 0 at all
+selected launches, and force reserves are not push/pull capability flags, so
+these rows cannot establish when humans deliberately bypassed an intact guard.
+
+No sampled human throw in these three full-force duels exceeded 150 degrees
+of view-to-opponent bearing error. The seven saber-only duels contain 121/3,551
+such geometry samples and 36 observed transitions back below 45 degrees, but
+those are not thrown-saber isolation episodes. This does not justify copying a
+fixed 180-degree spin routine; short lost-sight steering remains a checked,
+bounded fallback. Rejected launches, brush collisions and intentional isolation
+are not identifiable from these exports. New throw geometry and counter
+heuristics still require fresh live-match comparison.
+
 ## Learned Sequences
 
 At the end of every tracked duel, each participant's events are broken into short sequences of 2–4 tokens: the opponent's move (or `idle` when the participant acted on their own), the participant's response within 700ms, then up to two follow-ups within 1s. Tokens are `push`, `pull`, `grip`, `drain`, `throw`, `swing`, `kick`, `jump`, `knockdown`. Repeated holds of the same power within 400ms are merged; swings are not merged, so fan chains count as chains.
+
+This sequence learner is not live aim learning: it learns coarse action-token choices and their outcomes, not human view angles, mouse movement, or button-by-button combat playback. Version-14 motor evidence is a separate dataset and supplies bounded timing/rate preferences; it does not turn sequence tokens into an aim model.
+
+Uploading CSVs to a release does not train a running server or replace its
+compiled baseline. These files supply offline analysis; live preferences come
+from the server's tracking database and the compiled fallback. The throw
+steering and counterpressure corrections above are controller changes, not a
+new neural aim model or an automatic replay of the release recordings.
 
 - Context key: HP+armor and force buckets (four each) for both sides, range bucket (<128u, <384u, beyond) and stance at the start of the sequence, so similar (not identical) HP/AP/FP/range snapshots already share a key. When the exact key has fewer than `bot_learningminsamples` samples, contexts up to two bucket steps away in HP+armor/force (same range, stances and safety dimensions) are pooled with weight 0.5 per step (1 step 0.5, 2 steps 0.25). A coarse key drops health buckets but retains both force buckets, range, stances and safety dimensions.
 - Outcome: net damage (dealt − taken) over the 2s after the response, plus whether the participant won the duel.
