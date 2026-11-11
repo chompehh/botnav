@@ -340,6 +340,18 @@ BOOST_AUTO_TEST_CASE(motor_extraction_rejects_lost_or_legacy_commands_and_rolls_
 	BOOST_CHECK_EQUAL(loaded, 1);
 }
 
+BOOST_AUTO_TEST_CASE(motor_extraction_failure_keeps_the_sqlite_cause_after_rollback)
+{
+	/* An older database without the motor columns (never migrated) must report why. */
+	LearningDatabase database;
+	int loaded = 0;
+	database.Execute(g_botLearnMotorSchema);
+	BOOST_CHECK_EQUAL(G_ExtractLearnedMotor(database.db, -1, 1, 128, 7, &loaded), SQLITE_ERROR);
+	BOOST_CHECK_EQUAL(sqlite3_get_autocommit(database.db), 1);
+	BOOST_CHECK(std::string(G_ExtractLearnedMotorError()).find("no such column") != std::string::npos);
+	BOOST_CHECK_EQUAL(std::string(sqlite3_errmsg(database.db)), "not an error");
+}
+
 BOOST_AUTO_TEST_CASE(motor_extraction_advances_past_the_latest_batch)
 {
 	MotorDatabase database;
@@ -1190,6 +1202,37 @@ BOOST_AUTO_TEST_CASE( saber_idle_footing_refreshes_close_range_without_rewriting
 		BOOST_CHECK_EQUAL( command.right, 0 );
 		BOOST_CHECK_EQUAL( command.attack, 0 );
 	}
+}
+
+BOOST_AUTO_TEST_CASE( resource_outcome_counts_heals_and_force )
+{
+	botlearn_event_t events[3] = {};
+	events[0].time = 1000; events[0].selfHealthArmor = 100; events[0].enemyHealthArmor = 100;
+	events[0].selfForce = 100; events[0].enemyForce = 100;
+	events[1].time = 1500; events[1].actor = 1; events[1].damage = 20;
+	events[1].selfHealthArmor = 80; events[1].enemyHealthArmor = 100;
+	events[1].selfForce = 100; events[1].enemyForce = 100;
+	/* The opponent drained back 30 HP+AP and burned our force. */
+	events[2].time = 2500; events[2].selfHealthArmor = 80; events[2].enemyHealthArmor = 130;
+	events[2].selfForce = 40; events[2].enemyForce = 100;
+
+	/* Damage-only net is -20; heal correction -30, FP edge -60 * 0.11 = -6. */
+	BOOST_CHECK_EQUAL( BotLearn_ResourceOutcome( events, 3, 1000, 2000, -20, 1 ), -56 );
+	/* Saber-only: no FP term. */
+	BOOST_CHECK_EQUAL( BotLearn_ResourceOutcome( events, 3, 1000, 2000, -20, 0 ), -50 );
+	/* No snapshot after the start: unchanged. */
+	BOOST_CHECK_EQUAL( BotLearn_ResourceOutcome( events, 3, 2500, 2000, 7, 1 ), 7 );
+	/* Heal correction is capped. */
+	events[2].enemyHealthArmor = 300;
+	BOOST_CHECK_EQUAL( BotLearn_ResourceOutcome( events, 3, 1000, 2000, -20, 0 ),
+		-20 - BOTLEARN_HEAL_CORRECTION_CAP );
+
+	botlearn_sequence_t seq = {};
+	seq.startTime = 1000; seq.netDamage = -20;
+	events[2].enemyHealthArmor = 130;
+	BotLearn_ApplyResourceOutcome( &seq, 1, events, 3, 1 );
+	BOOST_CHECK_EQUAL( seq.netDamage, BotLearn_ResourceOutcome( events, 3, 1000,
+		BOTLEARN_OUTCOME_WINDOW_MS, -20, 1 ) );
 }
 
 BOOST_AUTO_TEST_SUITE_END()

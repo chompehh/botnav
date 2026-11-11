@@ -1155,8 +1155,9 @@ BOOST_AUTO_TEST_CASE( saber_tactic_counters_recovery_not_every_incoming_swing )
 	context.enemyAttacking = 1;
 	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_REPOSITION );
 
+	// Swinging at nothing just outside reach is whiff bait: hold position, don't walk in.
 	context.enemyDistance = 150.0f;
-	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_STEP_IN );
+	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_REPOSITION );
 
 	context.enemyDistance = 80.0f;
 	context.recentlyHurt = 1;
@@ -2028,7 +2029,13 @@ BOOST_AUTO_TEST_CASE( reaction_bonuses_follow_observed_counters )
 	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_GRIP, BOTLEARN_TOK_PUSH ) < 0 );
 	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_THROW, BOTLEARN_TOK_THROW ) > 0 );
 	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_THROW, BOTLEARN_TOK_JUMP ) < 0 );
-	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_PULL, BOTLEARN_TOK_DRAIN ) < 0 );
+	// Latest dueltracks: humans' drain after a pull is mildly positive, so no penalty.
+	BOOST_CHECK_EQUAL( NewBotAI_GetReactionBonus( BOTLEARN_TOK_PULL, BOTLEARN_TOK_DRAIN ), 0 );
+	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_THROW, BOTLEARN_TOK_GRIP ) < 0 );
+	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_DRAIN, BOTLEARN_TOK_GRIP ) < 0 );
+	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_PULL, BOTLEARN_TOK_GRIP ) < 0 );
+	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_PUSH, BOTLEARN_TOK_PUSH ) < 0 );
+	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_THROW, BOTLEARN_TOK_PULL ) > 0 );
 	BOOST_CHECK( NewBotAI_GetReactionBonus( BOTLEARN_TOK_PUSH, BOTLEARN_TOK_DRAIN ) > 0 );
 	BOOST_CHECK_EQUAL( NewBotAI_GetReactionBonus( BOTLEARN_TOK_IDLE, BOTLEARN_TOK_PULL ), 0 );
 	BOOST_CHECK( NewBotAI_GetForceEconomyBonus( BOTLEARN_TOK_PULL, 65 ) > 0 );
@@ -2696,9 +2703,14 @@ BOOST_AUTO_TEST_CASE( category_preferences_bound_learning_preserve_basics_and_di
 	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, 0, 0, 0, 0 ) > 0 );
 	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 20, 3000, 100, 0, 0 ),
 		NewBotAI_PreferenceBonus( 20, BOTLEARN_BONUS_CAP, 100, 0, 0 ) );
-	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, -3000, 100, 0, 0 ), -BOTLEARN_BONUS_CAP );
+	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, -3000, 0, 0, 0 ), -BOTLEARN_BONUS_CAP / 2 );
 	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, 3000, 100, 1, 0 ), BOTLEARN_BONUS_CAP );
-	BOOST_CHECK_EQUAL( NewBotAI_PreferenceBonus( 0, -3000, 100, -1, 1 ), -BOTLEARN_BONUS_CAP );
+	/* A high category bias shrinks learned dislike instead of amplifying it. */
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 0, -30, 100, 0, 0 ) > NewBotAI_PreferenceBonus( 0, -30, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 0, -30, 100, 0, 0 ) > -BOTLEARN_BONUS_CAP / 4 );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 0, -30, 100, 1, 0 ) >= NewBotAI_PreferenceBonus( 0, -30, 100, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, -30, 100, 1, 0 ) > 0 );
+	BOOST_CHECK( NewBotAI_PreferenceBonus( 20, -30, 0, 0, 0 ) < 0 );
 	BOOST_CHECK_EQUAL( NewBotAI_DiscretionaryWeight( 0, 100, 100, 1, 0 ), 0 );
 	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 0, -1, 0 ) > 0 );
 	BOOST_CHECK( NewBotAI_DiscretionaryWeight( 50, 0, 100, 0, 0 ) >
@@ -3338,15 +3350,20 @@ BOOST_AUTO_TEST_CASE( saber_pursuit_escape_stall )
 	BOOST_CHECK( !NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BASIC, 4, 1, 1, 2 ) );
 
 	// healthy bots keep the planner's back-pedal
-	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 50 ), NEWBOTAI_ESCAPE_BACKPEDAL );
+	// ...but a quarter of healthy escapes are A/D circle jumps
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 0 ), NEWBOTAI_ESCAPE_CIRCLE_JUMP );
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 0, 1, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 0, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
 	{
-		int counts[3] = { 0, 0, 0 };
+		int counts[4] = { 0, 0, 0, 0 };
 		int r;
 		for ( r = 0; r < 100; r++ )
 			counts[NewBotAI_ChooseEscapeStyle( 30, 1, 1, 0, r )]++;
 		BOOST_CHECK_LE( counts[NEWBOTAI_ESCAPE_BACKPEDAL], 30 );
 		BOOST_CHECK_GT( counts[NEWBOTAI_ESCAPE_DIAGONAL], 0 );
 		BOOST_CHECK_GT( counts[NEWBOTAI_ESCAPE_JUMP], 0 );
+		BOOST_CHECK_GT( counts[NEWBOTAI_ESCAPE_CIRCLE_JUMP], 0 );
 	}
 	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 30, 0, 0, 0, 7 ), NEWBOTAI_ESCAPE_BACKPEDAL );
 
@@ -3718,9 +3735,173 @@ BOOST_AUTO_TEST_CASE( saber_only_sweeps_and_low_health )
 	BOOST_CHECK( !NewBotAI_ShouldHoldOffSweeper( 2, 0, 150.0f ) );
 
 	/* Low health changes escape style only outside saber-only play. */
-	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( NewBotAI_EscapeHealthFor( 20, 1 ), 1, 1, 0, 10 ),
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( NewBotAI_EscapeHealthFor( 20, 1 ), 1, 1, 0, 60 ),
 		NEWBOTAI_ESCAPE_BACKPEDAL );
 	BOOST_CHECK_EQUAL( NewBotAI_EscapeHealthFor( 20, 0 ), 20 );
+}
+
+BOOST_AUTO_TEST_CASE( saber_footing_whiff_bait_and_reset_backoff )
+{
+	newbotai_saber_tactic_context_t context = tuning::MakeSaberDuelContext( 120.0f );
+	int ms;
+
+	context.enemyAttacking = 1;
+	BOOST_CHECK( NewBotAI_SaberIsWhiffBait( context ) );
+	context.enemyDistance = 80.0f;
+	BOOST_CHECK( !NewBotAI_SaberIsWhiffBait( context ) );
+	context.enemyDistance = 170.0f;
+	BOOST_CHECK( !NewBotAI_SaberIsWhiffBait( context ) );
+	context.enemyDistance = 120.0f;
+	context.enemyVulnerable = 1;
+	BOOST_CHECK( !NewBotAI_SaberIsWhiffBait( context ) );
+
+	// airborne keeps the old rule
+	BOOST_CHECK( NewBotAI_SaberResetBacksOff( 0, 0, 150.0f, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberResetBacksOff( 0, 1, 300.0f, 0, 0, 0 ) );
+	// grounded: only inside real reach or against a live swing
+	BOOST_CHECK( NewBotAI_SaberResetBacksOff( 1, 0, 90.0f, 0, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberResetBacksOff( 1, 0, 120.0f, 0, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberResetBacksOff( 1, 0, 120.0f, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberResetBacksOff( 1, 0, 150.0f, 1, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberResetBacksOff( 1, 0, 150.0f, 0, 0, 1 ) );
+
+	ms = NewBotAI_SaberIdleStrafeFlipMs( 10, 0 );
+	BOOST_CHECK_EQUAL( ms, 280 );
+	BOOST_CHECK_GT( NewBotAI_SaberIdleStrafeFlipMs( 1, 0 ), ms );
+	BOOST_CHECK_LT( NewBotAI_SaberIdleStrafeFlipMs( 10, 359 ), 640 );
+	BOOST_CHECK( NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 1, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 1, 1, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 800, 900, 1, 0, 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( weak_stances_never_select_vertical )
+{
+	int forward = 1, right = 0;
+	BOOST_CHECK( NewBotAI_SaberAvoidWeakVertical( 1, -1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( forward, 1 );
+	BOOST_CHECK_EQUAL( right, -1 );
+
+	forward = 1; right = 0;
+	BOOST_CHECK( !NewBotAI_SaberAvoidWeakVertical( 0, 1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, 0 );
+
+	forward = 0; right = 1;
+	BOOST_CHECK( !NewBotAI_SaberAvoidWeakVertical( 1, -1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, 1 );
+
+	{
+		newbotai_saber_tactic_context_t context = tuning::MakeSaberDuelContext( 60.0f );
+		context.enemyVulnerable = 1;
+		context.weakVerticalStance = 1;
+		BOOST_CHECK( NewBotAI_SaberSequenceAllowed( context, 0 ) );
+		BOOST_CHECK( NewBotAI_SaberSequenceAllowed( context, 4 ) );
+		BOOST_CHECK( !NewBotAI_SaberSequenceAllowed( context, 2 ) );
+		BOOST_CHECK( !NewBotAI_SaberSequenceAllowed( context, 8 ) );
+		context.weakVerticalStance = 0;
+		BOOST_CHECK( NewBotAI_SaberSequenceAllowed( context, 8 ) );
+	}
+
+	// Every family/stage the planner can choose stays off T2B for blue/yellow.
+	for (int family = 0; family <= NEWBOTAI_SABER_BURST; family++)
+	{
+		for (int stage = 0; stage < 6; stage++)
+		{
+			newbotai_saber_tactic_context_t context = tuning::MakeSaberDuelContext( 60.0f );
+			newbotai_saber_command_t command;
+			context.fanStance = 1;
+			context.weakVerticalStance = 1;
+			command = NewBotAI_PlanSaberCommand( context, NEWBOTAI_SABER_TACTIC_ATTACK,
+				(newbotai_saber_family_t)family, stage, 1, 1, 1, 1, 0 );
+			if (command.attack)
+				BOOST_CHECK( !(command.forward > 0 && command.right == 0) );
+		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE( circle_jump_escape )
+{
+	int f, r, j;
+
+	// A/D start: pure strafe first, the view only turns after the sideways start
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeYawOffset( 50, 1, 0, 0 ), 0.0f );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeYawOffset( 200, 1, 0, 0 ), -NEWBOTAI_CIRCLE_TURN_DEG );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeYawOffset( 200, -1, 0, 0 ), NEWBOTAI_CIRCLE_TURN_DEG );
+	// in the air the last hop turns back toward the opponent; a chain keeps the heading
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeYawOffset( 600, 1, 1, 0 ), -NEWBOTAI_CIRCLE_AIR_DEG );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeYawOffset( 600, 1, 1, 1 ), -NEWBOTAI_CIRCLE_TURN_DEG );
+
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 50, 0.0f, 1, -1, 1, 0, 100, &f, &r, &j ), 1 );
+	BOOST_CHECK( f == 0 && r == 1 && j == 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 200, 25.0f, 1, -1, -1, 0, 100, &f, &r, &j ), 1 );
+	BOOST_CHECK( f == 1 && r == -1 && j == 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 250, 45.0f, 1, -1, 1, 0, 100, &f, &r, &j ), 1 );
+	BOOST_CHECK( f == 1 && r == 1 && j == 1 );
+	// never managed to take off: give up
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 950, 10.0f, 1, -1, 1, 0, 100, &f, &r, &j ), 0 );
+	// in the air without a chain: air-strafe only, no W into the opponent
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 600, 30.0f, 0, 300, 1, 0, 150, &f, &r, &j ), 1 );
+	BOOST_CHECK( f == 0 && r == 1 && j == 0 );
+	// saber-only (no hops): landing ends the escape so the bot re-engages
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 900, 30.0f, 1, 400, 1, 0, 150, &f, &r, &j ), 0 );
+	// force duel chain hop while the enemy is still close
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 900, 70.0f, 1, 400, 1, 2, 150, &f, &r, &j ), 2 );
+	BOOST_CHECK( f == 1 && r == 1 && j == 1 );
+	// already far enough: stop chaining
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeInputs( 900, 70.0f, 1, 400, 1, 2, 300, &f, &r, &j ), 0 );
+
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeChainHops( 1, 100 ), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeChainHops( 0, 5 ), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_CircleEscapeChainHops( 0, 50 ), NEWBOTAI_CIRCLE_FORCE_CHAIN_HOPS );
+}
+
+BOOST_AUTO_TEST_CASE( saber_throw_range_antidrain_and_retreat )
+{
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowMaxRange( 0.0f, 3 ), NEWBOTAI_THROW_BASE_MAX_RANGE );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowMaxRange( 100.0f, 1 ), NEWBOTAI_THROW_BASE_MAX_RANGE );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowMaxRange( 100.0f, 3 ), NEWBOTAI_THROW_LONG_MAX_RANGE );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberThrowMaxRange( 50.0f, 2 ), 520.0f, 0.01f );
+
+	BOOST_CHECK_GT( NewBotAI_SaberThrowTargetMotionBonus( -50.0f, 40.0f ), 0 );
+	BOOST_CHECK_LT( NewBotAI_SaberThrowTargetMotionBonus( 30.0f, 120.0f ), 0 );
+	BOOST_CHECK_LT( NewBotAI_SaberThrowTargetMotionBonus( 0.0f, -120.0f ), 0 );
+
+	// dump only when the throw leaves < 10 FP, aggression leads and nothing is on top of us
+	BOOST_CHECK( NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowAntiDrainDump( 20, 40, 1, 1, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 60, 40, 1, 1, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 15, 40, 1, 1, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 1, 0.0f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 1, 0.3f, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 0, 1, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 0, 1, 0.3f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 0, 0.3f, 0, 0 ) );
+	// Already 20+ HP+AP ahead: keep the force (bots dumping while ahead netted -20.5).
+	BOOST_CHECK( !NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 1, 0.3f, 0, 20 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowAntiDrainDump( 40, 40, 1, 1, 1, 0.3f, 0, 19 ) );
+
+	// PTK with a lead from 40 FP: strongest at a 20-39 lead, small at 40+.
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 39, 30, 100 ), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 60, 19, 100 ), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 60, 30, 100 ), 75 );
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 40, 30, 100 ), 50 );
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 60, 50, 100 ), 30 );
+	BOOST_CHECK_EQUAL( NewBotAI_PTKAdvantageBonus( 60, 30, 0 ), 25 );
+	BOOST_CHECK( NewBotAI_PTKAdvantageBonus( 60, 30, 100 ) > NewBotAI_PTKAdvantageBonus( 60, 50, 100 ) );
+
+	BOOST_CHECK( NewBotAI_SaberThrowShouldRetreat( 1, 250.0f, 1, 0 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowShouldRetreat( 1, 120.0f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowShouldRetreat( 1, 250.0f, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowShouldRetreat( 1, 120.0f, 1, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowShouldRetreat( 0, 120.0f, 1, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowShouldRetreat( 1, 400.0f, 1, 0 ) );
+
+	// long throws are held longer before the saber comes home
+	BOOST_CHECK( NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		2000, 0, 1, 0, 1, 450.0f, 60, 0, 0, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowContextHoldCommitted( 3, NEWBOTAI_THROW_CUT_THROUGH,
+		2000, 0, 1, 0, 1, 300.0f, 60, 0, 0, 0, 0 ) );
 }
 
 BOOST_AUTO_TEST_SUITE_END()
@@ -4496,6 +4677,10 @@ BOOST_AUTO_TEST_CASE( trusted_human_routes_survive_a_single_setback )
 	BOOST_CHECK( !BotSFJ_CollisionEndsRoute(1, 1) );
 	BOOST_CHECK( !BotSFJ_CollisionEndsRoute(1, 2) );
 	BOOST_CHECK( BotSFJ_CollisionEndsRoute(1, BOT_SFJ_TRUSTED_COLLISIONS) );
+	BOOST_CHECK( BotSFJ_SideWallRunFailsHop(1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_SideWallRunFailsHop(1, 0, 0) );
+	BOOST_CHECK( !BotSFJ_SideWallRunFailsHop(1, 1, 1) );
+	BOOST_CHECK( !BotSFJ_SideWallRunFailsHop(0, 1, 0) );
 
 	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 0, 5000) );
 	BOOST_CHECK( !BotSFJ_ApproachBlockEnds(0, 1000, 1200) );

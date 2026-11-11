@@ -91,6 +91,14 @@ static const char g_botLearnMotorSchema[] =
 	"yaw_rate REAL, pitch_rate REAL, net_damage INTEGER, capture_version INTEGER, "
 	"PRIMARY KEY(session_id,duel_start,participant_key,span_id,kind))";
 
+/* ROLLBACK resets sqlite3_errmsg() to "not an error"; keep the real cause for the caller. */
+static char g_learnedMotorLastError[256];
+
+static inline const char *G_ExtractLearnedMotorError(void)
+{
+	return g_learnedMotorLastError;
+}
+
 static inline int G_ExtractLearnedMotor(sqlite3 *db, int limit,
 	int attackMask, int altAttackMask, int saberDamageMod, int *loaded)
 {
@@ -122,13 +130,21 @@ static inline int G_ExtractLearnedMotor(sqlite3 *db, int limit,
 	int rc, seen = 0;
 
 	*loaded = 0;
+	g_learnedMotorLastError[0] = '\0';
 	if (!sqlite3_get_autocommit(db))
+	{
+		sqlite3_snprintf(sizeof(g_learnedMotorLastError), g_learnedMotorLastError,
+			"a transaction is already open");
 		return SQLITE_BUSY;
+	}
 	memset(holds, 0, sizeof(holds));
 	memset(&previous, 0, sizeof(previous));
 	rc = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
 	if (rc != SQLITE_OK)
+	{
+		sqlite3_snprintf(sizeof(g_learnedMotorLastError), g_learnedMotorLastError, "%s", sqlite3_errmsg(db));
 		return rc;
+	}
 	rc = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
 	if (rc == SQLITE_OK)
 		rc = sqlite3_prepare_v2(db, insertSql, -1, &insert, NULL);
@@ -250,6 +266,7 @@ static inline int G_ExtractLearnedMotor(sqlite3 *db, int limit,
 		rc = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
 	if (rc != SQLITE_OK)
 	{
+		sqlite3_snprintf(sizeof(g_learnedMotorLastError), g_learnedMotorLastError, "%s", sqlite3_errmsg(db));
 		sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
 		*loaded = 0;
 	}

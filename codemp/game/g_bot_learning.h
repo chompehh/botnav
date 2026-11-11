@@ -608,6 +608,56 @@ static inline int BotLearn_ExtractSequences(const botlearn_event_t *events, int 
 	return produced;
 }
 
+/* Resource-aware outcome. Damage rows miss drain heals and force economy: in the latest
+ * dueltracks, snapshot HP+AP edges matched damage events in saber-only duels (corr 0.995)
+ * but not in force duels (corr 0.78, mean gap 11.7 = heals), and each FP of edge predicted
+ * 0.11 HP+AP of edge over the next 4s. outcome = damage net + heal correction (snapshot
+ * HP+AP edge minus damage net, clamped) + FP edge * 0.11 in force duels (mode 1).
+ * events must be the raw, uncollapsed, time-sorted stream (snapshots from the last row at
+ * or before each end of the window). */
+#define BOTLEARN_HEAL_CORRECTION_CAP 40
+#define BOTLEARN_FP_EDGE_WEIGHT_PCT 11
+
+static inline int BotLearn_SnapshotAt(const botlearn_event_t *events, int count, int time)
+{
+	int i, found = -1;
+
+	for (i = 0; i < count && events[i].time <= time; i++)
+		found = i;
+	return found;
+}
+
+static inline int BotLearn_ResourceOutcome(const botlearn_event_t *events, int count,
+	int fromTime, int windowMs, int damageNet, int forceMode)
+{
+	const int start = BotLearn_SnapshotAt(events, count, fromTime);
+	const int end = BotLearn_SnapshotAt(events, count, fromTime + windowMs);
+	int haEdge, heal, fpEdge;
+
+	if (start < 0 || end <= start)
+		return damageNet;
+	haEdge = (events[end].selfHealthArmor - events[start].selfHealthArmor) -
+		(events[end].enemyHealthArmor - events[start].enemyHealthArmor);
+	heal = haEdge - damageNet;
+	if (heal > BOTLEARN_HEAL_CORRECTION_CAP) heal = BOTLEARN_HEAL_CORRECTION_CAP;
+	if (heal < -BOTLEARN_HEAL_CORRECTION_CAP) heal = -BOTLEARN_HEAL_CORRECTION_CAP;
+	if (!forceMode)
+		return damageNet + heal;
+	fpEdge = (events[end].selfForce - events[start].selfForce) -
+		(events[end].enemyForce - events[start].enemyForce);
+	return damageNet + heal + fpEdge * BOTLEARN_FP_EDGE_WEIGHT_PCT / 100;
+}
+
+static inline void BotLearn_ApplyResourceOutcome(botlearn_sequence_t *sequences, int sequenceCount,
+	const botlearn_event_t *rawEvents, int rawCount, int forceMode)
+{
+	int i;
+
+	for (i = 0; i < sequenceCount; i++)
+		sequences[i].netDamage = BotLearn_ResourceOutcome(rawEvents, rawCount,
+			sequences[i].startTime, BOTLEARN_OUTCOME_WINDOW_MS, sequences[i].netDamage, forceMode);
+}
+
 /* Wins above what the recording source usually wins (its baseline win rate). Humans win
  * ~80% of tracked duels, so a raw win rate would inflate every human row. */
 static inline float BotLearn_ExcessWins(float samples, float wins, float baselineWinRate)

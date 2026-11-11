@@ -4,11 +4,17 @@
 #include <math.h>
 #include "g_bot_learning.h"
 
-/* Preference never supplies permission: callers first compute a legal base score. */
+/*
+ * Preference never supplies permission: callers first compute a legal base score.
+ * The category bias is the operator's word: it amplifies the prior and positive
+ * learned evidence, but shrinks negative learned evidence instead of amplifying
+ * it (bias 100 keeps 30% of the bias-0 penalty), so a high bias is never
+ * overruled by learned dislike. Bias 0 is unchanged (50% of each).
+ */
 static inline int NewBotAI_PreferenceBonus(int prior, int learned, float category, float aggression,
 	int defensive)
 {
-	float scale;
+	float scale, lean, negScale;
 	int learnedBonus;
 	if (category < 0.0f) category = 0.0f;
 	if (category > 100.0f) category = 100.0f;
@@ -16,9 +22,10 @@ static inline int NewBotAI_PreferenceBonus(int prior, int learned, float categor
 	if (aggression > 1.0f) aggression = 1.0f;
 	if (learned > BOTLEARN_BONUS_CAP) learned = BOTLEARN_BONUS_CAP;
 	if (learned < -BOTLEARN_BONUS_CAP) learned = -BOTLEARN_BONUS_CAP;
-	scale = (0.5f + category * 0.005f) *
-		(1.0f + (defensive ? -aggression : aggression) * 0.35f);
-	learnedBonus = (int)(learned * scale);
+	lean = defensive ? -aggression : aggression;
+	scale = (0.5f + category * 0.005f) * (1.0f + lean * 0.35f);
+	negScale = (0.5f - category * 0.0035f) * (1.0f - lean * 0.35f);
+	learnedBonus = (int)(learned * (learned >= 0 ? scale : negScale));
 	if (learnedBonus > BOTLEARN_BONUS_CAP) learnedBonus = BOTLEARN_BONUS_CAP;
 	if (learnedBonus < -BOTLEARN_BONUS_CAP) learnedBonus = -BOTLEARN_BONUS_CAP;
 	return (int)(prior * scale) + learnedBonus;
@@ -389,6 +396,7 @@ typedef struct
 	float closingSpeed;	// 2D radial speed, > 0 while closing on the enemy
 	float currentDistance;	// 2D range now (enemyDistance is the predicted peak range)
 	int fanStance;		// yellow/staff: favour R2L<->L2R, T2B only as a finisher
+	int weakVerticalStance;	// blue/yellow: never select T2B (see NewBotAI_SaberAvoidWeakVertical)
 } newbotai_saber_tactic_context_t;
 
 typedef struct
@@ -400,6 +408,8 @@ typedef struct
 	int pullWeight;
 	int enemyForce;
 } newbotai_drainlock_force_context_t;
+
+#define NEWBOTAI_PTK_ADVANTAGE_LEAD 20
 
 enum
 {
@@ -494,6 +504,35 @@ static inline int NewBotAI_SaberNeedsSafetyExit(newbotai_saber_tactic_context_t 
 
 // A landed hit is not permission to trade indefinitely (BK duel563); exits are
 // useful even above critical health when a continuation becomes exposed.
+#define NEWBOTAI_SABER_WHIFF_BAIT_RANGE 160.0f
+
+static inline int NewBotAI_SaberIsWhiffBait(newbotai_saber_tactic_context_t context)
+{
+	return context.enemyAttacking && !context.landedHit && !context.enemyVulnerable &&
+		context.enemyDistance > NEWBOTAI_SABER_SWING_START_MAX_RANGE &&
+		context.enemyDistance <= NEWBOTAI_SABER_WHIFF_BAIT_RANGE;
+}
+
+// Grounded exits used to back straight off (S + strafe) anywhere inside 176u: bots held S in
+// ~34% of close grounded samples and moved diagonally (mostly backward) 53% of the time,
+// while humans held S 2-3% and pure A/D 41-43%. Back off only inside real swing reach or
+// against a live swing; otherwise circle with pure A/D (backing also walks bots into walls).
+#define NEWBOTAI_SABER_RESET_BACKOFF_RANGE 96.0f
+#define NEWBOTAI_SABER_RESET_THREAT_BACKOFF_RANGE 140.0f
+
+static inline int NewBotAI_SaberResetBacksOff(int grounded, int escaping, float enemyDistance,
+	int enemyAttacking, int recentlyHurt, int safetyExit)
+{
+	if (!grounded)
+		return escaping || enemyDistance < 176.0f;
+	if (safetyExit)
+		return enemyDistance < 176.0f;
+	if (enemyDistance < NEWBOTAI_SABER_RESET_BACKOFF_RANGE)
+		return 1;
+	return (enemyAttacking || recentlyHurt) &&
+		enemyDistance < NEWBOTAI_SABER_RESET_THREAT_BACKOFF_RANGE;
+}
+
 static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	newbotai_saber_tactic_context_t context)
 {
@@ -518,6 +557,12 @@ static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	}
 
 	if (context.enemyAttacking && inSwingReach)
+		return NEWBOTAI_SABER_TACTIC_REPOSITION;
+
+	// Whiff bait: a swing thrown just outside our reach is the human lure to draw a W
+	// lunge into the follow-up (bots got hit within 1s after such a whiff 24% of the time vs
+	// 7-17% for humans). Circle at range until the swing ends, then punish the recovery.
+	if (NewBotAI_SaberIsWhiffBait(context))
 		return NEWBOTAI_SABER_TACTIC_REPOSITION;
 
 	// Exit unproductive pressure, not a still-safe sequence that is landing hits.
@@ -633,8 +678,18 @@ static inline int NewBotAI_SaberSequenceBoundary(int acceptedAttacks)
 
 static inline int NewBotAI_SaberSequenceAllowed(newbotai_saber_tactic_context_t context, int sequence)
 {
+	int stage;
 	if (sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT)
 		return 0;
+	/* Blue/yellow recipes never include T2B (attack 6); see NewBotAI_SaberAvoidWeakVertical. */
+	if (context.weakVerticalStance)
+	{
+		for (stage = 0; stage < BOTLEARN_SABER_SEQUENCE_LENGTH; stage++)
+		{
+			if (BotLearn_SaberSequenceAttack(sequence, stage) == 6)
+				return 0;
+		}
+	}
 	/* Experimental mixed recipes need an exposed opponent, not a defense override. */
 	return sequence < 2 || (!context.enemyAttacking && !context.recentlyHurt &&
 		(context.enemyRecovering || context.enemyVulnerable));
@@ -1024,6 +1079,20 @@ static inline int NewBotAI_SaberPreparationInputs(int attackIndex, int *forward,
 	return 1;
 }
 
+// Blue/yellow T2B is a weak attack. Latest dueltracks (ordinary attacks, swing_start
+// LS_A_TL2BR..LS_A_T2B joined to damage_dealt by saber_move): yellow T2B was 27.0% of bot
+// yellow swings (523/1936) vs 1.0% for void and 1.9% for other humans, and dealt 2.95
+// damage per swing vs 8.45 for the other bot yellow attacks; blue T2B was 46.5% of bot blue
+// swings vs 0-11.5% for humans. Red T2B stays: humans use it 22.6% at a 61% hit rate.
+// A forward-only selection becomes the forward diagonal (TL2BR/TR2BL) on the planned side.
+static inline int NewBotAI_SaberAvoidWeakVertical(int weakStance, int side, int *forward, int *right)
+{
+	if (!weakStance || *forward <= 0 || *right)
+		return 0;
+	*right = side < 0 ? -1 : 1;
+	return 1;
+}
+
 static inline void NewBotAI_SaberNoStrafeFallback(int suppressed, int preparing, int *forward, int *right)
 {
 	if (suppressed && !preparing && *right)
@@ -1128,7 +1197,9 @@ static inline newbotai_saber_command_t NewBotAI_PlanSaberCommand(
 			NEWBOTAI_SABER_TACTIC_ATTACK : NEWBOTAI_SABER_TACTIC_STEP_IN;
 	if (escapePhase < 0 || tactic == NEWBOTAI_SABER_TACTIC_RESET)
 	{
-		command.forward = (escapePhase < 0 && !grounded) || context.enemyDistance < 176.0f ? -1 : 0;
+		command.forward = NewBotAI_SaberResetBacksOff(grounded, escapePhase < 0,
+			context.enemyDistance, context.enemyAttacking, context.recentlyHurt,
+			NewBotAI_SaberNeedsSafetyExit(context)) ? -1 : 0;
 		command.right = side;
 		return command;
 	}
@@ -1160,6 +1231,8 @@ static inline newbotai_saber_command_t NewBotAI_PlanSaberCommand(
 			NewBotAI_SaberSelectionInputs(family, stage, side, &command.forward, &command.right);
 			NewBotAI_SaberFanStanceInputs(context.fanStance, family, stage, side,
 				&command.forward, &command.right);
+			NewBotAI_SaberAvoidWeakVertical(context.weakVerticalStance, side,
+				&command.forward, &command.right);
 		}
 	}
 	// Airborne footwork stays deliberate, but cannot accidentally start aerial specials.
@@ -1171,6 +1244,27 @@ static inline newbotai_saber_command_t NewBotAI_PlanSaberCommand(
 		command.right = side;
 	}
 	return command;
+}
+
+// Humans circle with alternating A/D (close grounded lateral segments: median 175-198ms,
+// p75 330ms); bots held one side until the next accepted swing, which made them easy to
+// read. Interval before switching sides while circling without a swing; lower skills switch
+// more slowly.
+static inline int NewBotAI_SaberIdleStrafeFlipMs(int skill, int roll)
+{
+	if (skill < 1)
+		skill = 1;
+	else if (skill > 10)
+		skill = 10;
+	if (roll < 0)
+		roll = -roll;
+	return 280 + (10 - skill) * 45 + roll % 360;
+}
+
+static inline int NewBotAI_SaberIdleStrafeFlipDue(int now, int flipTime, int grounded,
+	int attacking, int right)
+{
+	return grounded && !attacking && right && flipTime > 0 && now >= flipTime;
 }
 
 static inline void NewBotAI_SaberSuppressStrafe(newbotai_saber_command_t *command, int suppressed)
@@ -1370,6 +1464,34 @@ static inline int NewBotAI_AdjustPTKWeightForArmor(int weight, int enemyArmor, i
 	}
 
 	return weight + NEWBOTAI_PTK_ARMOR_STRONG_LEAD_BONUS;
+}
+
+// PTK while ahead with 40+ FP (force duels, latest dueltracks, exchange outcome = HP+AP
+// edge 6s after the pull; PTK = pull with a takeoff within 900ms):
+//   lead 20-39, FP>=40: humans PTK +19.3 (n=85, 16% kills) - their best option, ahead of
+//     throw +16.6 and drain +13.7; bots PTK +9.3 vs drain +20.0.
+//   lead 40+, FP>=40: drain wins for both (humans +13.0 vs PTK -1.3; bots +14.4 vs +8.1),
+//     so the bonus there is small and drain keeps its edge.
+//   FP band: humans PTK at 60+ FP +12.9 vs +2.1 at 40-59; bots +9.6 vs +7.2.
+// Additive and scaled by bot_ptk_aggressionbias (aggressionWeight 0-100).
+#define NEWBOTAI_PTK_ADVANTAGE_MIN_FORCE 40
+#define NEWBOTAI_PTK_ADVANTAGE_FULL_FORCE 60
+
+static inline int NewBotAI_PTKAdvantageBonus(int ourForce, int healthArmorLead, int aggressionWeight)
+{
+	int bonus;
+
+	if (ourForce < NEWBOTAI_PTK_ADVANTAGE_MIN_FORCE || healthArmorLead < NEWBOTAI_PTK_ADVANTAGE_LEAD)
+		return 0;
+	if (aggressionWeight < 0)
+		aggressionWeight = 0;
+	if (healthArmorLead < 2 * NEWBOTAI_PTK_ADVANTAGE_LEAD)
+		bonus = 25 + aggressionWeight / 2;
+	else
+		bonus = 10 + aggressionWeight / 5;
+	if (ourForce < NEWBOTAI_PTK_ADVANTAGE_FULL_FORCE)
+		bonus = bonus * 2 / 3;
+	return bonus;
 }
 
 static inline int NewBotAI_GetSaberThrowPTKBonus(
@@ -2239,8 +2361,18 @@ static inline int NewBotAI_GetComboGapMs(newbotai_combo_t combo, float skill, in
 
 // Reaction re-weighting from the stimulus -> response outcomes (net damage over 2s):
 // enemy drain -> pull (+20) / throw (+8..11), push -11; enemy grip -> throw/pull, late push -5;
-// enemy throw -> counter-throw (+14..27), push -17; enemy pull -> throw/pull back, drain -20;
+// enemy throw -> counter-throw (+14..27), push -17; enemy pull -> throw/pull back;
 // enemy push -> instant drain (+11).
+// Latest dueltracks, humans answering a bot action within 700ms (force duels, HP+AP edge 2s
+// after the answer; void / other humans):
+//   bot drain -> drain +15.3 / +3.8, grip -8.9 (other, n=31); bots answering drain with grip
+//     -7.8 (n=240).
+//   bot grip  -> drain +5.7 / +5.8, grip -11.8 (other, n=62).
+//   bot throw -> pull +18.9, drain +13.3 / +2.6, grip -17.9 (other, n=26), swing -8.6 / -7.7;
+//     bots answering a throw with grip -5.7 and -20.8 FP.
+//   bot pull  -> drain +3.7 / +1.6 (the old -20 penalty no longer holds), grip -6.4,
+//     swing -11.6 / -10.2.
+//   bot push  -> drain +11.6, throw +4.7 / +5.9, push -20.0 (other, n=20).
 static inline int NewBotAI_GetReactionBonus(int enemyAction, int response)
 {
 	switch (enemyAction)
@@ -2248,26 +2380,35 @@ static inline int NewBotAI_GetReactionBonus(int enemyAction, int response)
 	case BOTLEARN_TOK_DRAIN:
 		if (response == BOTLEARN_TOK_PULL) return 35;
 		if (response == BOTLEARN_TOK_THROW) return 20;
+		if (response == BOTLEARN_TOK_DRAIN) return 10;
 		if (response == BOTLEARN_TOK_PUSH) return -25;
+		if (response == BOTLEARN_TOK_GRIP) return -20;
 		return 0;
 	case BOTLEARN_TOK_GRIP:
 		if (response == BOTLEARN_TOK_THROW) return 30;
 		if (response == BOTLEARN_TOK_PULL) return 25;
+		if (response == BOTLEARN_TOK_DRAIN) return 10;
 		if (response == BOTLEARN_TOK_PUSH) return -20;
+		if (response == BOTLEARN_TOK_GRIP) return -20;
 		return 0;
 	case BOTLEARN_TOK_THROW:
 		if (response == BOTLEARN_TOK_THROW) return 30;
+		if (response == BOTLEARN_TOK_PULL) return 25;
+		if (response == BOTLEARN_TOK_DRAIN) return 15;
 		if (response == BOTLEARN_TOK_PUSH) return -20;
 		if (response == BOTLEARN_TOK_JUMP) return -20;
+		if (response == BOTLEARN_TOK_GRIP) return -25;
 		return 0;
 	case BOTLEARN_TOK_PULL:
 		if (response == BOTLEARN_TOK_THROW) return 25;
 		if (response == BOTLEARN_TOK_PULL) return 25;
-		if (response == BOTLEARN_TOK_DRAIN) return -20;
 		if (response == BOTLEARN_TOK_JUMP) return -20;
+		if (response == BOTLEARN_TOK_GRIP) return -15;
 		return 0;
 	case BOTLEARN_TOK_PUSH:
 		if (response == BOTLEARN_TOK_DRAIN) return 35;
+		if (response == BOTLEARN_TOK_THROW) return 10;
+		if (response == BOTLEARN_TOK_PUSH) return -20;
 		return 0;
 	default:
 		return 0;
@@ -2309,6 +2450,79 @@ static inline int NewBotAI_GetSaberThrowSituationBonus(int ourForce, float enemy
 	else if (ourForce > 75 && enemyDistance >= 130.0f && enemyDistance <= 260.0f && !enemyCommitted)
 		bonus -= 10;
 	return bonus;
+}
+
+// Longest range the bot will start a throw from. Human throws from >= 400u (held 1.4-2.4s)
+// still hit ~35% of the time; bots never threw past 400u. bot_saberthrowbias (0-100) opens
+// the long-range band up to 640u, so the cvar decides how willing bots are to throw from range.
+#define NEWBOTAI_THROW_BASE_MAX_RANGE 400.0f
+#define NEWBOTAI_THROW_LONG_MAX_RANGE 640.0f
+
+static inline float NewBotAI_SaberThrowMaxRange(float throwBiasPercent, int throwLevel)
+{
+	if (throwLevel < 2 || throwBiasPercent <= 0.0f)
+		return NEWBOTAI_THROW_BASE_MAX_RANGE;
+	if (throwBiasPercent > 100.0f)
+		throwBiasPercent = 100.0f;
+	return NEWBOTAI_THROW_BASE_MAX_RANGE +
+		(NEWBOTAI_THROW_LONG_MAX_RANGE - NEWBOTAI_THROW_BASE_MAX_RANGE) * throwBiasPercent * 0.01f;
+}
+
+// Throw-hit reads from the target's motion relative to us (radial > 0 = moving away).
+// Throws landed on targets closing in (radial -35..-60u/s, lateral ~45u/s): humans hit 63%
+// overall and 75% at 256-400u. Bot misses came on targets moving away (+23u/s) and strafing
+// hard sideways (~108u/s).
+static inline int NewBotAI_SaberThrowTargetMotionBonus(float radialSpeed, float lateralSpeed)
+{
+	int bonus = 0;
+
+	if (lateralSpeed < 0.0f)
+		lateralSpeed = -lateralSpeed;
+	if (radialSpeed <= -20.0f)
+		bonus += 10;
+	else if (radialSpeed >= 15.0f)
+		bonus -= 10;
+	if (lateralSpeed >= 90.0f)
+		bonus -= 10;
+	else if (lateralSpeed <= 60.0f)
+		bonus += 5;
+	return bonus;
+}
+
+// Anti-drain dump throw (Shades FF manual): spending our force on a throw only denies the
+// enemy's drain heal when it takes most of what we have, leaving < 10 FP to drain. Humans
+// threw at < 10 FP in 26-39% of throws vs ~3% for bots. Only an aggression-leaning bot
+// (aggression > defence) against a hurt, drain-capable enemy in drain range dumps its force
+// this way, and never while the enemy is an immediate threat (then the saber stays home).
+#define NEWBOTAI_ANTIDRAIN_DUMP_MIN_FORCE 20
+#define NEWBOTAI_ANTIDRAIN_DUMP_LEFTOVER 10
+
+// Not while we already lead by NEWBOTAI_PTK_ADVANTAGE_LEAD HP+AP: force duels, PTK/throw
+// from >=25 FP at an enemy under 100 HP+AP, bots that ended under 10 FP while ahead netted
+// -20.5 HP+AP over 6s (n=66) vs -3.7 keeping 25+ (n=443); humans +0.5 vs +1.4. Even or
+// behind, dumping and keeping were within a few points of each other.
+static inline int NewBotAI_SaberThrowAntiDrainDump(int ourForce, int throwBudget,
+	int enemyCanDrain, int enemyInDrainRange, int enemyHurt, float aggression,
+	int immediateThreat, int healthArmorLead)
+{
+	return healthArmorLead < NEWBOTAI_PTK_ADVANTAGE_LEAD &&
+		enemyCanDrain && enemyInDrainRange && enemyHurt && aggression > 0.0f &&
+		!immediateThreat && ourForce >= NEWBOTAI_ANTIDRAIN_DUMP_MIN_FORCE &&
+		ourForce - throwBudget < NEWBOTAI_ANTIDRAIN_DUMP_LEFTOVER;
+}
+
+// While our own saber is out, give ground diagonally (humans threw while backing off and
+// kept the distance) unless the enemy is down and we should press. A drain-capable enemy
+// inside drain range or anyone closing to melee range is what the retreat is for.
+#define NEWBOTAI_THROW_RETREAT_RANGE 320.0f
+#define NEWBOTAI_THROW_RETREAT_MELEE 160.0f
+
+static inline int NewBotAI_SaberThrowShouldRetreat(int saberInFlight, float range,
+	int enemyCanDrain, int enemyKnockedDown)
+{
+	if (!saberInFlight || enemyKnockedDown || range >= NEWBOTAI_THROW_RETREAT_RANGE)
+		return 0;
+	return enemyCanDrain || range < NEWBOTAI_THROW_RETREAT_MELEE;
 }
 
 // Conservative control budgets, not inferred human hold durations or spin counts.
@@ -2500,8 +2714,9 @@ static inline int NewBotAI_SaberThrowContextHoldCommitted(int throwLevel, newbot
 	{
 		if ((knockedDown || (range <= 180.0f && committed)) && completion < 1200)
 			completion = 1200;
+		/* Long human throws (>= 400u) were held 1.4-2.4s before the saber came home. */
 		if (!passed && heading)
-			completion = range > 240.0f ? 1700 : 1400;
+			completion = range > 400.0f ? 2200 : range > 240.0f ? 1700 : 1400;
 		if (knockedDown && completion < 1400)
 			completion = 1400;
 	}
@@ -2688,33 +2903,128 @@ typedef enum
 {
 	NEWBOTAI_ESCAPE_BACKPEDAL = 0,
 	NEWBOTAI_ESCAPE_DIAGONAL,
-	NEWBOTAI_ESCAPE_JUMP
+	NEWBOTAI_ESCAPE_JUMP,
+	NEWBOTAI_ESCAPE_CIRCLE_JUMP
 } newbotai_escape_style_t;
 
 #define NEWBOTAI_ESCAPE_LOW_HEALTH 40
+// Circle-jump escape share while still healthy (saber-only duels always count as healthy).
+#define NEWBOTAI_ESCAPE_HEALTHY_CIRCLE_PERCENT 25
 
+// Circle jumps (A/D start, turn away, jump) opened 150u+ within ~0.7s in 76% of human
+// takeoffs (n=21) vs 55% for straight backward jumps (n=314); bots that turned away before
+// jumping managed 85% (n=46) vs 46% backward (n=207). Query: dueltrack geometry takeoffs
+// (vz > 150 from ground, range < 200, moving away > 100u/s), style by facing and the lateral
+// speed 2 samples earlier, gain = range 15 samples later minus takeoff range.
 static inline newbotai_escape_style_t NewBotAI_ChooseEscapeStyle(int ourTotalHealth, int sideAllowed,
 	int jumpReady, int learnedHopBonus, int roll)
 {
-	int diagonal, jumpWeight, total;
+	int diagonal, jumpWeight, circle, total;
 
-	if (ourTotalHealth > NEWBOTAI_ESCAPE_LOW_HEALTH)
-		return NEWBOTAI_ESCAPE_BACKPEDAL;
+	if (roll < 0)
+		roll = -roll;
 	if (learnedHopBonus > BOTLEARN_BONUS_CAP)
 		learnedHopBonus = BOTLEARN_BONUS_CAP;
 	else if (learnedHopBonus < -BOTLEARN_BONUS_CAP)
 		learnedHopBonus = -BOTLEARN_BONUS_CAP;
+	if (ourTotalHealth > NEWBOTAI_ESCAPE_LOW_HEALTH)
+	{
+		if (sideAllowed && jumpReady &&
+			roll % 100 < NEWBOTAI_ESCAPE_HEALTHY_CIRCLE_PERCENT + learnedHopBonus / 3)
+			return NEWBOTAI_ESCAPE_CIRCLE_JUMP;
+		return NEWBOTAI_ESCAPE_BACKPEDAL;
+	}
 	diagonal = sideAllowed ? 45 : 0;
 	jumpWeight = jumpReady ? 30 + learnedHopBonus / 2 : 0;
 	if (jumpWeight < 0)
 		jumpWeight = 0;
-	total = 25 + diagonal + jumpWeight;
+	circle = sideAllowed ? jumpWeight : 0;
+	total = 25 + diagonal + jumpWeight + circle;
 	roll = roll % total;
 	if (roll < diagonal)
 		return NEWBOTAI_ESCAPE_DIAGONAL;
 	if (roll < diagonal + jumpWeight)
 		return NEWBOTAI_ESCAPE_JUMP;
+	if (roll < diagonal + jumpWeight + circle)
+		return NEWBOTAI_ESCAPE_CIRCLE_JUMP;
 	return NEWBOTAI_ESCAPE_BACKPEDAL;
+}
+
+// Circle-jump escape: strafe sideways (A or D) to build speed, turn the view toward that
+// side while holding W + the same strafe so the run arcs away from the opponent, then jump
+// at speed and turn back to face them in the air. Human A/D escape takeoffs (n=632, range
+// ~58u, 260u/s: 157 away + 108 lateral) faced 37 degrees off the opponent (p75 69) and
+// 22-32 degrees in the air; they chained another hop within 1.5s only ~10% of the time
+// in force duels (6% saber-only) and gained ~120u over 1s. Saber-only bots cannot heal,
+// so they only hop out of immediate danger and re-engage (no chain).
+#define NEWBOTAI_CIRCLE_SIDE_MS 120
+#define NEWBOTAI_CIRCLE_TURN_DEG 70.0f
+#define NEWBOTAI_CIRCLE_AIR_DEG 25.0f
+#define NEWBOTAI_CIRCLE_ARC_DEG 20.0f
+#define NEWBOTAI_CIRCLE_JUMP_DEG 40.0f
+#define NEWBOTAI_CIRCLE_TAKEOFF_MAX_MS 900
+#define NEWBOTAI_CIRCLE_AIR_MAX_MS 1400
+#define NEWBOTAI_CIRCLE_LAND_MS 200
+#define NEWBOTAI_CIRCLE_FORCE_CHAIN_HOPS 2
+#define NEWBOTAI_CIRCLE_CHAIN_RANGE 250
+
+// Yaw offset (degrees, added to the yaw toward the enemy) the view should turn to.
+// D (side > 0) moves toward yaw - 90, so the turn follows the strafe direction. A chained
+// retreat keeps the run heading; a final hop turns back toward the opponent in the air.
+static inline float NewBotAI_CircleEscapeYawOffset(int elapsedMs, int side, int jumped,
+	int chaining)
+{
+	const float sign = side < 0 ? 1.0f : -1.0f;
+
+	if (elapsedMs < NEWBOTAI_CIRCLE_SIDE_MS)
+		return 0.0f;
+	if (jumped && !chaining)
+		return sign * NEWBOTAI_CIRCLE_AIR_DEG;
+	return sign * NEWBOTAI_CIRCLE_TURN_DEG;
+}
+
+// Inputs for the circle jump. turnedDeg is how far the view has actually turned toward the
+// strafe side (0 = facing the enemy); jumpedMs is the time since the latest takeoff (-1
+// before the first jump). Returns 0 when the escape is over, 1 while running, 2 when this
+// frame starts another chained hop (the caller spends one of chainHopsLeft).
+static inline int NewBotAI_CircleEscapeInputs(int elapsedMs, float turnedDeg, int grounded,
+	int jumpedMs, int side, int chainHopsLeft, int enemyRange, int *forward, int *right, int *jump)
+{
+	const int chaining = chainHopsLeft > 0 && enemyRange < NEWBOTAI_CIRCLE_CHAIN_RANGE;
+
+	side = side < 0 ? -1 : 1;
+	*forward = *right = *jump = 0;
+	if (jumpedMs < 0)
+	{
+		if (elapsedMs < 0 || elapsedMs >= NEWBOTAI_CIRCLE_TAKEOFF_MAX_MS || !grounded)
+			return 0;
+		*right = side;
+		if (turnedDeg >= NEWBOTAI_CIRCLE_ARC_DEG)
+			*forward = 1;
+		*jump = turnedDeg >= NEWBOTAI_CIRCLE_JUMP_DEG;
+		return 1;
+	}
+	if (jumpedMs >= NEWBOTAI_CIRCLE_AIR_MAX_MS)
+		return 0;
+	/* Facing back toward the opponent, W would carry us into them: air-strafe only. */
+	*forward = chaining;
+	*right = side;
+	if (grounded && jumpedMs >= NEWBOTAI_CIRCLE_LAND_MS)
+	{
+		if (!chaining)
+		{
+			*forward = *right = 0;
+			return 0;
+		}
+		*jump = 1;
+		return 2;
+	}
+	return 1;
+}
+
+static inline int NewBotAI_CircleEscapeChainHops(int saberOnlyDuel, int ourForce)
+{
+	return !saberOnlyDuel && ourForce >= 10 ? NEWBOTAI_CIRCLE_FORCE_CHAIN_HOPS : 0;
 }
 
 // Planting: bots took 17.4% of hits standing still (humans 8.1%). Break a stall that

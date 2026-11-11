@@ -450,6 +450,11 @@ typedef struct bot_state_s
 	int					saberTacticEnemyNum; // entity number the cached enemy health belongs to
 	int					saberTacticLastHitTime;
 	int					saberTacticStrafeDir; // next horizontal input, derived from the accepted swing
+	int					saberStrafeFlipTime; // next A/D switch while circling without swinging
+	int					circleEscapeStart; // circle-jump escape start time, 0 when idle
+	int					circleEscapeSide; // -1 = A, 1 = D
+	int					circleEscapeJumpTime; // takeoff time of the circle jump, 0 before
+	int					circleEscapeHopsLeft; // chained retreat hops still allowed (force duels)
 	int					saberTechniqueFamily; // bot_fanbias weights sweeps and controlled alternatives
 	int					saberTechniqueFamilyUntil; // accepted-boundary stamp for family selection
 	int					saberTechniqueAcceptedTime;
