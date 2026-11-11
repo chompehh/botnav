@@ -61,7 +61,7 @@ Key entry points: `StandardBotAI` (per-frame), `CombatBotAI`, `NewBotAI_ReactToB
 
 ## Duel-track data
 
-- `exportDuelTrack` writes `dueltrack_*.csv` files, split into `_partN` files at 24 MB.
+- `exportDuelTrack` writes `dueltrack_*.csv` files, split into `_partN` files at `bot_trackexport_partmb` (default 2000 MB, under GitHub's 2 GiB release-asset limit).
   `dueltrack_learned.csv` / `dueltrack_learned_evidence.csv` hold the aggregated learning.
   Only rows with `(ctx_key & 0x60000000) == 0x60000000` are compatible with the current context
   format. Mode is `(ctx_key >> 16) & 3` (0 saber-only, 1 full force).

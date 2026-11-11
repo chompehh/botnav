@@ -397,6 +397,8 @@ typedef struct
 	float currentDistance;	// 2D range now (enemyDistance is the predicted peak range)
 	int fanStance;		// yellow/staff: favour R2L<->L2R, T2B only as a finisher
 	int weakVerticalStance;	// blue/yellow: never select T2B (see NewBotAI_SaberAvoidWeakVertical)
+	int enemySwingTimingKnown;	// msSinceEnemySwingStart is valid (zero-initialized: unknown)
+	int msSinceEnemySwingStart;
 } newbotai_saber_tactic_context_t;
 
 typedef struct
@@ -1093,6 +1095,22 @@ static inline int NewBotAI_SaberAvoidWeakVertical(int weakStance, int side, int 
 	return 1;
 }
 
+// Final usercmd guard for blue/yellow when a new attack can be selected. The engine
+// (PM_SaberAttackForMovement) also picks T2B for S-only presses without a backstab and
+// for presses with no movement from LS_READY, so every such press gets the planned side:
+// W+side is a forward diagonal, S+side a lower diagonal, side alone a horizontal.
+// Returns 1 when the movement was changed.
+static inline int NewBotAI_SaberWeakVerticalGuard(int weakStance, int enemyBehind, int side,
+	int *forward, int *right)
+{
+	if (!weakStance || *right)
+		return 0;
+	if (*forward < 0 && enemyBehind)
+		return 0;	// keep the backstab
+	*right = side < 0 ? -1 : 1;
+	return 1;
+}
+
 static inline void NewBotAI_SaberNoStrafeFallback(int suppressed, int preparing, int *forward, int *right)
 {
 	if (suppressed && !preparing && *right)
@@ -1508,6 +1526,47 @@ static inline int NewBotAI_GetSaberThrowPTKBonus(
 	}
 
 	return enemySaberReturning ? 20 : 10;
+}
+
+// Counter-PTK (force duels, release dueltracks, pull -> puller takeoff): humans pulled the
+// airborne puller back 800-1000ms after the enemy pull and knocked them 31% of the time (self
+// knocked 8%); bots countered at 400-800ms for 13-16% (self 12-15%). Human counters
+// 500-1000ms after the puller's jump reached 35-40%.
+#define NEWBOTAI_COUNTER_PTK_MIN_MS 750
+#define NEWBOTAI_COUNTER_PTK_MAX_MS 1100
+#define NEWBOTAI_COUNTER_PTK_RANGE 400.0f
+
+static inline int NewBotAI_CounterPTKPullReady(int msSinceEnemyPull, int enemyAirborne,
+	float range, int alreadyCountered)
+{
+	if (alreadyCountered || !enemyAirborne || range > NEWBOTAI_COUNTER_PTK_RANGE)
+		return 0;
+	return msSinceEnemyPull >= NEWBOTAI_COUNTER_PTK_MIN_MS &&
+		msSinceEnemyPull <= NEWBOTAI_COUNTER_PTK_MAX_MS;
+}
+
+// After our flipkick lands with a force lead of 20+ (human net HP+AP over the next exchange):
+// an immediate pull (median -33..132ms from landing) +15..+20, straight back +13.5, forward
+// +8.8; draining first was the worst option (bots -5). Back off straight and pull, no drain.
+#define NEWBOTAI_POSTKICK_FORCE_LEAD 20
+#define NEWBOTAI_POSTKICK_LANDING_WINDOW_MS 1500
+#define NEWBOTAI_POSTKICK_ESCAPE_MS 450
+#define NEWBOTAI_POSTKICK_PULL_WINDOW_MS 250
+#define NEWBOTAI_POSTKICK_RANGE 300.0f
+
+static inline int NewBotAI_PostKickEscapeApplies(int msSinceKickAttempt, int forceLead, float range)
+{
+	if (msSinceKickAttempt < 0 || msSinceKickAttempt > NEWBOTAI_POSTKICK_LANDING_WINDOW_MS)
+		return 0;
+	return forceLead >= NEWBOTAI_POSTKICK_FORCE_LEAD && range <= NEWBOTAI_POSTKICK_RANGE;
+}
+
+// Victim's first answer to an enemy saber throw (force duels): bots drained 45% of the time
+// for a net -19 HP+AP; humans pulled the saber-less thrower (-5) or counter-threw (-0.9).
+// Pull first whenever pull is usable; drain stays the fallback.
+static inline int NewBotAI_PreferPullVsSaberThrow(int pullUsable, int enemyPullable, float range)
+{
+	return pullUsable && enemyPullable && range <= NEWBOTAI_COUNTER_PTK_RANGE;
 }
 
 static inline int NewBotAI_GetPulledTowardEnemyPTKBonus(
@@ -2181,6 +2240,54 @@ static inline float NewBotAI_SaberYawOffsetScaled(newbotai_saber_yaw_phase_t pha
 	return actualDirection * (start - 2.0f * amplitude * progress);
 }
 
+// Single-saber horizontal yaw (release dueltracks, attack_sample target_yaw_error = own yaw
+// minus enemy direction, median by attack_elapsed_ms 0/66/132/198/264): human yellow R2L
+// +2/+11/+17/+20/+15 and L2R +3/-3/-2/+2/-3 (red R2L -3/+2/+4/+6, L2R about -4..0), i.e.
+// start on target and turn with the blade on R2L only. Bots began R2L at +27 (L2R -9..-19,
+// red -19) and turned back against the blade: lagged aim from strafing into the swing.
+// Returns the target offset from the true enemy direction; staffs/duals keep their sweep.
+#define NEWBOTAI_SABER_HUMAN_YAW_POINTS 5
+#define NEWBOTAI_SABER_HUMAN_YAW_STEP_MS 66
+#define NEWBOTAI_SABER_LAG_CORRECTION_MAX 30.0f
+
+static inline int NewBotAI_SaberUsesHumanYawProfile(int stance)
+{
+	return stance >= 1 && stance <= 3; // SS_FAST, SS_MEDIUM, SS_STRONG
+}
+
+static inline float NewBotAI_SaberHumanYawProfile(int actualDirection, int stance, int elapsedMs)
+{
+	static const float r2l[NEWBOTAI_SABER_HUMAN_YAW_POINTS] = { 0.0f, 10.0f, 17.0f, 20.0f, 15.0f };
+	static const float l2r[NEWBOTAI_SABER_HUMAN_YAW_POINTS] = { 0.0f, -2.0f, -3.0f, -2.0f, 0.0f };
+	const float *curve;
+	float scale, t, a, b;
+	int i;
+
+	if (!actualDirection || !NewBotAI_SaberUsesHumanYawProfile(stance))
+		return 0.0f;
+	curve = actualDirection < 0 ? r2l : l2r;
+	scale = (stance == 3 && actualDirection < 0) ? 0.3f : 1.0f;
+	if (elapsedMs <= 0)
+		return curve[0] * scale;
+	i = elapsedMs / NEWBOTAI_SABER_HUMAN_YAW_STEP_MS;
+	if (i >= NEWBOTAI_SABER_HUMAN_YAW_POINTS - 1)
+		return curve[NEWBOTAI_SABER_HUMAN_YAW_POINTS - 1] * scale;
+	t = (float)(elapsedMs - i * NEWBOTAI_SABER_HUMAN_YAW_STEP_MS) / NEWBOTAI_SABER_HUMAN_YAW_STEP_MS;
+	a = curve[i];
+	b = curve[i + 1];
+	return (a + (b - a) * t) * scale;
+}
+
+// Offset to add to the (lagging) view yaw so the final yaw lands on enemyYaw + profileOffset.
+// lagError is view yaw minus the enemy direction (degrees, -180..180).
+static inline float NewBotAI_SaberLagCorrectedOffset(float profileOffset, float lagError)
+{
+	float correction = -lagError;
+	if (correction > NEWBOTAI_SABER_LAG_CORRECTION_MAX) correction = NEWBOTAI_SABER_LAG_CORRECTION_MAX;
+	if (correction < -NEWBOTAI_SABER_LAG_CORRECTION_MAX) correction = -NEWBOTAI_SABER_LAG_CORRECTION_MAX;
+	return profileOffset + correction;
+}
+
 static inline float NewBotAI_SaberStepYawOffsetScaled(float current, float target, int elapsedMs,
 	float amplitude, float rate)
 {
@@ -2264,10 +2371,41 @@ static inline newbotai_swing_footing_t NewBotAI_GetSwingFooting(float currentRan
 // Fresh swing starts (ATTACK/STAND_SWING/STEP_IN) follow the human start window when the
 // closing speed is known: inside 70u, or 70-100u while closing >150u/s, never beyond 130u.
 // Chains, counters and deliberate mistakes keep their own range limits.
+// Saber-only dueltracks (release data, own swing start minus the opponent's previous swing
+// start, 48-96u): bots starting 0-350ms after the enemy swing hit 16-35% but were hurt
+// 32-50%; starting 400-700ms in hit 19-24% and were hurt 3-7%. Inside 48u the trade still
+// happens anyway, so only fresh starts from beyond that range wait for the punish window.
+#define NEWBOTAI_SABER_ENEMY_SWING_HOLD_MS 350
+#define NEWBOTAI_SABER_ENEMY_SWING_HOLD_MIN_RANGE 48.0f
+
+static inline int NewBotAI_SaberEnemySwingTimingBlocksStart(int msSinceEnemySwingStart, float range)
+{
+	if (msSinceEnemySwingStart < 0 || msSinceEnemySwingStart >= NEWBOTAI_SABER_ENEMY_SWING_HOLD_MS)
+		return 0;
+	return range > NEWBOTAI_SABER_ENEMY_SWING_HOLD_MIN_RANGE ? 1 : 0;
+}
+
+// Post-swing recovery (saber-only release data, footing 250ms after the swing ended, hurt
+// within 900ms): with the opponent swinging, straight back was hurt 23.7%, back-diagonal
+// 10.5%, sideways 4%; with the opponent idle, a forward-diagonal re-entry landed the next hit
+// 34% (hurt 6.5%). Recover sideways/back-diagonal from a swing, re-enter diagonally otherwise.
+static inline int NewBotAI_SaberRecoveryForward(int enemySwinging)
+{
+	return enemySwinging ? -1 : 1;
+}
+
 static inline int NewBotAI_SaberFreshSwingWindowAllows(newbotai_saber_tactic_context_t context,
 	newbotai_saber_tactic_t tactic)
 {
-	if (!context.closingKnown || context.enemyVulnerable)
+	if (context.enemyVulnerable)
+		return 1;
+	if (context.enemySwingTimingKnown &&
+		(tactic == NEWBOTAI_SABER_TACTIC_ATTACK || tactic == NEWBOTAI_SABER_TACTIC_STAND_SWING ||
+		 tactic == NEWBOTAI_SABER_TACTIC_STEP_IN) &&
+		NewBotAI_SaberEnemySwingTimingBlocksStart(context.msSinceEnemySwingStart,
+			context.closingKnown ? context.currentDistance : context.enemyDistance))
+		return 0;
+	if (!context.closingKnown)
 		return 1;
 	switch (tactic)
 	{
@@ -2909,7 +3047,7 @@ typedef enum
 
 #define NEWBOTAI_ESCAPE_LOW_HEALTH 40
 // Circle-jump escape share while still healthy (saber-only duels always count as healthy).
-#define NEWBOTAI_ESCAPE_HEALTHY_CIRCLE_PERCENT 25
+#define NEWBOTAI_ESCAPE_HEALTHY_CIRCLE_PERCENT 35
 
 // Circle jumps (A/D start, turn away, jump) opened 150u+ within ~0.7s in 76% of human
 // takeoffs (n=21) vs 55% for straight backward jumps (n=314); bots that turned away before
@@ -2932,7 +3070,11 @@ static inline newbotai_escape_style_t NewBotAI_ChooseEscapeStyle(int ourTotalHea
 		if (sideAllowed && jumpReady &&
 			roll % 100 < NEWBOTAI_ESCAPE_HEALTHY_CIRCLE_PERCENT + learnedHopBonus / 3)
 			return NEWBOTAI_ESCAPE_CIRCLE_JUMP;
-		return NEWBOTAI_ESCAPE_BACKPEDAL;
+		// Saber-only dueltracks, retreat 250ms after a swing ends (geometry radial/lateral
+		// speed): with the opponent swinging, straight back was hit within 900ms 23.7% of
+		// the time (n=393) vs 10.5% back-diagonal (n=124) and 4% sideways; without, 7.7% vs
+		// 5.5%. Straight back-pedal is only kept when no side step is allowed.
+		return sideAllowed ? NEWBOTAI_ESCAPE_DIAGONAL : NEWBOTAI_ESCAPE_BACKPEDAL;
 	}
 	diagonal = sideAllowed ? 45 : 0;
 	jumpWeight = jumpReady ? 30 + learnedHopBonus / 2 : 0;

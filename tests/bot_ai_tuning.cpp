@@ -1116,7 +1116,7 @@ BOOST_AUTO_TEST_CASE( saber_tactic_swing_starts_are_limited_to_reach )
 
 BOOST_AUTO_TEST_CASE( saber_tactic_continues_safe_hits_but_bounds_exposed_pressure )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	context.selfAttacking = 1;
 	context.landedHit = 1;
 	context.chainLength = 1;
@@ -1139,7 +1139,7 @@ BOOST_AUTO_TEST_CASE( saber_tactic_continues_safe_hits_but_bounds_exposed_pressu
 
 BOOST_AUTO_TEST_CASE( saber_tactic_counters_recovery_not_every_incoming_swing )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	context.enemyVulnerable = 1;
 	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_COUNTER );
 
@@ -1201,7 +1201,7 @@ BOOST_AUTO_TEST_CASE( saber_choice_grade_tiers_scale_with_skill_and_bias )
 
 BOOST_AUTO_TEST_CASE( saber_choice_grades_map_to_human_outcomes )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 
 	context.chainLength = 3;
 	BOOST_CHECK_EQUAL( NewBotAI_ApplySaberChoiceGrade( context, NEWBOTAI_SABER_TACTIC_CHAIN, NEWBOTAI_SABER_GRADE_GOOD ),
@@ -1262,7 +1262,7 @@ BOOST_AUTO_TEST_CASE( fan_footwork_follows_human_spacing )
 
 BOOST_AUTO_TEST_CASE( human_technique_bias_weights_families_not_primary_attack_permission )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	int simple = 0, complex = 0;
 	for ( int roll = 1; roll <= 100; roll++ )
 	{
@@ -1300,7 +1300,7 @@ BOOST_AUTO_TEST_CASE( human_saber_sequence_uses_engine_accepted_attacks_only )
 	BOOST_CHECK( !NewBotAI_SaberBurstComplete( NEWBOTAI_SABER_BURST, 12, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberBurstComplete( NEWBOTAI_SABER_HORIZONTAL, 12, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberBurstComplete( NEWBOTAI_SABER_FINISH, 12, 1 ) );
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	const newbotai_saber_command_t first = NewBotAI_PlanSaberCommand( context,
 		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_DIAGONAL_VERTICAL, 0, -1, 1, 1, 1, 0 );
 	const newbotai_saber_command_t second = NewBotAI_PlanSaberCommand( context,
@@ -1323,7 +1323,7 @@ BOOST_AUTO_TEST_CASE( human_saber_sequence_uses_engine_accepted_attacks_only )
 
 BOOST_AUTO_TEST_CASE( experimental_recipes_preserve_finish_counter_burst_and_zero_bias )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	BOOST_CHECK( NewBotAI_SaberFamilyMaySelectRecipe( NEWBOTAI_SABER_HORIZONTAL ) );
 	BOOST_CHECK( NewBotAI_SaberFamilyMaySelectRecipe( NEWBOTAI_SABER_DIAGONAL_VERTICAL ) );
 	for (auto family : { NEWBOTAI_SABER_BASIC, NEWBOTAI_SABER_FINISH,
@@ -1362,7 +1362,7 @@ BOOST_AUTO_TEST_CASE( experimental_recipes_preserve_finish_counter_burst_and_zer
 
 BOOST_AUTO_TEST_CASE( human_saber_mix_is_deliberate_and_horizontal_sweeps_remain_primary )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	int horizontal = 0, mixed = 0;
 	for ( int roll = 1; roll <= 100; roll++ )
 		BOOST_CHECK_EQUAL( NewBotAI_SelectSaberFamily( context, 100, roll ), NEWBOTAI_SABER_HORIZONTAL );
@@ -1414,7 +1414,7 @@ BOOST_AUTO_TEST_CASE( human_saber_mix_is_deliberate_and_horizontal_sweeps_remain
 
 BOOST_AUTO_TEST_CASE( slow_red_start_and_transition_keep_lateral_selection_until_active )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	context.selfAttacking = 1; // Also true during engine starts and transitions.
 	for ( int remaining : { 1200, 800, 300, 99, 0 } )
 	{
@@ -1524,7 +1524,7 @@ BOOST_AUTO_TEST_CASE( saber_command_ownership_replaces_conflicts_and_preserves_f
 	BOOST_CHECK( !NewBotAI_SaberCanOwnInputs( 1, 1, 1, 0, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberCanOwnInputs( 1, 1, 0, 1, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberCanOwnInputs( 1, 1, 0, 0, 1 ) );
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	newbotai_saber_command_t command = NewBotAI_PlanSaberCommand( context,
 		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_HORIZONTAL, 0, 1, 1, 1, 1, 0 );
 	NewBotAI_SaberSuppressStrafe( &command, 1 );
@@ -1710,7 +1710,7 @@ BOOST_AUTO_TEST_CASE( saber_final_live_movement_veto_runs_after_pressure_refresh
 
 BOOST_AUTO_TEST_CASE( saber_airborne_footwork_and_bounded_escape_have_deliberate_reentry )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	const newbotai_saber_command_t airborne = NewBotAI_PlanSaberCommand( context,
 		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_HORIZONTAL, 0, -1, 0, 1, 1, 0 );
 	BOOST_CHECK_EQUAL( airborne.attack, 0 );
@@ -1793,7 +1793,7 @@ BOOST_AUTO_TEST_CASE( saber_grades_do_not_freeze_approach_or_override_necessary_
 
 BOOST_AUTO_TEST_CASE( general_saber_combat_shares_policy_and_respects_counter_reaction )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	context.saberOnlyDuel = 0;
 	context.saberCombat = 1;
 	BOOST_CHECK_EQUAL( NewBotAI_SelectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_ATTACK );
@@ -1826,7 +1826,7 @@ BOOST_AUTO_TEST_CASE( saber_primary_legality_accepts_partial_staff_dual_holster 
 	BOOST_CHECK( NewBotAI_SaberPrimaryBladeAvailable( 0 ) );
 	BOOST_CHECK( NewBotAI_SaberPrimaryBladeAvailable( 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberPrimaryBladeAvailable( 2 ) );
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	const newbotai_saber_command_t partial = NewBotAI_PlanSaberCommand( context,
 		NEWBOTAI_SABER_TACTIC_ATTACK, NEWBOTAI_SABER_BASIC, 0, 1, 1, 1,
 		NewBotAI_SaberPrimaryBladeAvailable( 1 ), 0 );
@@ -2324,7 +2324,7 @@ BOOST_AUTO_TEST_CASE( saber_active_wiggle_obeys_delay_axes_and_caps )
 
 BOOST_AUTO_TEST_CASE( saber_catalog_has_twelve_distinct_ordinary_grounded_recipes )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	int signatures[BOTLEARN_SABER_SEQUENCE_COUNT] = {};
 	for (int sequence = 0; sequence < BOTLEARN_SABER_SEQUENCE_COUNT; ++sequence)
 	{
@@ -2994,7 +2994,7 @@ BOOST_AUTO_TEST_CASE( nav_progress_stall )
 
 BOOST_AUTO_TEST_CASE( saber_good_grade_keeps_a_chain_that_is_landing_hits )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 
 	context.chainLength = 3;
 	context.landedHit = 1;
@@ -3007,7 +3007,7 @@ BOOST_AUTO_TEST_CASE( saber_good_grade_keeps_a_chain_that_is_landing_hits )
 
 BOOST_AUTO_TEST_CASE( saber_attack_tactics_never_freeze_while_the_swing_window_is_closed )
 {
-	newbotai_saber_tactic_context_t context = MakeSaberDuelContext( 80.0f );
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
 	const newbotai_saber_tactic_t attacking[] = { NEWBOTAI_SABER_TACTIC_ATTACK,
 		NEWBOTAI_SABER_TACTIC_CHAIN, NEWBOTAI_SABER_TACTIC_COUNTER };
 
@@ -3349,12 +3349,12 @@ BOOST_AUTO_TEST_CASE( saber_pursuit_escape_stall )
 	BOOST_CHECK( NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BURST, 4, 0, 1, 4 ) );
 	BOOST_CHECK( !NewBotAI_SaberBurstCompleteScaled( NEWBOTAI_SABER_BASIC, 4, 1, 1, 2 ) );
 
-	// healthy bots keep the planner's back-pedal
-	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 50 ), NEWBOTAI_ESCAPE_BACKPEDAL );
-	// ...but a quarter of healthy escapes are A/D circle jumps
-	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 0 ), NEWBOTAI_ESCAPE_CIRCLE_JUMP );
+	// healthy bots back off diagonally instead of straight back...
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 50 ), NEWBOTAI_ESCAPE_DIAGONAL );
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 0, 0, 0 ), NEWBOTAI_ESCAPE_DIAGONAL );
+	// ...or circle jump (35%); straight back only when no side step is allowed
+	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 1, 0, 34 ), NEWBOTAI_ESCAPE_CIRCLE_JUMP );
 	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 0, 1, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
-	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( 80, 1, 0, 0, 0 ), NEWBOTAI_ESCAPE_BACKPEDAL );
 	{
 		int counts[4] = { 0, 0, 0, 0 };
 		int r;
@@ -3736,7 +3736,7 @@ BOOST_AUTO_TEST_CASE( saber_only_sweeps_and_low_health )
 
 	/* Low health changes escape style only outside saber-only play. */
 	BOOST_CHECK_EQUAL( NewBotAI_ChooseEscapeStyle( NewBotAI_EscapeHealthFor( 20, 1 ), 1, 1, 0, 60 ),
-		NEWBOTAI_ESCAPE_BACKPEDAL );
+		NEWBOTAI_ESCAPE_DIAGONAL );
 	BOOST_CHECK_EQUAL( NewBotAI_EscapeHealthFor( 20, 0 ), 20 );
 }
 
@@ -3774,6 +3774,111 @@ BOOST_AUTO_TEST_CASE( saber_footing_whiff_bait_and_reset_backoff )
 	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 1, 1, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 1000, 900, 1, 0, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberIdleStrafeFlipDue( 800, 900, 1, 0, 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( fresh_swing_waits_for_the_enemy_swing_punish_window )
+{
+	newbotai_saber_tactic_context_t context = bot_ai::tuning::MakeSaberDuelContext( 80.0f );
+	context.enemySwingTimingKnown = 1;
+	context.msSinceEnemySwingStart = 150;
+	BOOST_CHECK( NewBotAI_SaberEnemySwingTimingBlocksStart( 150, 80.0f ) );
+	BOOST_CHECK( !NewBotAI_SaberEnemySwingTimingBlocksStart( 150, 40.0f ) );
+	BOOST_CHECK( !NewBotAI_SaberEnemySwingTimingBlocksStart( NEWBOTAI_SABER_ENEMY_SWING_HOLD_MS, 80.0f ) );
+	BOOST_CHECK( !NewBotAI_SaberFreshSwingWindowAllows( context, NEWBOTAI_SABER_TACTIC_ATTACK ) );
+	BOOST_CHECK( !NewBotAI_SaberFreshSwingWindowAllows( context, NEWBOTAI_SABER_TACTIC_STEP_IN ) );
+	BOOST_CHECK( NewBotAI_SaberFreshSwingWindowAllows( context, NEWBOTAI_SABER_TACTIC_ADVANCE ) );
+	context.msSinceEnemySwingStart = 500;
+	BOOST_CHECK( NewBotAI_SaberFreshSwingWindowAllows( context, NEWBOTAI_SABER_TACTIC_ATTACK ) );
+	context.msSinceEnemySwingStart = 150;
+	context.enemyVulnerable = 1;
+	BOOST_CHECK( NewBotAI_SaberFreshSwingWindowAllows( context, NEWBOTAI_SABER_TACTIC_ATTACK ) );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberRecoveryForward( 1 ), -1 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberRecoveryForward( 0 ), 1 );
+}
+
+BOOST_AUTO_TEST_CASE( single_saber_horizontal_yaw_follows_the_human_profile )
+{
+	// R2L (direction -1) turns with the blade; L2R stays near the target; red R2L is damped.
+	BOOST_CHECK_EQUAL( NewBotAI_SaberHumanYawProfile( -1, 2, 0 ), 0.0f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberHumanYawProfile( -1, 2, 198 ), 20.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberHumanYawProfile( -1, 2, 99 ), 13.5f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberHumanYawProfile( -1, 2, 5000 ), 15.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberHumanYawProfile( -1, 3, 198 ), 6.0f, 0.001f );
+	BOOST_CHECK( fabsf( NewBotAI_SaberHumanYawProfile( 1, 2, 132 ) ) <= 3.0f );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberHumanYawProfile( -1, 7, 198 ), 0.0f );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberHumanYawProfile( 0, 2, 198 ), 0.0f );
+	// A view lagging 25 degrees behind the enemy is pulled back before the profile applies.
+	BOOST_CHECK_CLOSE( NewBotAI_SaberLagCorrectedOffset( 10.0f, 25.0f ), -15.0f, 0.001f );
+	BOOST_CHECK_CLOSE( NewBotAI_SaberLagCorrectedOffset( 0.0f, -90.0f ), NEWBOTAI_SABER_LAG_CORRECTION_MAX, 0.001f );
+}
+
+BOOST_AUTO_TEST_CASE( force_reactions_follow_human_timings )
+{
+	BOOST_CHECK( !NewBotAI_CounterPTKPullReady( 500, 1, 200.0f, 0 ) );
+	BOOST_CHECK( NewBotAI_CounterPTKPullReady( 900, 1, 200.0f, 0 ) );
+	BOOST_CHECK( !NewBotAI_CounterPTKPullReady( 900, 0, 200.0f, 0 ) );
+	BOOST_CHECK( !NewBotAI_CounterPTKPullReady( 900, 1, 500.0f, 0 ) );
+	BOOST_CHECK( !NewBotAI_CounterPTKPullReady( 900, 1, 200.0f, 1 ) );
+	BOOST_CHECK( !NewBotAI_CounterPTKPullReady( 1200, 1, 200.0f, 0 ) );
+	BOOST_CHECK( NewBotAI_PostKickEscapeApplies( 600, 25, 150.0f ) );
+	BOOST_CHECK( !NewBotAI_PostKickEscapeApplies( 600, 10, 150.0f ) );
+	BOOST_CHECK( !NewBotAI_PostKickEscapeApplies( 2000, 25, 150.0f ) );
+	BOOST_CHECK( !NewBotAI_PostKickEscapeApplies( 600, 25, 400.0f ) );
+	BOOST_CHECK( NewBotAI_PreferPullVsSaberThrow( 1, 1, 300.0f ) );
+	BOOST_CHECK( !NewBotAI_PreferPullVsSaberThrow( 0, 1, 300.0f ) );
+	BOOST_CHECK( !NewBotAI_PreferPullVsSaberThrow( 1, 0, 300.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( failed_routes_yield_to_better_similar_routes )
+{
+	BOOST_CHECK( BotSFJ_RoutesSimilar( 100.0f, 200.0f ) );
+	BOOST_CHECK( !BotSFJ_RoutesSimilar( 200.0f, 100.0f ) );
+	BOOST_CHECK( !BotSFJ_RoutesSimilar( 100.0f, 300.0f ) );
+	// One failure, death or collision on the last attempt marks a route failed.
+	BOOST_CHECK( BotSFJ_RouteOutcomeFailed( -1, 0, 0 ) );
+	BOOST_CHECK( !BotSFJ_RouteOutcomeFailed( 1, 1, 3 ) );
+	BOOST_CHECK( BotSFJ_RouteOutcomeFailed( 0, 1, 0 ) );
+	BOOST_CHECK( BotSFJ_RouteOutcomeFailed( 0, 0, 1 ) );
+	BOOST_CHECK( !BotSFJ_RouteOutcomeFailed( 0, 0, 0 ) );
+	// A clean route is never displaced; a failed one yields to an untried or clean one.
+	BOOST_CHECK( !BotSFJ_SimilarRouteBetter( 0, 0, 5, 0.8f, 500.0f, 1, 0, 9, 0.9f, 600.0f ) );
+	BOOST_CHECK( BotSFJ_SimilarRouteBetter( 1, 0, 9, 0.9f, 600.0f, 0, 0, 0, 0.5f, 300.0f ) );
+	// Both failed: fewer deaths, then more completed hops, then completion rate, then speed.
+	BOOST_CHECK( BotSFJ_SimilarRouteBetter( 1, 1, 9, 0.9f, 600.0f, 1, 0, 1, 0.1f, 100.0f ) );
+	BOOST_CHECK( BotSFJ_SimilarRouteBetter( 1, 0, 3, 0.9f, 600.0f, 1, 0, 6, 0.1f, 100.0f ) );
+	BOOST_CHECK( BotSFJ_SimilarRouteBetter( 1, 0, 3, 0.4f, 600.0f, 1, 0, 3, 0.6f, 100.0f ) );
+	BOOST_CHECK( BotSFJ_SimilarRouteBetter( 1, 0, 3, 0.5f, 400.0f, 1, 0, 3, 0.5f, 500.0f ) );
+	BOOST_CHECK( !BotSFJ_SimilarRouteBetter( 1, 0, 3, 0.5f, 500.0f, 1, 0, 3, 0.5f, 500.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( weak_stance_guard_covers_every_t2b_press )
+{
+	int forward, right;
+	// W-only, S-only (no backstab) and neutral presses all get a side
+	forward = 1; right = 0;
+	BOOST_CHECK( NewBotAI_SaberWeakVerticalGuard( 1, 0, -1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, -1 );
+	forward = -1; right = 0;
+	BOOST_CHECK( NewBotAI_SaberWeakVerticalGuard( 1, 0, 1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, 1 );
+	forward = 0; right = 0;
+	BOOST_CHECK( NewBotAI_SaberWeakVerticalGuard( 1, 0, 1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, 1 );
+	// backstab, red stance and existing side input are left alone
+	forward = -1; right = 0;
+	BOOST_CHECK( !NewBotAI_SaberWeakVerticalGuard( 1, 1, 1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, 0 );
+	forward = 1; right = 0;
+	BOOST_CHECK( !NewBotAI_SaberWeakVerticalGuard( 0, 0, 1, &forward, &right ) );
+	forward = 1; right = -1;
+	BOOST_CHECK( !NewBotAI_SaberWeakVerticalGuard( 1, 0, 1, &forward, &right ) );
+	BOOST_CHECK_EQUAL( right, -1 );
+	// no-strafe fallback then weak-vertical avoidance (controller order) never leaves W-only
+	forward = 0; right = 1;
+	NewBotAI_SaberNoStrafeFallback( 1, 0, &forward, &right );
+	NewBotAI_SaberAvoidWeakVertical( 1, -1, &forward, &right );
+	BOOST_CHECK_EQUAL( forward, 1 );
+	BOOST_CHECK_EQUAL( right, -1 );
 }
 
 BOOST_AUTO_TEST_CASE( weak_stances_never_select_vertical )

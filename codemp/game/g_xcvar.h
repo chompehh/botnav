@@ -367,6 +367,7 @@ XCVAR_DEF( bot_onlystrafes,			"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 // Record human strafe-jump routes: 0 off, 1 record (console echo on start/end), 2 also echo each landing.
 XCVAR_DEF( bot_strafetrack,			"1",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( bot_strafetrack_autoexport, "1", NULL, CVAR_ARCHIVE, qtrue )
+XCVAR_DEF( bot_trackexport_partmb, "2000", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafetrack_exportinterval, "60", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_route_combathold, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_hunt_interval, "3000", NULL, CVAR_ARCHIVE, qtrue )
