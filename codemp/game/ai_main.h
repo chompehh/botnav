@@ -360,6 +360,8 @@ typedef struct bot_state_s
 	int					saberThrowTargetNum;
 	int					saberThrowLane;
 	vec3_t				saberThrowAim;
+	int					saberThrowClearSince;
+	int					saberThrowLastVisibleTime;
 
 	qboolean			saberPower;
 	int					saberPowerTime;
@@ -405,6 +407,8 @@ typedef struct bot_state_s
 	int					swingDodgeDir; // lateral dodge direction (+1 right, -1 left)
 	qboolean			enemySwingActive; // enemy is in a saber start/attack move
 	int					enemySwingStartTime; // level.time the current enemy swing began
+	int					enemyAttackStartTime;
+	int					enemyAttackMove;
 	int					enemySwingEndTime; // level.time the last enemy swing ended
 	int					enemySwingChain; // enemy swings linked within NEWBOTAI_SWEEP_CHAIN_LINK_MS
 	int					swingDodgeRolledFor; // enemySwingStartTime the dodge/advance was rolled for
@@ -694,6 +698,11 @@ typedef struct bot_state_s
 	vec3_t				sfjEdgeStallOrigin;
 	vec3_t				navLastSafeOrigin;	// last grounded spot with no lethal drop nearby
 	int					navLastSafeTime;
+	vec3_t				navWallJumpDirection;
+	vec3_t				navWallJumpTarget;
+	float				navWallJumpHeight;
+	int					navWallJumpUntil;
+	int					navWallJumpRetryUntil;
 	int					combatDebugTime;	// decision-first combat debug limiter
 	char				combatDebugLast[32];
 	int					combatDebugBeatTime;	// bot_combatdebug heartbeat

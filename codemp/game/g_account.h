@@ -49,6 +49,32 @@ static inline int G_TrackedPersistRetryable(int status)
 	return primary == SQLITE_BUSY || primary == SQLITE_LOCKED;
 }
 
+/* Keep the highest-ranked selected routes when a caller requires a hard cap. */
+static inline int G_StrafeTrackResetApplyHardBudget(const int *rankedIndices,
+	int candidateCount, const unsigned char *selected, int budget,
+	unsigned char *bounded)
+{
+	int i, kept = 0;
+
+	if (candidateCount < 0 || budget < 0 ||
+		(candidateCount > 0 && (!rankedIndices || !selected || !bounded)))
+		return -1;
+	if (candidateCount > 0)
+		memset(bounded, 0, (size_t)candidateCount);
+	for (i = 0; i < candidateCount && kept < budget; i++)
+	{
+		const int index = rankedIndices[i];
+		if (index < 0 || index >= candidateCount)
+			return -1;
+		if (selected[index])
+		{
+			bounded[index] = 1;
+			kept++;
+		}
+	}
+	return kept;
+}
+
 static inline int G_BeginTrackedPersistTransaction(sqlite3 *db)
 {
 	if (!sqlite3_get_autocommit(db))

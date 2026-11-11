@@ -535,6 +535,18 @@ static inline int NewBotAI_SaberResetBacksOff(int grounded, int escaping, float 
 		enemyDistance < NEWBOTAI_SABER_RESET_THREAT_BACKOFF_RANGE;
 }
 
+static inline int NewBotAI_SaberPressureCounterReady(newbotai_saber_tactic_context_t context)
+{
+	return context.saberOnlyDuel && context.enemyAttacking &&
+		!context.selfBlocked && !context.selfAttacking && context.chainLength < 2 &&
+		context.counterReady && context.enemySwingTimingKnown &&
+		context.msSinceEnemySwingStart >= 0 && context.msSinceEnemySwingStart <= 700 &&
+		(context.msSinceEnemySwingStart >= 400 || context.currentDistance <= 64.0f) &&
+		context.closingKnown && context.currentDistance <= 120.0f &&
+		context.enemyDistance <= NEWBOTAI_SABER_SWING_START_MAX_RANGE &&
+		(context.closingSpeed > 0.0f || context.currentDistance < 80.0f);
+}
+
 static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	newbotai_saber_tactic_context_t context)
 {
@@ -553,10 +565,16 @@ static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	if (context.recentlyHurt && !context.counterReady && inSwingReach)
 		return NEWBOTAI_SABER_TACTIC_REPOSITION;
 
-	if (context.recentlyHurt && context.counterReady && context.enemyRecovering)
+	if ((context.recentlyHurt || (context.saberOnlyDuel && !context.selfAttacking)) &&
+		context.counterReady && context.enemyRecovering)
 	{
 		return inSwingReach ? NEWBOTAI_SABER_TACTIC_COUNTER : NEWBOTAI_SABER_TACTIC_STEP_IN;
 	}
+
+	if (NewBotAI_SaberPressureCounterReady(context))
+		return NEWBOTAI_SABER_TACTIC_COUNTER;
+	if (context.saberOnlyDuel && context.selfAttacking && context.landedHit && inSwingReach)
+		return NEWBOTAI_SABER_TACTIC_CHAIN;
 
 	if (context.enemyAttacking && inSwingReach)
 		return NEWBOTAI_SABER_TACTIC_REPOSITION;
@@ -1277,6 +1295,21 @@ static inline int NewBotAI_SaberIdleStrafeFlipMs(int skill, int roll)
 	if (roll < 0)
 		roll = -roll;
 	return 280 + (10 - skill) * 45 + roll % 360;
+}
+
+static inline int NewBotAI_SaberFootingStrafeMs(int skill, int frequency, int durationMs, int roll)
+{
+	int interval = NewBotAI_SaberIdleStrafeFlipMs(skill, roll);
+	if (frequency < 0)
+		frequency = 0;
+	else if (frequency > 100)
+		frequency = 100;
+	if (durationMs < 80)
+		durationMs = 80;
+	else if (durationMs > 900)
+		durationMs = 900;
+	interval += (durationMs - interval) * frequency / 200;
+	return interval * (100 - frequency / 3) / 100;
 }
 
 static inline int NewBotAI_SaberIdleStrafeFlipDue(int now, int flipTime, int grounded,
@@ -2688,7 +2721,57 @@ static inline int NewBotAI_SaberThrowSteerCadence(int throwLevel)
 static inline int NewBotAI_SaberThrowConfiguredLevel(float skill, int configuredLevel,
 	int disabled, int forceAllowed)
 {
-	return skill > 2.0f && !disabled && forceAllowed ? 3 : configuredLevel;
+	return !disabled && forceAllowed ? (skill <= 3.0f ? 2 : 3) : configuredLevel;
+}
+
+static inline int NewBotAI_SaberThrowLaunchReady(int now, int clearSince)
+{
+	return clearSince > 0 && now >= clearSince && now - clearSince >= 150;
+}
+
+static inline int NewBotAI_SaberThrowCanReacquire(int visible, int now, int lastVisible,
+	int throwLevel)
+{
+	return visible || (throwLevel >= 2 && lastVisible > 0 &&
+		now >= lastVisible && now - lastVisible <= 600);
+}
+
+static inline float NewBotAI_SaberThrowLeadSeconds(float saberDistance, int cadenceMs)
+{
+	float lead = saberDistance / 500.0f;
+	const float minimum = cadenceMs * 0.001f;
+	if (lead < minimum)
+		lead = minimum;
+	return lead > 0.45f ? 0.45f : lead;
+}
+
+static inline int NewBotAI_SaberThrowSteeringRay(const float *eye, const float *saber,
+	const float *waypoint, float *direction)
+{
+	float tangent[3], offset[3], length = 0.0f, projection = 0.0f, offsetSq = 0.0f;
+	float discriminant, travel;
+	int i;
+	for (i = 0; i < 3; i++)
+	{
+		tangent[i] = waypoint[i] - saber[i];
+		offset[i] = saber[i] - eye[i];
+		length += tangent[i] * tangent[i];
+		offsetSq += offset[i] * offset[i];
+	}
+	if (length < 1.0f || offsetSq >= 4096.0f * 4096.0f)
+		return 0;
+	length = sqrtf(length);
+	for (i = 0; i < 3; i++)
+	{
+		tangent[i] /= length;
+		projection += offset[i] * tangent[i];
+	}
+	/* Intersect the saber's desired flight line with the engine's 4096u eye-ray sphere. */
+	discriminant = projection * projection + 4096.0f * 4096.0f - offsetSq;
+	travel = -projection + sqrtf(discriminant);
+	for (i = 0; i < 3; i++)
+		direction[i] = offset[i] + travel * tangent[i];
+	return 1;
 }
 
 static inline int NewBotAI_SaberThrowTargetGuarded(int saberEquipped, int bladeAvailable,
@@ -2847,14 +2930,18 @@ static inline int NewBotAI_SaberThrowContextHoldCommitted(int throwLevel, newbot
 	/* Completing a safe close punish must not depend on an aggressive personality. */
 	completion = NEWBOTAI_THROW_MIN_HOLD_MS;
 	if (force >= 30 && completionMs > completion)
-		completion = completionMs > 1400 ? 1400 : completionMs;
+		completion = completionMs > 1650 ? 1650 : completionMs;
 	if (force >= 30 && range >= 0.0f)
 	{
 		if ((knockedDown || (range <= 180.0f && committed)) && completion < 1200)
 			completion = 1200;
-		/* Long human throws (>= 400u) were held 1.4-2.4s before the saber came home. */
-		if (!passed && heading)
-			completion = range > 400.0f ? 2200 : range > 240.0f ? 1700 : 1400;
+		/* Allow bounded travel completion on distant and post-pass intercepts. */
+		if (heading && (!passed || phase == NEWBOTAI_THROW_CUT_THROUGH))
+		{
+			const int travelCompletion = range > 400.0f ? 2200 : range > 240.0f ? 1700 : 1400;
+			if (travelCompletion > completion)
+				completion = travelCompletion;
+		}
 		if (knockedDown && completion < 1400)
 			completion = 1400;
 	}
