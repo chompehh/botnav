@@ -1618,6 +1618,7 @@ void Svcmd_ExportDuelTrack_f(void);
 void Svcmd_ExportStrafeTrack_f(void);
 void Svcmd_StrafeJumpStats_f(void);
 void Svcmd_ResetDuelTrack_f(void);
+void Svcmd_CompactDuelTrack_f(void);
 void Svcmd_ResetLearningTrack_f(void);
 void Svcmd_ImportDuelTrack_f(void);
 void Svcmd_DuelTrackInfo_f(void);
@@ -1680,6 +1681,7 @@ svcmd_t svcmds[] = {
 	{ "clankick",					Svcmd_ClanKick_f,					qfalse },
 
 	{ "clearIP",					Svcmd_ClearIP_f,					qfalse },
+	{ "compactdueltrack",			Svcmd_CompactDuelTrack_f,			qfalse },
 	{ "DBInfo",						Svcmd_DBInfo_f,						qfalse },
 	{ "deleteAccount",				Svcmd_DeleteAccount_f,				qfalse },
 	{ "dueltrackinfo",				Svcmd_DuelTrackInfo_f,				qfalse },

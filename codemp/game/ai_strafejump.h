@@ -106,6 +106,46 @@ static inline int BotSFJ_RouteSupersedes(int newer, float startGap, float endGap
 			((float)oldCompletions + 1.0f) / (oldAttempts + 2.0f);
 }
 
+/*
+ * Similar recorded routes (close start and end) compete. A route whose last
+ * attempt failed, died, or lost momentum to a collision yields to any similar
+ * route that ranks better: not failed, then fewer deaths, more completed hops,
+ * higher completion rate, then faster. When every similar route failed the
+ * best-ranked one stays available.
+ */
+#define BOT_SFJ_SIMILAR_ROUTE_START 160.0f
+#define BOT_SFJ_SIMILAR_ROUTE_END 256.0f
+
+static inline int BotSFJ_RoutesSimilar(float startGap, float endGap)
+{
+	return isfinite(startGap) && isfinite(endGap) &&
+		startGap <= BOT_SFJ_SIMILAR_ROUTE_START && endGap <= BOT_SFJ_SIMILAR_ROUTE_END;
+}
+
+/* lastOutcome: 1 clean finish, -1 failed/died/collided, 0 unknown (older stats). */
+static inline int BotSFJ_RouteOutcomeFailed(int lastOutcome, int deaths, int recentFailures)
+{
+	if (lastOutcome < 0)
+		return 1;
+	return lastOutcome == 0 && (deaths > 0 || recentFailures > 0);
+}
+
+static inline int BotSFJ_SimilarRouteBetter(int failed, int deaths, int hops, float rate, float speed,
+	int otherFailed, int otherDeaths, int otherHops, float otherRate, float otherSpeed)
+{
+	if (!failed)
+		return 0;
+	if (!otherFailed)
+		return 1;
+	if (otherDeaths != deaths)
+		return otherDeaths < deaths;
+	if (otherHops != hops)
+		return otherHops > hops;
+	if (fabsf(otherRate - rate) > 0.01f)
+		return otherRate > rate;
+	return otherSpeed > speed * 1.02f;
+}
+
 static inline float BotSFJ_ClampSetting(float value, float minimum, float maximum)
 {
 	if (!isfinite(value))

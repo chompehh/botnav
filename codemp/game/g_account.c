@@ -10057,9 +10057,19 @@ static void G_WriteTrackedCSVCell(FILE *out, const char *text)
 	fputc('"', out);
 }
 
-//GitHub rejects web uploads of 25MB or larger, so every export file is capped below that.
-#define TRACKED_EXPORT_MAX_PART_BYTES	(24 * 1000 * 1000)
+//Release assets must each be under 2 GiB (repository web uploads under 25MB); bot_trackexport_partmb
+//sets the part size, clamped so every part stays below the release limit.
+#define TRACKED_EXPORT_MAX_PART_MB		2000
 #define TRACKED_EXPORT_MAX_PARTS		999
+
+static size_t G_TrackedExportPartBytes(void)
+{
+	int mb = bot_trackexport_partmb.integer;
+
+	if (mb < 1 || mb > TRACKED_EXPORT_MAX_PART_MB)
+		mb = TRACKED_EXPORT_MAX_PART_MB;
+	return (size_t)mb * 1000 * 1000;
+}
 
 static size_t G_TrackedCSVCellLength(const char *text)
 {
@@ -10184,7 +10194,7 @@ static qboolean G_ExportTrackedQueryCSV(sqlite3 *db, const char *sql, const char
 
 		//Start a new part (with its own header) before this row would push the file over the cap.
 		if (partRows > 0 && part < TRACKED_EXPORT_MAX_PARTS &&
-			partBytes + rowBytes > TRACKED_EXPORT_MAX_PART_BYTES)
+			partBytes + rowBytes > G_TrackedExportPartBytes())
 		{
 			fclose(out);
 			part++;
@@ -10472,8 +10482,8 @@ static qboolean G_ExportTrackedTable(sqlite3 *db, qboolean wantExport, const cha
 		return qfalse;
 	}
 	else if (parts > 1)
-		trap->Print("Exported tracked %s (%d rows) split into %d files under 25MB: %s ... %s%s_part%d.csv\n",
-			baseName, rows, parts, exportFileName, baseName, exportSuffix, parts);
+		trap->Print("Exported tracked %s (%d rows) split into %d files of up to %dMB: %s ... %s%s_part%d.csv\n",
+			baseName, rows, parts, (int)(G_TrackedExportPartBytes() / 1000000), exportFileName, baseName, exportSuffix, parts);
 	else
 		trap->Print("Exported tracked %s (%d rows): %s\n", baseName, rows, exportFileName);
 	return qtrue;
@@ -11420,6 +11430,121 @@ void Svcmd_ResetDuelTrack_f(void)
 			effectiveDbPath);
 	}
 
+	sqlite3_close(db);
+}
+
+static double G_TrackedDBSizeMB(sqlite3 *db)
+{
+	static const char *const pragmas[2] = { "PRAGMA page_count", "PRAGMA page_size" };
+	double values[2] = { 0.0, 0.0 };
+	int i;
+
+	for (i = 0; i < 2; i++)
+	{
+		sqlite3_stmt *stmt = NULL;
+
+		if (sqlite3_prepare_v2(db, pragmas[i], -1, &stmt, NULL) == SQLITE_OK &&
+			sqlite3_step(stmt) == SQLITE_ROW)
+			values[i] = sqlite3_column_double(stmt, 0);
+		sqlite3_finalize(stmt);
+	}
+	return values[0] * values[1] / (1024.0 * 1024.0);
+}
+
+//Drops raw duel events and geometry (the bulk of the database and of exportDuelTrack) once
+//their motor evidence is preserved; summaries, Elo, aggregates and learning are kept.
+void Svcmd_CompactDuelTrack_f(void)
+{
+	sqlite3 *db = NULL;
+	char effectiveDbPath[MAX_OSPATH];
+	char token[32];
+	int keepRecent = 0, preview = 0, force = 0, argIndex, result, i;
+	int events = 0, geometry = 0;
+	double sizeBefore;
+
+	for (argIndex = 1; argIndex < trap->Argc(); argIndex++)
+	{
+		trap->Argv(argIndex, token, sizeof(token));
+		if (!Q_stricmp(token, "preview"))
+			preview = 1;
+		else if (!Q_stricmp(token, "force"))
+			force = 1;
+		else if (!Q_stricmp(token, "keep") && argIndex + 1 < trap->Argc())
+		{
+			trap->Argv(++argIndex, token, sizeof(token));
+			keepRecent = atoi(token);
+			if (keepRecent < 0)
+				keepRecent = 0;
+		}
+		else
+		{
+			trap->Print("Usage: compactdueltrack [keep <recent duels>] [preview] [force]\n"
+				"  Removes raw events and geometry of older duels; summaries, Elo, aggregates and learning stay.\n"
+				"  force: compact even if unextracted human motor evidence cannot be preserved\n");
+			return;
+		}
+	}
+	if (!LOCAL_DUELTRACK_DB_PATH[0])
+	{
+		trap->Print("compactdueltrack failed: duel tracking database path is not initialized.\n");
+		return;
+	}
+	if (!preview && G_BotLearnDuelActive())
+	{
+		trap->Print("compactdueltrack refused: wait until no duel is in progress.\n");
+		return;
+	}
+	if (!preview && !G_FlushTrackedPersistForReset())
+		return;
+	if (!G_OpenTrackedLocalDB(&db, effectiveDbPath, sizeof(effectiveDbPath)))
+	{
+		trap->Print("compactdueltrack failed: unable to open the duel tracking database \"%s\".\n",
+			LOCAL_DUELTRACK_DB_PATH);
+		return;
+	}
+	G_EnsureLocalDuelTrackingSchema(db);
+	for (i = 0; i < (int)ARRAY_LEN(g_trackedDuelTableNames); i++)
+	{
+		if (!G_DoesTrackedDuelTableExist(db, g_trackedDuelTableNames[i]))
+		{
+			trap->Print("compactdueltrack failed: duel tracking schema is unavailable in \"%s\" (missing %s).\n",
+				effectiveDbPath, g_trackedDuelTableNames[i]);
+			sqlite3_close(db);
+			return;
+		}
+	}
+	if (!preview && !G_BotLearnLoadMotorCache(db, qtrue))
+	{
+		if (!force)
+		{
+			trap->Print("compactdueltrack refused: motor evidence could not be preserved; nothing was removed.\n"
+				"Use \"compactdueltrack force\" to compact anyway.\n");
+			sqlite3_close(db);
+			return;
+		}
+		trap->Print("compactdueltrack force: continuing without preserving unextracted motor evidence.\n");
+	}
+	sizeBefore = G_TrackedDBSizeMB(db);
+	result = G_CompactDuelTrackTables(db, keepRecent, preview, &events, &geometry);
+	if (result != SQLITE_OK)
+	{
+		G_TrackedDBError("compactdueltrack transaction", db, result);
+		trap->Print("compactdueltrack failed: nothing was removed.\n");
+	}
+	else if (preview)
+		trap->Print("compactdueltrack preview: keep raw data of the %i newest duel(s); remove %i event and %i geometry row(s). Database is %.1f MB. No data was changed.\n",
+			keepRecent, events, geometry, sizeBefore);
+	else
+	{
+		const int v = sqlite3_exec(db, "VACUUM", NULL, NULL, NULL);
+
+		if (v != SQLITE_OK)
+			G_TrackedDBError("vacuum duel tracking database", db, v);
+		G_BotLearnLoadCache(db);
+		trap->Print("compactdueltrack: removed %i event and %i geometry row(s), kept raw data of the %i newest duel(s); database %.1f MB -> %.1f MB. Summaries, Elo, aggregates and learned data were kept.\n",
+			events, geometry, keepRecent, sizeBefore, G_TrackedDBSizeMB(db));
+		G_PrintTrackedDuelTableCounts(db, effectiveDbPath);
+	}
 	sqlite3_close(db);
 }
 
@@ -13947,7 +14072,14 @@ void Svcmd_ResetStrafeTrack_f(void)
 	else
 	{
 		int failedFiles = 0;
+		const double sizeBefore = G_TrackedDBSizeMB(db);
+		const int vacuum = sqlite3_exec(db, "VACUUM", NULL, NULL, NULL);
 
+		//Without VACUUM the deleted pages stay in the file and the database never shrinks.
+		if (vacuum != SQLITE_OK)
+			G_TrackedDBError("vacuum strafe tracking database", db, vacuum);
+		else
+			trap->Print("resetstrafetrack: database %.1f MB -> %.1f MB.\n", sizeBefore, G_TrackedDBSizeMB(db));
 		for (i = 0; i < mapCount; i++)
 			if (G_StrafeTrackWriteRouteFile(db, mapNames[i], qfalse) < 0)
 				failedFiles++;

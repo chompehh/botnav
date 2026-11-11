@@ -298,6 +298,30 @@ BOOST_AUTO_TEST_CASE(motor_evidence_survives_duel_cleanup_but_respects_learning_
 	BOOST_CHECK_EQUAL(database.Scalar("SELECT motor_extracted FROM LocalDuelTrackParticipant"), 1);
 }
 
+BOOST_AUTO_TEST_CASE(duel_compaction_drops_old_raw_rows_and_keeps_learning)
+{
+	LearningDatabase database;
+	database.Execute("INSERT INTO LocalDuelTrackSummary VALUES(2,2,'human','s2');"
+		"INSERT INTO LocalDuelTrackEvent VALUES(2,2,'human','s2');"
+		"INSERT INTO LocalDuelTrackEvent VALUES(3,2,'human','s2');"
+		"INSERT INTO LocalDuelTrackGeometry VALUES(2,2,'human','s2');");
+	int events = 0, geometry = 0;
+	BOOST_REQUIRE_EQUAL(G_CompactDuelTrackTables(database.db, 1, 1, &events, &geometry), SQLITE_OK);
+	BOOST_CHECK_EQUAL(events, 1);
+	BOOST_CHECK_EQUAL(geometry, 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackEvent"), 3);
+	BOOST_REQUIRE_EQUAL(G_CompactDuelTrackTables(database.db, 1, 0, &events, &geometry), SQLITE_OK);
+	BOOST_CHECK_EQUAL(events, 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackEvent WHERE summary_id=2"), 2);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackGeometry"), 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackSummary"), 2);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackAggregate"), 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedSequence"), 1);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalBotLearnedEvidence WHERE session_id='old-session'"), 1);
+	BOOST_REQUIRE_EQUAL(G_CompactDuelTrackTables(database.db, 0, 0, &events, &geometry), SQLITE_OK);
+	BOOST_CHECK_EQUAL(database.Scalar("SELECT COUNT(*) FROM LocalDuelTrackEvent"), 0);
+}
+
 BOOST_AUTO_TEST_CASE(motor_extraction_reconstructs_real_sql_rows_and_is_idempotent)
 {
 	MotorDatabase database;

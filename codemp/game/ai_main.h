@@ -682,6 +682,8 @@ typedef struct bot_state_s
 	int					sfjDebugKindTime[8];	// per-kind limiter for categorised strafe debug
 	int					sfjDebugLineTime;	// level 3 in-game goal/start lines
 	int					sfjRouteCollisions;	// momentum collisions in this attempt
+	int					sfjRouteAttemptCollisions;	// momentum collisions over the whole route attempt
+	qboolean			sfjRouteAttemptFlawed;	// a hop failed, died or collided during this attempt
 	int					sfjRouteCollisionTime;
 	int					sfjApproachBlockedSince;	// sustained blocked walk to a route start
 	float				sfjVelYawPrev;		// velocity yaw tracking for early side switches
@@ -771,6 +773,13 @@ typedef struct bot_state_s
 	float				navProgressBest;	// best distance to the current waypoint goal
 	int					navProgressTime;	// level.time navProgressBest last improved
 	int					navProgressGoal;	// waypoint index + 1 navProgressBest refers to (0 = none)
+	int					counterPtkPulledAt; // level.time an enemy pull on us began (counter-PTK timing)
+	int					counterPtkDoneFor; // counterPtkPulledAt we already answered
+	qboolean			postKickWasGrounded; // grounded state last frame, to detect a flipkick landing
+	int					postKickHandledFor; // lastFlipkickAttemptTime already handled
+	int					postKickLandTime; // landing time after our flipkick with a force lead
+	int					postKickEscapeUntil; // straight back-off after that landing
+	qboolean			postKickPullPending; // immediate pull still to fire after that landing
 	int					gripMistakeDelayUntil; // level.time until which bot_gkmistakebias holds us from correctly breaking an opponent's grip (see NewBotAI_GetGripEscapeDelayMs) - rolled once per grip session
 	qboolean			gripSpeedOffPressed; // alternates the force button while gripped with speed active so the speed-off toggle is spammed (press/release) instead of held
 	int					gripReactLastCallTime; // level.time of the last NewBotAI_ReactToBeingGripped call, used to detect a fresh grip session (a gap since the last call) so the escape delay above is only rolled once per grip

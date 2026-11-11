@@ -250,6 +250,8 @@ static void NewBotAI_UpdateSaberDefense(bot_state_t *bs, int time);
 static void NewBotAI_ApplySaberThrowInput(bot_state_t *bs, bot_input_t *bi);
 static void NewBotAI_ApplySaberHandover(bot_state_t *bs, bot_input_t *bi, int time);
 static void NewBotAI_ApplySaberAdvance(bot_state_t *bs, bot_input_t *bi);
+static void NewBotAI_TrackForceReactions(bot_state_t *bs);
+static void NewBotAI_ApplyPostKickEscape(bot_state_t *bs, usercmd_t *ucmd, int time);
 static int NewBotAI_GetWallStrafeAwayDir(bot_state_t *bs);
 static qboolean NewBotAI_ShouldPursueTargetThroughWaypoints(bot_state_t *bs, gentity_t *enemy);
 static float NewBotAI_GetRecoveryYawSpeedDegPerSec(void);
@@ -991,41 +993,63 @@ qboolean BotInputToUserCommand(bot_input_t *bi, usercmd_t *ucmd, int delta_angle
 ==============
 NewBotAI_FilterWeakVerticalAttack
 
-Last-chance filter for paths outside the saber technique controller (chase, legacy
-combat): a grounded W-only attack press starts T2B, which is weak for blue/yellow (see
-NewBotAI_SaberAvoidWeakVertical). Add the planned strafe side so the engine picks the
-forward diagonal. Committed starts/transitions, specials (crouch/jump), kicks and the
-duel-start no-strafe window are left alone, and the side step must pass footwork safety.
+Final usercmd guard for every path (controller, chase, legacy combat, the duel-start
+no-strafe window): the engine selects T2B for blue/yellow from W-only, S-only without a
+backstab and neutral presses (PM_SaberAttackForMovement). When a new attack can be chosen,
+add the planned strafe side so the engine picks a diagonal or horizontal instead. Committed
+starts/transitions, specials, jump attacks, kicks and strafe-jump input are left alone. The
+side step must pass footwork safety; if neither side is safe the press is held this frame.
+Dueltracks: bot T2B was 27% of yellow and 46.5% of blue swings vs 1.8%/10% for humans,
+mostly idle starts > 1.2s after the previous swing.
 ==============
 */
 static void NewBotAI_FilterWeakVerticalAttack(bot_state_t *bs, usercmd_t *ucmd, int time)
 {
 	const playerState_t *ps;
 	int forward, right, side;
+	int enemyBehind = 0;
 
 	if (!bs || !ucmd || !g_entities[bs->client].client)
 		return;
 	ps = &g_entities[bs->client].client->ps;
-	if (ps->weapon != WP_SABER || !(ucmd->buttons & BUTTON_ATTACK) || ucmd->upmove != 0 ||
-		ps->groundEntityNum == ENTITYNUM_NONE || bs->saberTechniqueOwnsInputs ||
-		NewBotAI_IsDuelStrafeSuppressed(bs) || bs->sfjOwnsInput ||
-		bs->flipkickInputTime > time || bs->gripkickActive || bs->pullKickJumpTime != 0 ||
+	if (ps->weapon != WP_SABER || !(ucmd->buttons & BUTTON_ATTACK) || ucmd->upmove > 0 ||
+		ps->groundEntityNum == ENTITYNUM_NONE || ps->weaponTime > 150 || ps->saberInFlight ||
+		bs->sfjOwnsInput || bs->flipkickInputTime > time || bs->gripkickActive ||
+		bs->pullKickJumpTime != 0 ||
 		PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove) ||
 		BG_SaberInSpecial(ps->saberMove))
 		return;
+	if ((ps->fd.saberAnimLevel == SS_FAST || ps->fd.saberAnimLevel == SS_MEDIUM) &&
+		ps->saberMove >= LS_PARRY_UP && ps->saberMove <= LS_REFLECT_LL &&
+		saberMoveData[ps->saberMove].endQuad == Q_T)
+	{
+		// A top parry chains straight into T2B whatever the movement; wait for ready.
+		ucmd->buttons &= ~BUTTON_ATTACK;
+		return;
+	}
 	forward = ucmd->forwardmove > 0 ? 1 : (ucmd->forwardmove < 0 ? -1 : 0);
 	right = ucmd->rightmove > 0 ? 1 : (ucmd->rightmove < 0 ? -1 : 0);
+	if (forward < 0 && bs->currentEnemy && bs->currentEnemy->client)
+	{
+		vec3_t fwd, toEnemy;
+		AngleVectors(ps->viewangles, fwd, NULL, NULL);
+		VectorSubtract(bs->currentEnemy->client->ps.origin, ps->origin, toEnemy);
+		enemyBehind = (fwd[0] * toEnemy[0] + fwd[1] * toEnemy[1]) < 0.0f;
+	}
 	side = bs->saberTacticStrafeDir ? bs->saberTacticStrafeDir : (((time / 700) & 1) ? 1 : -1);
-	if (!NewBotAI_SaberAvoidWeakVertical(ps->fd.saberAnimLevel == SS_FAST ||
-		ps->fd.saberAnimLevel == SS_MEDIUM, side, &forward, &right))
+	if (!NewBotAI_SaberWeakVerticalGuard(ps->fd.saberAnimLevel == SS_FAST ||
+		ps->fd.saberAnimLevel == SS_MEDIUM, enemyBehind, side, &forward, &right))
 		return;
 	if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], forward, right, qfalse))
 	{
 		right = -right;
 		if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], forward, right, qfalse))
+		{
+			ucmd->buttons &= ~BUTTON_ATTACK;
 			return;
+		}
 	}
-	ucmd->rightmove = (signed char)(right * ucmd->forwardmove);
+	ucmd->rightmove = (signed char)(right * 127);
 }
 
 /*
@@ -1046,7 +1070,7 @@ static void BotFooting_Apply(bot_state_t *bs, usercmd_t *ucmd, int time)
 	qboolean exempt;
 
 	exempt = (!bot_footing.integer || bs->sfjOwnsInput || bs->flipkickInputTime > time ||
-		bs->gripkickActive || bs->pullKickJumpTime != 0 ||
+		bs->gripkickActive || bs->pullKickJumpTime != 0 || bs->circleEscapeStart ||
 		BG_InRoll((playerState_t *)ps, ps->legsAnim) || BG_InKnockDown(ps->legsAnim) ||
 		(bs->enemySwingActive && bs->swingDodgeDir && bs->swingDodgeRolledFor == bs->enemySwingStartTime) ||
 		ps->stats[STAT_HEALTH] <= 0) ? qtrue : qfalse;
@@ -1117,6 +1141,8 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	}
 	if (!holdCombat)
 		NewBotAI_UpdateSaberDefense(bs, time);
+	if (!holdCombat && g_newBotAI.integer)
+		NewBotAI_TrackForceReactions(bs);
 	if (!holdCombat && g_newBotAI.integer && bs->saberTechniqueOwnsInputs && NewBotAI_CanControlSaber(bs))
 	{
 		vec3_t toEnemy;
@@ -1199,6 +1225,8 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 		bs->cur_ps.delta_angles, time,
 		bs->noUseTime, bs->sfjOwnsInput ? qfalse : qtrue);
 	BotFooting_Apply(bs, &bs->lastucmd, time);
+	if (!holdCombat && g_newBotAI.integer)
+		NewBotAI_ApplyPostKickEscape(bs, &bs->lastucmd, time);
 	if (!holdCombat)
 		NewBotAI_FilterWeakVerticalAttack(bs, &bs->lastucmd, time);
 	if (bs->sfjOwnsInput)
@@ -4818,6 +4846,8 @@ typedef struct
 	int stalls;
 	int interrupted;
 	int loops;	/* walks toward this route that turned into backtrack loops */
+	int collisions;	/* momentum-losing wall impacts, including ones a trusted hop survived */
+	int lastOutcome;	/* 1 clean finish, -1 failed/died/collided, 0 unknown */
 	int speedContext;
 	int routeId;
 	int recordedAt;
@@ -5371,7 +5401,7 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 	COM_BeginParseSession(path);
 	if (!Q_stricmp(COM_Parse(&text), "botroute_stats"))
 	{
-		if (COM_ParseInt(&text, &version) || (version < 2 || version > 8))
+		if (COM_ParseInt(&text, &version) || (version < 2 || version > 9))
 		{
 			free(buffer);
 			return;
@@ -5475,6 +5505,10 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 			break;
 		if (version >= 8 && (COM_ParseInt(&text, &stat.loops) || stat.loops < 0))
 			break;
+		if (version >= 9 && (COM_ParseInt(&text, &stat.collisions) ||
+			COM_ParseInt(&text, &stat.lastOutcome) || stat.collisions < 0 ||
+			stat.lastOutcome < -1 || stat.lastOutcome > 1))
+			break;
 		if (stat.attempts < 0 || stat.completions < 0 || stat.completions > stat.attempts ||
 			stat.stalls < 0 || stat.interrupted < 0 || stat.speedContext < -1 ||
 			stat.speedContext > 3 || stat.deaths < 0 || stat.unsafe < 0 ||
@@ -5507,7 +5541,7 @@ static void BotSFJ_WriteRouteStats(void)
 		trap->Print(S_COLOR_YELLOW "Could not write strafe route results: %s\n", path);
 		return;
 	}
-	trap->FS_Write("botroute_stats 8\n", strlen("botroute_stats 8\n"), f);
+	trap->FS_Write("botroute_stats 9\n", strlen("botroute_stats 9\n"), f);
 	for (i = 0; i < g_botSfjRouteStatCount; i++)
 	{
 		const bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[i];
@@ -5533,7 +5567,7 @@ static void BotSFJ_WriteRouteStats(void)
 				stat->hopRecentPasses[node]);
 			trap->FS_Write(line, strlen(line), f);
 		}
-		line = va(" %i", stat->loops);
+		line = va(" %i %i %i", stat->loops, stat->collisions, stat->lastOutcome);
 		trap->FS_Write(line, strlen(line), f);
 		trap->FS_Write("\n", 1, f);
 	}
@@ -5669,6 +5703,8 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 
 			bs->sfjRouteCollisionTime = level.time;
 			bs->sfjRouteCollisions++;
+			bs->sfjRouteAttemptCollisions++;
+			bs->sfjRouteAttemptFlawed = qtrue;
 			if (!BotSFJ_CollisionEndsRoute(trusted, bs->sfjRouteCollisions))
 			{
 				/* A human carried speed through here: one bump is not proof the route is wrong. */
@@ -5741,6 +5777,8 @@ static void BotSFJ_NoteHopFailure(bot_state_t *bs, qboolean lethal, qboolean uns
 		stat->hopDeaths[node]++;
 		g_botSfjStats.routeDeaths++;
 	}
+	stat->lastOutcome = -1;
+	bs->sfjRouteAttemptFlawed = qtrue;
 	if (unsafe)
 	{
 		stat->unsafe++;
@@ -5858,6 +5896,7 @@ void BotSFJ_ClientDied(int clientNum, int meansOfDeath)
 				}
 				stat->deaths++;
 				stat->hopDeaths[node]++;
+				stat->lastOutcome = -1;
 				g_botSfjStats.routeDeaths++;
 				stat->hopRetryUntil[node] = level.time +
 					BotSFJ_HopRetryDelayForSpeed(stat->hopRecentFailures[node], 1, stat->speedContext > 0);
@@ -5897,6 +5936,12 @@ static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qbool
 			stat->stalls++;
 		else
 			stat->interrupted++;
+		stat->collisions += bs->sfjRouteAttemptCollisions;
+		/* One failure, death or momentum-losing impact is enough to prefer a similar route next time. */
+		if (stalled || bs->sfjRouteAttemptFlawed || bs->sfjRouteFailureNoted)
+			stat->lastOutcome = -1;
+		else if (completed)
+			stat->lastOutcome = 1;
 		stat->distance += bs->sfjRouteDistance;
 		stat->durationMs += (float)BotSFJ_TrackMeasuredDuration(bs->sfjRouteAcquiring,
 			bs->sfjRouteStarted, level.time);
@@ -6023,10 +6068,12 @@ static void BotSFJ_EndTrackRoute(bot_state_t *bs, const char *reason)
 		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_DECISION,
 			BotSFJ_DebugTextTone(reason, BOT_SFJ_TONE_FAIL) == BOT_SFJ_TONE_HAZARD ?
 				BOT_SFJ_TONE_HAZARD : BOT_SFJ_TONE_FAIL, BOT_SFJ_DEBUG_KIND_MISC, 250, "end",
-			"route %d db=%d node %d/%d launched=%d%s: %s", bs->sfjRoute - 1,
+			"route %d db=%d node %d/%d launched=%d%s: %s%s", bs->sfjRoute - 1,
 			g_botSfjTrackRoutes[bs->sfjRoute - 1].routeId, bs->sfjRouteNode,
 			g_botSfjTrackRoutes[bs->sfjRoute - 1].nodeCount,
-			bs->sfjRouteHopLaunched, bs->sfjRouteApproach ? " (approach)" : "", reason);
+			bs->sfjRouteHopLaunched, bs->sfjRouteApproach ? " (approach)" : "", reason,
+			(!Q_strncmp(reason, "enemy", 5) && bs->currentEnemy && bs->currentEnemy->client) ?
+				va(" [%s^7]", bs->currentEnemy->client->pers.netname) : "");
 	BotSFJ_FinishTrackAttempt(bs, qfalse, qfalse);
 	if (bs->sfjTravelGoalKind == 1)
 	{
@@ -6514,6 +6561,53 @@ static int BotSFJ_RouteStartIsBacktrack(const playerState_t *ps, const vec3_t fo
  * enemy separation. Actual bot results weight the recorded length and speed,
  * and stalled routes lose priority so bots do not keep repeating collisions.
  */
+
+/* Goal label for strafe debug: names the targeted client ("enemy (Name)") instead of "enemy". */
+static const char *BotSFJ_GoalLabel(const bot_state_t *bs)
+{
+	static char label[2][96];
+	static int which;
+	char name[64];
+	char *out;
+
+	if (!bs->sfjTravelGoalValid)
+		return "none";
+	if (bs->sfjTravelGoalClient < 0 || bs->sfjTravelGoalClient >= MAX_CLIENTS ||
+		!g_entities[bs->sfjTravelGoalClient].client)
+		return BotSFJ_GoalName(bs->sfjTravelGoalType);
+	Q_strncpyz(name, g_entities[bs->sfjTravelGoalClient].client->pers.netname, sizeof(name));
+	Q_CleanStr(name);
+	out = label[which];
+	which ^= 1;
+	Com_sprintf(out, sizeof(label[0]), "%s (%s)", BotSFJ_GoalName(bs->sfjTravelGoalType), name);
+	return out;
+}
+
+static void BotSFJ_SimilarRouteEvidence(const bot_sfj_track_route_t *route, int context,
+	int *failed, int *deaths, int *hops, float *rate, float *speed)
+{
+	const bot_sfj_route_stat_t *stat = route->stat[context] >= 0 ?
+		&g_botSfjRouteStats[route->stat[context]] : NULL;
+	int node, recentFailures = 0;
+
+	*failed = *deaths = *hops = 0;
+	*rate = BotSFJ_TrackRouteSuccess(0, 0);
+	*speed = route->averageSpeed;
+	if (!stat)
+		return;
+	for (node = 0; node < route->nodeCount && node < BOT_SFJ_TRACK_MAX_NODES; node++)
+	{
+		*hops += stat->hopPasses[node];
+		recentFailures += stat->hopRecentFailures[node];
+	}
+	*deaths = stat->deaths;
+	*failed = BotSFJ_RouteOutcomeFailed(stat->lastOutcome, stat->deaths, recentFailures);
+	*rate = BotSFJ_TrackRouteSuccess(BotSFJ_TrackResolvedAttempts(stat->attempts,
+		stat->completions, stat->interrupted), stat->completions);
+	if (stat->durationMs > 0.0f)
+		*speed = stat->speedIntegral / stat->durationMs;
+}
+
 static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	const vec3_t moveDirection, float pickupRadius, int exclude, const float *fleeFrom,
 	int *entryOut)
@@ -6526,6 +6620,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	float quality[BOT_SFJ_MAX_TRACK_ROUTES];
 	float routeScores[BOT_SFJ_MAX_TRACK_ROUTES];
 	int replacements[BOT_SFJ_MAX_TRACK_ROUTES];
+	int similarBetter[BOT_SFJ_MAX_TRACK_ROUTES];
 	int entries[BOT_SFJ_MAX_TRACK_ROUTES], first[BOT_SFJ_MAX_TRACK_ROUTES];
 	int ends[BOT_SFJ_MAX_TRACK_ROUTES], backtrack[BOT_SFJ_MAX_TRACK_ROUTES];
 	int parent[BOT_SFJ_MAX_TRACK_ROUTES];
@@ -6717,6 +6812,48 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			}
 		}
 	}
+	/* A failed route yields to a similar route that is available right now and ranks better. */
+	for (i = 0; i < count; i++)
+	{
+		const bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[i];
+		int failed, deaths, hops;
+		float rate, speed;
+
+		similarBetter[i] = -1;
+		if (seed[i] < 0.0f)
+			continue;
+		BotSFJ_SimilarRouteEvidence(route, context, &failed, &deaths, &hops, &rate, &speed);
+		if (!failed)
+			continue;
+		for (j = 0; j < count; j++)
+		{
+			const bot_sfj_track_route_t *other = &g_botSfjTrackRoutes[j];
+			int otherFailed, otherDeaths, otherHops;
+			float otherRate, otherSpeed;
+
+			if (j == i || seed[j] < 0.0f ||
+				!BotSFJ_RoutesSimilar(Distance(route->start, other->start),
+					Distance(route->node[route->nodeCount - 1], other->node[other->nodeCount - 1])))
+				continue;
+			BotSFJ_SimilarRouteEvidence(other, context, &otherFailed, &otherDeaths, &otherHops,
+				&otherRate, &otherSpeed);
+			if (BotSFJ_SimilarRouteBetter(failed, deaths, hops, rate, speed,
+				otherFailed, otherDeaths, otherHops, otherRate, otherSpeed))
+			{
+				similarBetter[i] = j;
+				break;
+			}
+		}
+	}
+	for (i = 0; i < count; i++)
+	{
+		if (similarBetter[i] < 0)
+			continue;
+		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_FAIL, BOT_SFJ_DEBUG_KIND_TRUST, 1000,
+			"reject", "route %d failed last time; similar route %d ranks better", i, similarBetter[i]);
+		seed[i] = -1.0f;
+		rejected[0]++;
+	}
 	for (i = 0; i < count; i++)
 		for (j = 0; j < count; j++)
 		{
@@ -6726,7 +6863,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			int node;
 			float length = 0.0f;
 			float speedSum = 0.0f, speedPeak = 0.0f, speedFactor = 1.0f;
-			qboolean usable = j != exclude && replacements[j] < 0 &&
+			qboolean usable = j != exclude && replacements[j] < 0 && similarBetter[j] < 0 &&
 				ends[i] == g_botSfjTrackRoutes[i].nodeCount &&
 				ends[j] == route->nodeCount &&
 				BotSFJ_TrackRetryAllows(j, bs->sfjRouteRetryUntil, level.time);
@@ -6885,7 +7022,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		routeDebugAt[bs->client] = level.time;
 		BotDebug_Printf("^3[SFJ route]^7 %s no pick goal=%s; rejected entries: superseded=%d retry=%d unavailable=%d geometry=%d unsafeApproach=%d noGoalGain=%d; seeking safe route-start walk\n",
 			g_entities[bs->client].client->pers.netname,
-			fleeFrom ? "retreat" : BotSFJ_GoalName(bs->sfjTravelGoalType),
+			fleeFrom ? "retreat" : BotSFJ_GoalLabel(bs),
 			rejected[0], rejected[1], rejected[2], rejected[3], rejected[4], rejected[5]);
 	}
 	return best;
@@ -7180,7 +7317,7 @@ static qboolean BotSFJ_SeekRouteStart(bot_state_t *bs, const playerState_t *ps,
 		if (BotSFJ_DebugShows(bot_strafejumps_debug.integer, BOT_SFJ_DEBUG_ROUTE))
 			BotDebug_Printf("^5[SFJ walk]^7 %s seeking route=%d via %d safe route-start nodes goal=%s walkCost=%.0f\n",
 				g_entities[bs->client].client->pers.netname, best + 1,
-				bs->sfjWalkCount, BotSFJ_GoalName(bs->sfjTravelGoalType), cost[best]);
+				bs->sfjWalkCount, BotSFJ_GoalLabel(bs), cost[best]);
 	}
 	if (bs->sfjWalkIndex >= bs->sfjWalkCount)
 	{
@@ -7497,6 +7634,8 @@ static void BotSFJ_StartTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	bs->sfjRouteFailureNoted = qfalse;
 	bs->sfjRouteCollision = qfalse;
 	bs->sfjRouteCollisions = 0;
+	bs->sfjRouteAttemptCollisions = 0;
+	bs->sfjRouteAttemptFlawed = qfalse;
 	bs->sfjRouteCollisionTime = 0;
 	bs->sfjApproachBlockedSince = 0;
 	bs->sfjRouteGroundNode = entry + 1;
@@ -7555,7 +7694,7 @@ static void BotSFJ_StartTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		g_botSfjTrackRoutes[routeIndex].nodeCount - entry,
 		route->sampleCount >= 2 ? va("%i human replay samples", route->sampleCount) :
 			"no replay samples: approximate corners", route->wallRunCount,
-		bs->sfjTravelGoalValid ? BotSFJ_GoalName(bs->sfjTravelGoalType) : "none");
+		BotSFJ_GoalLabel(bs));
 }
 
 /*
@@ -7829,6 +7968,8 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 
 		BotSFJ_FinishTrackAttempt(bs, qfalse, qfalse);
 		bs->sfjRouteAttemptActive = qtrue;
+		bs->sfjRouteAttemptCollisions = 0;
+		bs->sfjRouteAttemptFlawed = qfalse;
 		bs->sfjRouteApproach = approaching;
 		bs->sfjRouteAcquiring = acquiring;
 		bs->sfjRouteStarted = bs->sfjRouteSampleTime = level.time;
@@ -15835,6 +15976,10 @@ static qboolean NewBotAI_ApplySwingSweepYaw(bot_state_t *bs)
 	}
 	offset = NewBotAI_GetFanSweepOffset(halfArc, sweepDir,
 		level.time - bs->fanSweepStartTime, NEWBOTAI_FAN_SWEEP_SWING_MS);
+	if (NewBotAI_SaberUsesHumanYawProfile(bs->cur_ps.fd.saberAnimLevel) &&
+		(move == LS_A_L2R || move == LS_A_R2L))
+		offset = NewBotAI_SaberHumanYawProfile(sweepDir, bs->cur_ps.fd.saberAnimLevel,
+			level.time - bs->fanSweepStartTime);
 	bs->goalAngles[YAW] = AngleNormalize360(bs->goalAngles[YAW] + offset);
 	return qtrue;
 }
@@ -16894,6 +17039,89 @@ static qboolean NewBotAI_IsBeingPulledTowardEnemy(bot_state_t *bs)
 
 	return (bs->cur_ps.forceHandExtend == HANDEXTEND_FORCEPULL ||
 		bs->cur_ps.powerups[PW_PULL] > level.time) ? qtrue : qfalse;
+}
+
+// Per-command tracking for the data-driven force reactions (see NewBotAI_TryReactiveForcePull).
+static void NewBotAI_TrackForceReactions(bot_state_t *bs)
+{
+	qboolean grounded;
+	int msSinceKick;
+
+	if (!bs || !bs->currentEnemy || !bs->currentEnemy->client || bs->currentEnemy->health <= 0)
+		return;
+	if (NewBotAI_IsBeingPulledTowardEnemy(bs) && (!bs->counterPtkPulledAt ||
+		level.time - bs->counterPtkPulledAt > NEWBOTAI_COUNTER_PTK_MAX_MS + 500))
+		bs->counterPtkPulledAt = level.time;
+	grounded = bs->cur_ps.groundEntityNum != ENTITYNUM_NONE ? qtrue : qfalse;
+	//lastFlipkickAttemptTime is stamped 300ms into the future as a cooldown.
+	msSinceKick = level.time - (bs->lastFlipkickAttemptTime - 300);
+	if (grounded && !bs->postKickWasGrounded && bs->lastFlipkickAttemptTime > 0 &&
+		bs->lastFlipkickAttemptTime != bs->postKickHandledFor &&
+		NewBotAI_PostKickEscapeApplies(msSinceKick,
+			bs->cur_ps.fd.forcePower - bs->currentEnemy->client->ps.fd.forcePower,
+			bs->frame_Enemy_Len))
+	{
+		vec3_t toEnemy;
+
+		bs->postKickHandledFor = bs->lastFlipkickAttemptTime;
+		bs->postKickLandTime = level.time;
+		bs->postKickPullPending = qtrue;
+		VectorSubtract(bs->currentEnemy->r.currentOrigin, bs->cur_ps.origin, toEnemy);
+		if (NewBotAI_SaberSafeFootwork(bs, bs->cur_ps.origin, vectoyaw(toEnemy), -1, 0, 0))
+			bs->postKickEscapeUntil = level.time + NEWBOTAI_POSTKICK_ESCAPE_MS;
+	}
+	bs->postKickWasGrounded = grounded;
+}
+
+// Fires the timed pulls learned from the dueltracks: the counter-PTK on an airborne puller and
+// the immediate pull after our flipkick lands with a force lead. Returns qtrue if pull fired.
+static qboolean NewBotAI_TryReactiveForcePull(bot_state_t *bs)
+{
+	const playerState_t *eps;
+	qboolean pullUsable;
+
+	if (!bs || !bs->currentEnemy || !bs->currentEnemy->client || bs->currentEnemy->health <= 0)
+		return qfalse;
+	eps = &bs->currentEnemy->client->ps;
+	if (bs->postKickPullPending && level.time - bs->postKickLandTime > NEWBOTAI_POSTKICK_PULL_WINDOW_MS)
+		bs->postKickPullPending = qfalse;
+	pullUsable = (bot_forcepowers.integer && !(g_forcePowerDisable.integer & (1 << FP_PULL)) &&
+		(bs->cur_ps.fd.forcePowersKnown & (1 << FP_PULL)) && bs->cur_ps.fd.forcePower >= 20 &&
+		bs->frame_Enemy_Vis && NewBotAI_CanUseForcePowerNow(bs, FP_PULL) &&
+		(!bs->currentEnemy->client->invulnerableTimer ||
+		 bs->currentEnemy->client->invulnerableTimer <= level.time)) ? qtrue : qfalse;
+	if (!pullUsable)
+		return qfalse;
+	if (bs->postKickPullPending && NewBotAI_IsEnemyPullable(bs))
+	{
+		bs->postKickPullPending = qfalse;
+		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PULL;
+		trap->EA_ForcePower(bs->client);
+		return qtrue;
+	}
+	if (bs->counterPtkPulledAt && NewBotAI_CounterPTKPullReady(level.time - bs->counterPtkPulledAt,
+		eps->groundEntityNum == ENTITYNUM_NONE, bs->frame_Enemy_Len,
+		bs->counterPtkDoneFor == bs->counterPtkPulledAt))
+	{
+		bs->counterPtkDoneFor = bs->counterPtkPulledAt;
+		level.clients[bs->client].ps.fd.forcePowerSelected = FP_PULL;
+		trap->EA_ForcePower(bs->client);
+		return qtrue;
+	}
+	return qfalse;
+}
+
+// Straight back-off for NEWBOTAI_POSTKICK_ESCAPE_MS after our flipkick lands with a force lead.
+static void NewBotAI_ApplyPostKickEscape(bot_state_t *bs, usercmd_t *ucmd, int time)
+{
+	if (bs->postKickEscapeUntil <= time || bs->sfjOwnsInput || bs->gripkickActive ||
+		bs->flipkickInputTime > time || bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
+		!bs->currentEnemy || !bs->currentEnemy->client || bs->currentEnemy->health <= 0)
+		return;
+	ucmd->forwardmove = -127;
+	ucmd->rightmove = 0;
+	if (ucmd->upmove > 0)
+		ucmd->upmove = 0;
 }
 
 // Executes the "drain + sidestep" escape used in place of a flipkick when our bot is too
@@ -26610,6 +26838,8 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	const qboolean drainlockAdvantage = NewBotAI_IsDrainlockAdvantage(bs);
 	const qboolean pullkickDrainWindow = NewBotAI_IsPullkickDrainWindow(bs);
 
+	if (NewBotAI_TryReactiveForcePull(bs))
+		return;
 	//Disengaged in a bot_conservation window - hold off on spending any force so it regens.
 	if (bs->conserveUntil > level.time)
 		return;
@@ -26620,6 +26850,9 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	vectoangles(a_fo, a_fo);
 
 	drainWeight = NewBotAI_GetDrain(bs);
+	//Post-flipkick landing with a force lead: back off and pull, never drain first.
+	if (bs->postKickEscapeUntil > level.time)
+		drainWeight = 0;
 	gripWeight = NewBotAI_GetGrip(bs);
 	if (NewBotAI_IsEnemySaberThreatImminent(bs) &&
 		NewBotAI_ShouldEmergencyDrainRollSaberThrow(bs))
@@ -26630,7 +26863,14 @@ void NewBotAI_GetDSForcepower(bot_state_t *bs)
 	if (NewBotAI_IsEnemySaberThreatImminent(bs) &&
 		NewBotAI_ShouldPlaySafeDrainVsSaberThrow(bs))
 	{
-		if (drainWeight > minWeight)
+		if (NewBotAI_PreferPullVsSaberThrow(!(g_forcePowerDisable.integer & (1 << FP_PULL)) &&
+			(bs->cur_ps.fd.forcePowersKnown & (1 << FP_PULL)) &&
+			NewBotAI_CanUseForcePowerNow(bs, FP_PULL), NewBotAI_IsEnemyPullable(bs), bs->frame_Enemy_Len))
+		{
+			level.clients[bs->client].ps.fd.forcePowerSelected = FP_PULL;
+			trap->EA_ForcePower(bs->client);
+		}
+		else if (drainWeight > minWeight)
 		{
 			level.clients[bs->client].ps.fd.forcePowerSelected = FP_DRAIN;
 			trap->EA_ForcePower(bs->client);
@@ -26923,6 +27163,8 @@ void NewBotAI_GetLSForcepower(bot_state_t *bs)
 	int scores[6], choice = -1, throwWeight = 0;
 	const float aggression = BotGetAggressionBias(bs);
 
+	if (NewBotAI_TryReactiveForcePull(bs))
+		return;
 	//Disengaged in a bot_conservation window - hold off on spending any force so it regens.
 	if (bs->conserveUntil > level.time)
 		return;
@@ -27678,6 +27920,12 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	context.chainLength = bs->saberTacticChainLength;
 	context.landedHit = bs->saberTacticLastHitTime > 0 &&
 		bs->saberTacticLastHitTime > level.time - NEWBOTAI_SABER_LANDED_HIT_WINDOW_MS;
+	NewBotAI_TrackEnemySwing(bs);
+	if (bs->enemySwingActive && bs->enemySwingStartTime > 0)
+	{
+		context.enemySwingTimingKnown = 1;
+		context.msSinceEnemySwingStart = level.time - bs->enemySwingStartTime;
+	}
 	{
 		float range2D, predicted2D, radial2D;
 
@@ -27933,8 +28181,11 @@ static void NewBotAI_SelectSaberFooting(bot_state_t *bs, playerState_t *ps,
 				NewBotAI_GetMsSinceSaberContactOnEnemy(bs),
 				bs->saberTacticAction == NEWBOTAI_SABER_TACTIC_RESET))
 		{
-			bs->saberFootingForward = -1;
-			bs->saberFootingRight = bs->saberTacticStrafeDir;
+			bs->saberFootingForward = NewBotAI_SaberRecoveryForward(
+				BG_SaberInAttack(bs->currentEnemy->client->ps.saberMove) ||
+				PM_SaberInStart(bs->currentEnemy->client->ps.saberMove));
+			bs->saberFootingRight = bs->saberTacticStrafeDir ? bs->saberTacticStrafeDir :
+				(Q_irand(0, 1) ? 1 : -1);
 		}
 		else if (phase == NEWBOTAI_SABER_YAW_ACTIVE && command->attack)
 		{
@@ -28014,6 +28265,16 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 
 	if (bs->saberTechniqueClearQueuedAttack)
 		bi->actionflags = NewBotAI_SaberOwnedActionFlags(bi->actionflags, ACTION_ATTACK, 0);
+	if (bs->circleEscapeStart && bs->saberTechniqueOwnsInputs)
+	{
+		// NewBotAI_RunCircleEscape owns movement, jump and yaw until it ends; the controller
+		// would otherwise overwrite its W+strafe turn and jump with the saber command.
+		bi->actionflags &= ~(ACTION_ATTACK | ACTION_ALT_ATTACK);
+		bs->doAttack = 0;
+		bs->saberTechniqueYawTime = 0;
+		bs->saberTechniqueYawOffset = 0.0f;
+		return;
+	}
 	if (!bs->saberTechniqueOwnsInputs || !g_newBotAI.integer || bi->weapon != WP_SABER)
 	{
 		if (bs->saberTechniqueOwnsInputs)
@@ -28052,16 +28313,20 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 	NewBotAI_SaberFanStanceInputs(ps->fd.saberAnimLevel == SS_MEDIUM || ps->fd.saberAnimLevel == SS_STAFF,
 		(newbotai_saber_family_t)bs->saberTechniqueFamily, bs->saberTacticChainLength,
 		bs->saberTacticStrafeDir, &selectedForward, &selectedRight);
-	NewBotAI_SaberAvoidWeakVertical(ps->fd.saberAnimLevel == SS_FAST || ps->fd.saberAnimLevel == SS_MEDIUM,
-		bs->saberTacticStrafeDir, &selectedForward, &selectedRight);
 	if (PM_SaberInStart(ps->saberMove))
 		NewBotAI_SaberPreparationInputs(ps->saberMove - LS_S_TL2BR, &selectedForward, &selectedRight);
 	else if (PM_SaberInTransition(ps->saberMove))
 		NewBotAI_SaberPreparationInputs(saberMoveData[ps->saberMove].chain_attack - LS_A_TL2BR,
 			&selectedForward, &selectedRight);
-	else if (selecting)
-		NewBotAI_SaberNoStrafeFallback(NewBotAI_IsDuelStrafeSuppressed(bs), 0,
-			&selectedForward, &selectedRight);
+	else
+	{
+		if (selecting)
+			NewBotAI_SaberNoStrafeFallback(NewBotAI_IsDuelStrafeSuppressed(bs), 0,
+				&selectedForward, &selectedRight);
+		// After the fallback: its W-only vertical would otherwise be T2B for blue/yellow.
+		NewBotAI_SaberAvoidWeakVertical(ps->fd.saberAnimLevel == SS_FAST || ps->fd.saberAnimLevel == SS_MEDIUM,
+			bs->saberTacticStrafeDir, &selectedForward, &selectedRight);
+	}
 	command = bs->saberTechniqueCommand;
 	if (bs->saberDefenseActive)
 	{
@@ -28151,6 +28416,23 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 			ps->saberMove - LS_A_TL2BR, time - bs->saberTechniqueAcceptedTime,
 			Com_Clampi(0, 2000, bot_wobbledelay.integer), bot_wobbleyaw.value,
 			bot_wobblepitch.value, bot_wobblespeed.value, &wiggleYaw, &wigglePitch);
+	}
+	if (!bs->saberDefenseActive && ps->saberBlocked == BLOCKED_NONE &&
+		ps->groundEntityNum != ENTITYNUM_NONE && actualDirection &&
+		NewBotAI_SaberUsesHumanYawProfile(ps->fd.saberAnimLevel) &&
+		bs->saberTechniqueAnimDuration > 0)
+	{
+		vec3_t toTarget;
+		float enemyYaw;
+
+		VectorSubtract(bs->currentEnemy->r.currentOrigin, ps->origin, toTarget);
+		enemyYaw = vectoyaw(toTarget);
+		bs->saberTechniqueYawOffset = NewBotAI_SaberLagCorrectedOffset(
+			NewBotAI_SaberHumanYawProfile(actualDirection, ps->fd.saberAnimLevel,
+				bs->saberTechniqueAnimDuration - ps->torsoTimer),
+			AngleDelta(bi->viewangles[YAW], enemyYaw));
+		bs->saberTechniqueYawTime = time;
+		pokeYaw = 0.0f;
 	}
 	bs->saberTechniqueAppliedYaw = Com_Clamp(-60.0f, 60.0f,
 		bs->saberTechniqueYawOffset + pokeYaw + wiggleYaw);
@@ -28264,7 +28546,7 @@ static void NewBotAI_ApplySaberHandover(bot_state_t *bs, bot_input_t *bi, int ti
 	int adjusted;
 	qboolean escape;
 
-	if (bs->saberTechniqueOwnsInputs || bs->saberDefenseActive ||
+	if (bs->saberTechniqueOwnsInputs || bs->saberDefenseActive || bs->circleEscapeStart ||
 		!g_newBotAI.integer || bi->weapon != WP_SABER || !bs->currentEnemy ||
 		!bs->currentEnemy->client || bs->currentEnemy->health <= 0 ||
 		//Fan holds need pure strafe to select the horizontal swing; kick/grip
@@ -28369,8 +28651,9 @@ static void NewBotAI_ApplySaberAdvance(bot_state_t *bs, bot_input_t *bi)
 		}
 		bi->speed = 0;
 		VectorClear(bi->dir);
-		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVELEFT | ACTION_MOVERIGHT);
-		bi->actionflags |= ACTION_MOVEBACK |
+		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT | ACTION_MOVERIGHT);
+		bi->actionflags |= (NewBotAI_SaberRecoveryForward(BG_SaberInAttack(eps->saberMove) ||
+			PM_SaberInStart(eps->saberMove)) > 0 ? ACTION_MOVEFORWARD : ACTION_MOVEBACK) |
 			(bs->saberSidestepDir > 0 ? ACTION_MOVERIGHT : ACTION_MOVELEFT);
 		return;
 	}

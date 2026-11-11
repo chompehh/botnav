@@ -350,6 +350,73 @@ static inline int G_ResetTrackingTables(sqlite3 *db, int learning, int *clearedR
 	return result;
 }
 
+/*
+ * compactdueltrack: drop raw per-frame events and geometry of all but the
+ * keepRecent newest duels. Summaries, participants, aggregates and all learned
+ * tables stay, so Elo, duel history and bot learning are unchanged.
+ */
+static inline int G_CompactDuelTrackTables(sqlite3 *db, int keepRecent, int preview,
+	int *deletedEvents, int *deletedGeometry)
+{
+	static const char *const tables[] = { "LocalDuelTrackEvent", "LocalDuelTrackGeometry" };
+	int *deleted[2];
+	char sql[256];
+	int result = SQLITE_OK, i;
+
+	deleted[0] = deletedEvents;
+	deleted[1] = deletedGeometry;
+	if (!db || !deletedEvents || !deletedGeometry || keepRecent < 0)
+		return SQLITE_MISUSE;
+	*deletedEvents = *deletedGeometry = 0;
+	if (!sqlite3_get_autocommit(db))
+		return SQLITE_BUSY;
+	if (!preview)
+	{
+		result = sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL);
+		/* Keep learned evidence provenance once its source events are gone. */
+		if (result == SQLITE_OK)
+			result = G_BackfillLearningEvidenceSessions(db);
+	}
+	for (i = 0; result == SQLITE_OK && i < 2; i++)
+	{
+		sqlite3_stmt *stmt = NULL;
+
+		sqlite3_snprintf(sizeof(sql), sql, preview ?
+			"SELECT COUNT(*) FROM main.%s WHERE summary_id IS NULL OR summary_id NOT IN "
+			"(SELECT id FROM main.LocalDuelTrackSummary ORDER BY id DESC LIMIT %d)" :
+			"DELETE FROM main.%s WHERE summary_id IS NULL OR summary_id NOT IN "
+			"(SELECT id FROM main.LocalDuelTrackSummary ORDER BY id DESC LIMIT %d)",
+			tables[i], keepRecent);
+		result = sqlite3_prepare_v2(db, sql, -1, &stmt, NULL);
+		if (result == SQLITE_OK)
+		{
+			result = sqlite3_step(stmt);
+			if (preview && result == SQLITE_ROW)
+			{
+				*deleted[i] = sqlite3_column_int(stmt, 0);
+				result = SQLITE_OK;
+			}
+			else if (!preview && result == SQLITE_DONE)
+			{
+				*deleted[i] = sqlite3_changes(db);
+				result = SQLITE_OK;
+			}
+		}
+		sqlite3_finalize(stmt);
+	}
+	if (preview)
+		return result;
+	if (result == SQLITE_OK)
+		result = sqlite3_exec(db, "COMMIT", NULL, NULL, NULL);
+	if (result != SQLITE_OK)
+	{
+		if (!sqlite3_get_autocommit(db))
+			sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+		*deletedEvents = *deletedGeometry = 0;
+	}
+	return result;
+}
+
 static inline int G_StrafeTrackResetEquivalent(const float *start, const float *end,
 	const float *otherStart, const float *otherEnd, int speedGroup, int otherSpeedGroup,
 	int forceJump, int otherForceJump, int moveStyle, int otherMoveStyle)
