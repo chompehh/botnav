@@ -219,6 +219,34 @@ BOOST_AUTO_TEST_CASE(short_force_starts_survive_faster_flat_connectors)
 	BOOST_CHECK(picked[3]);
 }
 
+BOOST_AUTO_TEST_CASE(final_links_onto_a_flag_are_reserved_on_top_of_coverage)
+{
+	strafetrack_export_coverage_t routes[] = {
+		coverage(0, 2000), coverage(3000, 5000), coverage(6000, 8000),
+		coverage(9000, 9300), coverage(9010, 9310), coverage(9100, 9300),
+		coverage(12000, 14000), coverage(15000, 17000), coverage(18000, 20000),
+		coverage(21000, 23000), coverage(24000, 26000), coverage(27000, 29000)
+	};
+	unsigned char picked[12] = {};
+	routes[3].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f);
+	routes[4].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f);
+	routes[5].objectiveLink = G_StrafeTrackObjectiveLinkScore(300.0f, 6, 0, 1.0f, 1.0f);
+	/* An eighth of 9 is two final links; near-duplicates (64u) collapse to the stronger one. */
+	BOOST_REQUIRE_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 12, 9, picked), 9);
+	BOOST_CHECK(picked[3]);
+	BOOST_CHECK(!picked[4]);
+	BOOST_CHECK(picked[5]);
+	/* The reservation comes on top of the general start coverage. */
+	BOOST_CHECK(picked[0]);
+	BOOST_CHECK(picked[6]);
+	BOOST_CHECK_GT(G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f),
+		G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f));
+	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(500.0f, 2, 1, 1.0f, 1.0f), 0.0f);
+	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(-1.0f, 2, 1, 1.0f, 1.0f), 0.0f);
+	BOOST_CHECK_GT(G_StrafeTrackRecencyFactor(200, 100, 200), G_StrafeTrackRecencyFactor(100, 100, 200));
+	BOOST_CHECK_EQUAL(G_StrafeTrackRecencyFactor(150, 100, 100), 1.0f);
+}
+
 BOOST_AUTO_TEST_CASE(unknown_takeoff_duration_does_not_invalidate_human_replay)
 {
 	const float takeoff[] = {-1033.8f, 8583.0f, 216.1f};

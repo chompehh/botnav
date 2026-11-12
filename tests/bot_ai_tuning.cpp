@@ -5439,18 +5439,96 @@ BOOST_AUTO_TEST_CASE( strafe_trial_classifies_and_ranks_routes )
 	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(2, 0, 0), BOT_SFJ_TRIAL_FAILING );
 	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(1, 0, 1), BOT_SFJ_TRIAL_PROVEN );
 
-	/* Trial mode: nearby untried beats an equal proven route; far untried is neutral. */
-	BOOST_CHECK_GT( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 500.0f),
-		BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_PROVEN, 500.0f) );
-	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 2000.0f), 100.0f );
-	/* Mode 0: nearby proven routes win. */
-	BOOST_CHECK_GT( BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_PROVEN, 500.0f),
-		BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_UNTRIED, 500.0f) );
-	/* Failed trials rank lower in both modes; no gain is never made attractive. */
-	BOOST_CHECK_LT( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_FAILING, 100.0f), 100.0f );
-	BOOST_CHECK_LT( BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_FAILING, 100.0f), 100.0f );
-	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(-5.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 0.0f), -5.0f );
-	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(0.0f, 0, BOT_SFJ_TRIAL_PROVEN, 0.0f), 0.0f );
+	/* Trial mode: nearby untried beats a barely tested proven route; far untried is neutral. */
+	BOOST_CHECK_GT( BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 500.0f),
+		BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_PROVEN, 0.67f, 1, 500.0f) );
+	BOOST_CHECK_EQUAL( BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 2000.0f), 100.0f );
+	/* ...but a route that keeps working gathers weight and overtakes exploration. */
+	BOOST_CHECK_GT( BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_PROVEN, 0.95f, 40, 500.0f),
+		BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 500.0f) );
+	/* Mode 0 and carriers exploit: proven wins, and the more reliable proven route wins. */
+	BOOST_CHECK_GT( BotSFJ_SelectionScore(100.0f, 0, 0, BOT_SFJ_TRIAL_PROVEN, 0.5f, 2, 500.0f),
+		BotSFJ_SelectionScore(100.0f, 0, 0, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 500.0f) );
+	BOOST_CHECK_GT( BotSFJ_SelectionScore(100.0f, 0, 0, BOT_SFJ_TRIAL_PROVEN, 0.9f, 10, 500.0f),
+		BotSFJ_SelectionScore(100.0f, 0, 0, BOT_SFJ_TRIAL_PROVEN, 0.4f, 10, 500.0f) );
+	BOOST_CHECK_LT( BotSFJ_SelectionScore(100.0f, 1, 1, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 500.0f), 100.0f );
+	BOOST_CHECK_GT( BotSFJ_SelectionScore(100.0f, 1, 1, BOT_SFJ_TRIAL_PROVEN, 0.5f, 2, 500.0f), 100.0f );
+	/* Failed trials rank lower in both modes (more so for carriers); no gain is never made attractive. */
+	BOOST_CHECK_LT( BotSFJ_SelectionScore(100.0f, 1, 0, BOT_SFJ_TRIAL_FAILING, 0.2f, 3, 100.0f), 100.0f );
+	BOOST_CHECK_LT( BotSFJ_SelectionScore(100.0f, 0, 1, BOT_SFJ_TRIAL_FAILING, 0.2f, 3, 100.0f),
+		BotSFJ_SelectionScore(100.0f, 0, 0, BOT_SFJ_TRIAL_FAILING, 0.2f, 3, 100.0f) );
+	BOOST_CHECK_EQUAL( BotSFJ_SelectionScore(-5.0f, 1, 0, BOT_SFJ_TRIAL_UNTRIED, 0.5f, 0, 0.0f), -5.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_SelectionScore(0.0f, 0, 0, BOT_SFJ_TRIAL_PROVEN, 1.0f, 9, 0.0f), 0.0f );
+	/* Deaths count against the success rate; interruptions do not. */
+	BOOST_CHECK_LT( BotSFJ_RouteSuccessRate(4, 0, 3, 2), BotSFJ_RouteSuccessRate(4, 0, 3, 0) );
+	BOOST_CHECK_CLOSE( BotSFJ_RouteSuccessRate(10, 6, 3, 0), BotSFJ_RouteSuccessRate(4, 0, 3, 0), 0.001f );
+	BOOST_CHECK_CLOSE( BotSFJ_RouteSuccessRate(0, 0, 0, 0), 0.5f, 0.001f );
+}
+
+BOOST_AUTO_TEST_CASE( goal_links_onto_the_flag_outrank_and_may_backtrack )
+{
+	/* A two-hop Force jump landing beside the flag is a final link; a long route is not. */
+	BOOST_CHECK( BotSFJ_GoalLinkRoute(2, 120.0f, 900.0f) );
+	BOOST_CHECK( !BotSFJ_GoalLinkRoute(4, 120.0f, 900.0f) );
+	BOOST_CHECK( !BotSFJ_GoalLinkRoute(2, 500.0f, 900.0f) );
+	/* Already at the goal: nothing to link. */
+	BOOST_CHECK( !BotSFJ_GoalLinkRoute(1, 120.0f, 150.0f) );
+	BOOST_CHECK( BotSFJ_GoalLinkBacktrackExempt(1, 600.0f) );
+	BOOST_CHECK( !BotSFJ_GoalLinkBacktrackExempt(1, 1200.0f) );
+	BOOST_CHECK( !BotSFJ_GoalLinkBacktrackExempt(0, 100.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 1, 64.0f, 900.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 300.0f, 900.0f, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.1f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_GoalLinkBonus(5, 1, 64.0f, 900.0f, 1.0f), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( momentum_under_walking_speed_counts_as_a_failed_hop )
+{
+	BOOST_CHECK( BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, 300, 0) );
+	/* Not launched yet, knocked back, just took off, or already slow: not the hop's fault. */
+	BOOST_CHECK( !BotSFJ_MomentumLost(0, 480.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, 300, 1) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, BOT_SFJ_MOMENTUM_GRACE_MS - 1, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 200.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 230.0f, 450.0f, 300, 0) );
+	/* A slow human hop (a careful Force jump) is not held to the floor. */
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 280.0f, 150.0f, 250.0f, 300, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( landing_near_the_flag_stops_the_route )
+{
+	BOOST_CHECK( BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 10.0f, 50.0f) );
+	BOOST_CHECK( !BotSFJ_FlagPriorityStop(1, 1, 512.0f, 400.0f, 10.0f, 50.0f) );
+	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 0, 512.0f, 400.0f, 10.0f, 50.0f) );
+	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 512.0f, 600.0f, 10.0f, 50.0f) );
+	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 0.0f, 100.0f, 10.0f, 50.0f) );
+	/* Flag on a ledge above: keep a route that climbs to it, stop one that does not. */
+	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 200.0f, 60.0f) );
+	BOOST_CHECK( BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 200.0f, 600.0f) );
+}
+
+BOOST_AUTO_TEST_CASE( chain_results_weight_edges_without_vetoing_them )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_ChainEdgeFactor(0, 0, 0), 1.0f );
+	BOOST_CHECK_LT( BotSFJ_ChainEdgeFactor(0, 0, 1), 1.0f );
+	BOOST_CHECK_LT( BotSFJ_ChainEdgeFactor(8, 0, 0), BotSFJ_ChainEdgeFactor(2, 0, 0) );
+	BOOST_CHECK_GT( BotSFJ_ChainEdgeFactor(0, 6, 0), 1.0f );
+	/* Bot failures outweigh the human prior over time. */
+	BOOST_CHECK_GT( BotSFJ_ChainEdgeFactor(0, 8, 1), 1.0f );
+	BOOST_CHECK_GE( BotSFJ_ChainEdgeFactor(1000, 0, 1), 0.5f );
+	BOOST_CHECK_LE( BotSFJ_ChainEdgeFactor(0, 1000, 0), 1.5f );
+}
+
+BOOST_AUTO_TEST_CASE( recent_plans_stick_unless_clearly_beaten )
+{
+	BOOST_CHECK( BotSFJ_PlanSticks(100.0f, 110.0f, 0) );
+	BOOST_CHECK( !BotSFJ_PlanSticks(100.0f, 120.0f, 0) );
+	BOOST_CHECK( BotSFJ_PlanSticks(100.0f, 130.0f, 1) );
+	BOOST_CHECK( !BotSFJ_PlanSticks(0.0f, 10.0f, 1) );
 }
 
 BOOST_AUTO_TEST_CASE( visible_goal_keeps_bots_moving_forward )

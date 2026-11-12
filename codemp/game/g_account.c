@@ -13259,6 +13259,9 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	static int candidateSpeedActive[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateSpeedLevel[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateObjectiveSuccess[STRAFETRACK_EXPORT_CANDIDATES];
+	static int candidateNodeCount[STRAFETRACK_EXPORT_CANDIDATES];
+	static float candidateFlagDistance[STRAFETRACK_EXPORT_CANDIDATES];
+	static float candidateEvidence[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateOrder[STRAFETRACK_EXPORT_CANDIDATES];
 	static sqlite3_int64 sortedIds[STRAFETRACK_EXPORT_CANDIDATES];
 	static float sortedStarts[STRAFETRACK_EXPORT_CANDIDATES * 3];
@@ -13269,11 +13272,14 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	static unsigned char coveragePicked[STRAFETRACK_EXPORT_CANDIDATES];
 	int groupCounts[5] = {0, 0, 0, 0, 0};
 	int groupQuotas[5], group;
-	sqlite3_stmt *routes = NULL, *nodes = NULL;
+	sqlite3_stmt *routes = NULL, *nodes = NULL, *nextRoute = NULL;
 	strafetrack_text_t text;
 	fileHandle_t f;
 	char path[MAX_QPATH];
 	char mapname[MAX_QPATH];
+	char currentMap[MAX_QPATH];
+	vec3_t flagStands[2];
+	int flagCount = 0, createdOldest = 0, createdNewest = 0;
 	int len, written = 0, candidates = 0, c, replaySamples = 0, replayWalls = 0;
 
 	if (!mapnameIn || !mapnameIn[0] || strstr(mapnameIn, "..") || strchr(mapnameIn, '\\') || strchr(mapnameIn, ':') ||
@@ -13285,6 +13291,21 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	Q_strncpyz(mapname, mapnameIn, sizeof(mapname));
 	Q_strlwr(mapname);
 	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute", mapname);
+	/* Flag stands are only known for the loaded map; other maps export without objective links. */
+	trap->Cvar_VariableStringBuffer("mapname", currentMap, sizeof(currentMap));
+	if (!Q_stricmp(currentMap, mapname))
+	{
+		static const char *flagClasses[2] = { "team_CTF_redflag", "team_CTF_blueflag" };
+		int team;
+
+		for (team = 0; team < 2; team++)
+		{
+			gentity_t *flag = G_Find(NULL, FOFS(classname), flagClasses[team]);
+
+			if (flag)
+				VectorCopy(flag->s.origin, flagStands[flagCount++]);
+		}
+	}
 	text.capacity = 65536;
 	text.length = 0;
 	text.data = (char *)malloc(text.capacity);
@@ -13360,7 +13381,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		"r.objective_success, r.created, r.max_speed, r.distance, r.duration_ms, "
 		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style, "
 		"(r.node_count BETWEEN 1 AND 2 AND EXISTS (SELECT 1 FROM LocalStrafeRouteNode "
-		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)) "
+		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)), r.node_count "
 		"FROM LocalStrafeRoute r "
 		"LEFT JOIN LocalStrafeRouteNode n ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ?1 AND r.node_count >= ?2 AND COALESCE(r.bot, 0) = 0 "
@@ -13383,6 +13404,12 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		sqlite3_bind_double(routes, 4, BOT_SFJ_TRACK_MIN_DISTANCE);
 		sqlite3_bind_double(routes, 5, BOT_SFJ_TRACK_CONNECTOR_DISTANCE);
 		sqlite3_bind_int(routes, 6, STRAFETRACK_EXPORT_CANDIDATES / 4);
+		if (sqlite3_prepare_v2(db, "SELECT n.id FROM LocalStrafeRoute r JOIN LocalStrafeRoute n "
+			"ON n.journey_id = r.journey_id AND n.start_ms > r.start_ms AND lower(n.mapname) = lower(r.mapname) "
+			"AND COALESCE(n.bot, 0) = 0 "
+			"WHERE r.id = ?1 AND r.journey_id IS NOT NULL AND r.start_ms IS NOT NULL "
+			"ORDER BY n.start_ms LIMIT 1", -1, &nextRoute, NULL) != SQLITE_OK)
+			nextRoute = NULL;
 		while (sqlite3_step(routes) == SQLITE_ROW && candidates < STRAFETRACK_EXPORT_CANDIDATES)
 		{
 			float end[3];
@@ -13413,12 +13440,26 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			candidateCoverage[candidates].moveStyle = sqlite3_column_type(routes, 17) == SQLITE_NULL ?
 				-1 : sqlite3_column_int(routes, 17);
 			candidateCoverage[candidates].shortForceJump = sqlite3_column_int(routes, 18);
+			candidateCoverage[candidates].objectiveLink = 0.0f;
+			candidateNodeCount[candidates] = sqlite3_column_int(routes, 19);
+			candidateFlagDistance[candidates] = -1.0f;
+			if (!candidates || candidateCreated[candidates] < createdOldest)
+				createdOldest = candidateCreated[candidates];
+			if (!candidates || candidateCreated[candidates] > createdNewest)
+				createdNewest = candidateCreated[candidates];
 			if (sqlite3_column_type(routes, 6) != SQLITE_NULL)
 			{
 				end[0] = (float)sqlite3_column_double(routes, 6);
 				end[1] = (float)sqlite3_column_double(routes, 7);
 				end[2] = (float)sqlite3_column_double(routes, 8);
 				VectorCopy(end, candidateCoverage[candidates].end);
+				for (group = 0; group < flagCount; group++)
+				{
+					const float d = Distance(end, flagStands[group]);
+
+					if (candidateFlagDistance[candidates] < 0.0f || d < candidateFlagDistance[candidates])
+						candidateFlagDistance[candidates] = d;
+				}
 				evidence = BotSFJ_RouteExportFactor(mapname,
 					&candidateStarts[candidates * 3], end, (int)candidateIds[candidates],
 					candidateCreated[candidates], candidateSpeedActive[candidates],
@@ -13427,8 +13468,18 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			}
 			candidateCoverage[candidates].connectorScore = BotSFJ_TrackConnectorScore(
 				(float)sqlite3_column_double(routes, 14), sqlite3_column_int(routes, 15), evidence);
+			candidateEvidence[candidates] = evidence;
 			candidateOrder[candidates] = candidates;
 			candidates++;
+		}
+		/* Newer samples outrank the older takes they improve on; final links onto a flag are reserved. */
+		for (c = 0; c < candidates; c++)
+		{
+			const float recency = G_StrafeTrackRecencyFactor(candidateCreated[c], createdOldest, createdNewest);
+
+			candidateScores[c] *= recency;
+			candidateCoverage[c].objectiveLink = G_StrafeTrackObjectiveLinkScore(candidateFlagDistance[c],
+				candidateNodeCount[c], candidateObjectiveSuccess[c] > 0, recency, candidateEvidence[c]);
 		}
 		g_strafeTrackSortScores = candidateScores;
 		qsort(candidateOrder, candidates, sizeof(candidateOrder[0]), G_StrafeTrackCompareScore);
@@ -13483,6 +13534,24 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 				G_StrafeTrackAppend(&text, va("\tspeed_level %i\n", candidateSpeedLevel[k]));
 			if (candidateObjectiveSuccess[k] >= 0)
 				G_StrafeTrackAppend(&text, va("\tobjective_success %i\n", candidateObjectiveSuccess[k] > 0 ? 1 : 0));
+			/* The route a human ran next on a capture journey: a chain prior for the bots. */
+			if (candidateObjectiveSuccess[k] > 0 && nextRoute)
+			{
+				sqlite3_reset(nextRoute);
+				sqlite3_bind_int64(nextRoute, 1, sortedIds[c]);
+				if (sqlite3_step(nextRoute) == SQLITE_ROW)
+				{
+					const sqlite3_int64 next = sqlite3_column_int64(nextRoute, 0);
+					int other;
+
+					for (other = 0; other < candidates; other++)
+						if (candidatePicked[other] && sortedIds[other] == next)
+						{
+							G_StrafeTrackAppend(&text, va("\tobjective_next %lld\n", (long long)next));
+							break;
+						}
+				}
+			}
 			sqlite3_reset(nodes);
 			sqlite3_bind_int64(nodes, 1, sortedIds[c]);
 			while (sqlite3_step(nodes) == SQLITE_ROW)
@@ -13536,6 +13605,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	}
 	sqlite3_finalize(routes);
 	sqlite3_finalize(nodes);
+	sqlite3_finalize(nextRoute);
 	G_StrafeTrackAppend(&text, STRAFETRACK_END_MARKER "\n");
 	if (!text.data)
 	{
