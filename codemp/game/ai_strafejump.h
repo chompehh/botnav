@@ -316,6 +316,22 @@ static inline int BotSFJ_TrackSpeedMatches(int recordedActive, int recordedLevel
 	return !active || droppable;
 }
 
+/* Look up evidence for the physics the hop will use, not the pre-toggle state. */
+static inline int BotSFJ_TrackStatContext(int recordedActive, int level)
+{
+	return recordedActive == 1 && level >= 1 && level <= 3 ? level : 0;
+}
+
+static inline int BotSFJ_TrackSpeedReady(int recordedActive, int recordedLevel, int active, int level)
+{
+	return recordedActive == 1 ? active && (recordedLevel < 0 || level >= recordedLevel) : !active;
+}
+
+static inline int BotSFJ_RecordedForceAir(int route, int launched, int grounded, int forceHop)
+{
+	return route > 0 && launched && !grounded && forceHop;
+}
+
 /*
  * Bot-held Speed is turned off on a normal route. Speed kept from a Speed route
  * is always dropped; Speed the bot chose in a fight is kept while the enemy is visible.
@@ -552,6 +568,13 @@ static inline int BotSFJ_AvailablePrefixEnd(const int *available, int count, int
 	return end;
 }
 
+static inline int BotSFJ_UsablePrefixFinished(int node, int count, int grounded,
+	int launched, int nextAvailable)
+{
+	return count > 0 && (node >= count ||
+		(node > 0 && grounded && !launched && !nextAvailable));
+}
+
 static inline int BotSFJ_MomentumCollision(float before, float after,
 	int elapsed, int launched, int wallContact, int externallyForced)
 {
@@ -571,6 +594,13 @@ static inline int BotSFJ_HopNeedsApproach(int grounded, int launched,
 {
 	return grounded && !launched && groundMs >= 0 &&
 		BotSFJ_GroundRestart(groundMs, takeoffDistance);
+}
+
+/* -1 is the exported sentinel for an unmeasured ground interval. */
+static inline int BotSFJ_TrackTakeoffValid(const float *position, int groundMs)
+{
+	return groundMs >= -1 && isfinite(position[0]) &&
+		isfinite(position[1]) && isfinite(position[2]);
 }
 
 /*
@@ -599,6 +629,19 @@ static inline float BotSFJ_GoalRouteScore(float before, float after, float cost)
 		before < 0.0f || after < 0.0f || cost < 0.0f)
 		return -1.0f;
 	return before - after - cost * 0.15f;
+}
+
+static inline float BotSFJ_ShortGoalBonus(int hops, int forceStart, float before,
+	float after, float approachCost, float reliability)
+{
+	float gain;
+
+	if (hops < 1 || hops > 2 || !isfinite(before) || !isfinite(after) ||
+		!isfinite(approachCost) || before < 0.0f || after < 0.0f || approachCost < 0.0f)
+		return 0.0f;
+	gain = BotSFJ_ClampSetting(before - after, 0.0f, 128.0f);
+	return gain * (forceStart ? 1.5f : 1.0f) *
+		BotSFJ_ClampSetting(reliability, 0.0f, 1.0f) / (1.0f + approachCost / 128.0f);
 }
 
 #define BOT_SFJ_TRACK_FLEE_GAIN 128.0f

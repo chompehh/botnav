@@ -466,7 +466,7 @@ static inline int G_StrafeTrackResetEquivalent(const float *start, const float *
 typedef struct
 {
 	float start[3], end[3];
-	int forceJump, moveStyle, haveEnd;
+	int forceJump, moveStyle, haveEnd, shortForceJump;
 	float connectorScore;
 } strafetrack_export_coverage_t;
 
@@ -490,9 +490,10 @@ static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverag
 }
 
 /*
- * Candidates are quality-sorted and in the same speed group. Reserve a quarter
- * for quick short connectors, then half for start coverage (including those
- * connectors), then distinct endpoints/movement before quality fills.
+ * Candidates are quality-sorted and in the same speed group. Reserve an eighth
+ * for short Force-jump starts, a quarter for all short connectors, then half for
+ * start coverage (including those connectors), then distinct endpoints/movement
+ * before quality fills.
  */
 static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_coverage_t *routes,
 	int count, int maximum, unsigned char *picked)
@@ -500,27 +501,32 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 	int pass, i, j, selected = 0;
 
 	memset(picked, 0, count);
-	while (selected < maximum / 4)
+	for (pass = 0; pass < 2; pass++)
 	{
-		int best = -1;
-
-		for (i = 0; i < count; i++)
+		const int limit = pass ? maximum / 4 : (maximum + 7) / 8;
+		while (selected < limit)
 		{
-			int represented = 0;
+			int best = -1;
 
-			if (picked[i] || !routes[i].haveEnd || routes[i].connectorScore <= 0.0f ||
-				(best >= 0 && routes[i].connectorScore <= routes[best].connectorScore))
-				continue;
-			for (j = 0; j < count && !represented; j++)
-				if (picked[j])
-					represented = G_StrafeTrackExportEquivalent(&routes[i], &routes[j]);
-			if (!represented)
-				best = i;
+			for (i = 0; i < count; i++)
+			{
+				int represented = 0;
+
+				if (picked[i] || !routes[i].haveEnd || routes[i].connectorScore <= 0.0f ||
+					(!pass && !routes[i].shortForceJump) ||
+					(best >= 0 && routes[i].connectorScore <= routes[best].connectorScore))
+					continue;
+				for (j = 0; j < count && !represented; j++)
+					if (picked[j])
+						represented = G_StrafeTrackExportEquivalent(&routes[i], &routes[j]);
+				if (!represented)
+					best = i;
+			}
+			if (best < 0)
+				break;
+			picked[best] = 1;
+			selected++;
 		}
-		if (best < 0)
-			break;
-		picked[best] = 1;
-		selected++;
 	}
 	for (pass = 0; pass < 3; pass++)
 	{

@@ -623,6 +623,7 @@ typedef struct bot_state_s
 	int					sfjSlowedSince;		// level.time speed first fell below ground speed (wall-scrape grace)
 	int					sfjRoute;			// recorded multi-node route being followed + 1 (0 = none)
 	int					sfjRouteNode;		// next landing node on sfjRoute
+	int					sfjRouteEndNode;		// exclusive end of the selected usable prefix
 	int					sfjRouteTime;		// level.time the route was last advanced
 	qboolean			sfjForceJumpHop;	// current recorded hop includes a force jump
 	float				sfjForceJumpTargetHeight;

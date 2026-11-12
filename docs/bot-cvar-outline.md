@@ -558,7 +558,7 @@ separately from strafe route capture. `resetstrafetrack` preserves both stores;
 
 `exportStrafeTrack [prefix]` (server console):
 - writes `strafetrack_routes.csv`, `strafetrack_nodes.csv` and `strafetrack_inputs.csv` next to the database (split into `_partN` files at `bot_trackexport_partmb`, like `exportDuelTrack`);
-- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 384 routes per map are chosen across Speed-context quotas. A quarter of each quota is reserved for short connectors (128-768 units), ranked by average speed divided by duration plus 0.25 seconds, weighted by observed bot results. Start coverage then fills to half the quota using starts at least 192 units apart; selection preserves distinct endpoints and movement types before filling remaining slots by quality. Short connectors use a tighter 64-unit endpoint-equivalence radius so nearby but useful links are not mistaken for duplicates. `resetstrafetrack` uses the same connector reservation and preserves sole connectors. Other human route value (length x average speed) is weighted by bounded recent bot hop results and measured performance on the loaded map, matched to recording identity and Speed context. Lifetime stalls and whole-route noncompletion do not progressively erase useful prefixes. Objective-success labels are retained without a direction-blind ranking bonus. Routes saved by older builds get their hop style measured once from stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, preserving hand-written `strafejump` blocks;
+- regenerates `botroutes/<map>.botroute` (lower-case name) for every map with recorded human routes. Up to 384 routes per map are chosen across Speed-context quotas. A quarter of each quota is reserved for short connectors (128-768 units), ranked by average speed divided by duration plus 0.25 seconds, weighted by observed bot results. Within that reservation, an eighth of the quota prioritizes one-/two-landing routes whose first hop uses Force Jump, so slower obstacle-clearing starts survive faster flat connectors. Start coverage then fills to half the quota using starts at least 192 units apart; selection preserves distinct endpoints and movement types before filling remaining slots by quality. Short connectors use a tighter 64-unit endpoint-equivalence radius so nearby but useful links are not mistaken for duplicates. `resetstrafetrack` uses the same connector reservation and preserves sole connectors. Other human route value (length x average speed) is weighted by bounded recent bot hop results and measured performance on the loaded map, matched to recording identity and Speed context. Lifetime stalls and whole-route noncompletion do not progressively erase useful prefixes. Objective-success labels are retained without a direction-blind ranking bonus. Routes saved by older builds get their hop style measured once from stored inputs. Only the section between `// BEGIN recorded strafe routes (exportStrafeTrack)` and `// END recorded strafe routes` is replaced, preserving hand-written `strafejump` blocks;
 - reloads the routes, so bots start using them immediately.
 
 Recorded route block format:
@@ -579,6 +579,14 @@ strafejump_route
 ```
 
 The route-level `speed_active` / `speed_level` keywords precede all nodes. `node_speed <active> <level>` follows its `node` and any `node_style` / `node_force` lines. Unknown route fields are omitted individually; `node_speed` is omitted if either value is unknown. Missing fields mean unknown (`-1`) to the loader, not inactive or level zero. `.botroute` stores takeoff snapshots only; command-by-command transitions are in `strafetrack_inputs.csv`.
+
+`node_takeoff <x> <y> <z> <ground_ms>` follows its landing node. A ground
+duration of `-1` means unmeasured, not malformed: the route and its replay still
+load, without inferring a grounded restart from that unknown interval. Loader
+rejections name the first invalid field instead of reporting only missing replay
+samples after metadata validation failed. `python3 scripts/strafetrack_report.py
+<csv-directory>` reports these legacy takeoffs and short Force-jump starts with
+the exact SQL queries; route CSVs alone cannot establish bot failure rates.
 
 ### Human replay samples and recorded wallruns
 
@@ -747,6 +755,12 @@ Route choice and chaining:
   completion rate, hop reliability, length (full at 2,048 units) and average
   recorded speed (full at 600 u/s). Actual approaches are checked again
   against the live map.
+- One-/two-hop connectors that reduce distance to the current objective receive
+  an additive bonus of up to 128 units (192 for a Force-jump start), reduced by
+  approach cost and poor hop reliability. The bonus cannot authorize an unavailable
+  hop or turn a route with no net goal progress into a valid selection. A nearby
+  flag within 256 units, at compatible height and directly reachable by a swept,
+  floor-checked walk, is finished on foot rather than starting another detour.
 - Strategic destinations are distinct from the next landing: CTF flag/base or
   carrier goals, visible targets or last-seen enemy positions, and other explicit
   objectives guide route-network selection. Last-seen enemies are pursued only
@@ -800,15 +814,20 @@ Route choice and chaining:
   as long. A hop loses that trust after a death on it (falling, `trigger_hurt`,
   lava, slime), or after five or more real
   failures (stalls, corroborated collisions, hazards) that outnumber its recent
-  passes; untrusted hops and improvised jumps keep every hazard check. Drifting off the human line or a wall-only arc prediction is not a failure. Only lethal
-  failures or untrusted hops receive a shared cooldown: initially 15 seconds
-  for stalls/unsafe arcs or 60 seconds for lethal traversal, doubling with
+  passes; untrusted hops and improvised jumps keep every hazard check. Drifting off
+  the human line or a wall-only arc prediction is not a failure. All observed
+  failures receive a shared cooldown, even while the hop remains trusted:
+  initially 15 seconds for a failed traversal or 60 seconds for lethal traversal, doubling with
   failures up to five minutes. Recent evidence
   persists across maps/restarts but recovers as successful passes accumulate;
   lifetime stall and repeated whole-route noncompletion penalties are not stacked.
   Acquisition failures and interruptions do not count as launched-hop failures.
-  Successful prefixes remain usable; bots
-  stop before a quarantined hop rather than repeating it. Falling, lava, slime
+  Successful prefixes remain usable; bots hand off at their last reached landing
+  before a quarantined hop rather than repeating it. This is an interruption,
+  not a whole-route completion or another failed hop. Similar-route comparisons
+  use the available entry/end and evidence within that range, in the intended
+  post-toggle Speed context. Takeoff waits for the engine to confirm the recorded
+  Speed state; Speed is not toggled mid-flight. Falling, lava, slime
   and kill-trigger deaths are attributed to the launched hop, including a
   three-second window after airborne input release. Unrelated combat deaths are
   interruptions, not terrain failures. Results are saved every 30 seconds when
