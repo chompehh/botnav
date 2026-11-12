@@ -13539,7 +13539,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	G_StrafeTrackAppend(&text, STRAFETRACK_END_MARKER "\n");
 	if (!text.data)
 	{
-		trap->Print("exportStrafeTrack: route text allocation or 24 MiB file limit exceeded; %s not overwritten.\n", path);
+		trap->Print("exportStrafeTrack: route text allocation or %i MiB file limit exceeded; %s not overwritten.\n",
+			STRAFETRACK_ROUTE_FILE_MAX / (1024 * 1024), path);
 		return -1;
 	}
 
