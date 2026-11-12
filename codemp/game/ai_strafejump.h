@@ -10,8 +10,8 @@
 #define BOT_SFJ_TRACK_APPROACH_TOUCH 48.0f
 #define BOT_SFJ_TRACK_APPROACH_TIMEOUT_MS 8000
 #define BOT_SFJ_TRACK_RETRY_MS 5000
-#define BOT_SFJ_MAX_TRACK_ROUTES 384
-#define BOT_SFJ_ROUTE_FILE_MAX (24 * 1024 * 1024)
+#define BOT_SFJ_MAX_TRACK_ROUTES 768
+#define BOT_SFJ_ROUTE_FILE_MAX (48 * 1024 * 1024)
 #define BOT_SFJ_TRACK_MAX_NODES 32
 #define BOT_SFJ_ROLL_PAUSE_MAX_MS 1500
 #define BOT_SFJ_PURSUIT_START_DISTANCE 512.0f
@@ -2386,7 +2386,7 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 /* Legacy fixed slots; new readers allocate only samples actually recorded. */
 #define BOT_SFJ_REPLAY_MAX_SAMPLES 256
 #define BOT_SFJ_REPLAY_ROUTE_SAMPLES 4096
-#define BOT_SFJ_REPLAY_TOTAL_SAMPLES 196608
+#define BOT_SFJ_REPLAY_TOTAL_SAMPLES 393216
 #define BOT_SFJ_REPLAY_MAX_SOURCE_SAMPLES 65536
 #define BOT_SFJ_REPLAY_MAX_WALLRUNS 4
 #define BOT_SFJ_REPLAY_FLAG_GROUNDED 1
@@ -3222,6 +3222,65 @@ static inline int BotSFJ_ForwardRouteBetter(float score, int backtrack,
 static inline int BotSFJ_BacktrackPaysOff(float goalGain, float walkCost)
 {
 	return goalGain >= walkCost * 0.5f + BOT_SFJ_BACKTRACK_MIN_GAIN;
+}
+
+/* With the goal in view the bot keeps going forward; only a start this close may be behind it. */
+#define BOT_SFJ_BACKTRACK_NEAR 192.0f
+
+static inline int BotSFJ_BacktrackAllowed(int backtrack, int goalVisible, float startDistance)
+{
+	return !backtrack || !goalVisible || startDistance <= BOT_SFJ_BACKTRACK_NEAR;
+}
+
+/*
+ * A hop that killed the bot, or kept failing, with no bot pass on record ends
+ * the usable route: the landing before it becomes the route's end marker.
+ */
+#define BOT_SFJ_HOP_BLOCK_FAILURES 3
+
+static inline int BotSFJ_HopBlocked(int deaths, int failures, int passes)
+{
+	return passes <= 0 && (deaths > 0 || failures >= BOT_SFJ_HOP_BLOCK_FAILURES);
+}
+
+/* bot_strafetrial: untried human routes get a trial of two resolved attempts. */
+#define BOT_SFJ_TRIAL_ATTEMPTS 2
+#define BOT_SFJ_TRIAL_RADIUS 1024.0f
+#define BOT_SFJ_PROVEN_RADIUS 768.0f
+#define BOT_SFJ_TRIAL_EXPORT_BONUS 1.25f
+
+enum
+{
+	BOT_SFJ_TRIAL_UNTRIED,
+	BOT_SFJ_TRIAL_PROVEN,
+	BOT_SFJ_TRIAL_FAILING
+};
+
+static inline int BotSFJ_RouteTrialClass(int attempts, int interrupted, int completions)
+{
+	const int resolved = attempts - interrupted;
+
+	if (completions > 0)
+		return BOT_SFJ_TRIAL_PROVEN;
+	return resolved < BOT_SFJ_TRIAL_ATTEMPTS ? BOT_SFJ_TRIAL_UNTRIED : BOT_SFJ_TRIAL_FAILING;
+}
+
+/*
+ * Trial mode favours nearby untried routes; otherwise nearby proven routes win.
+ * Routes that failed their trial always rank lower. Only positive (goal-gaining)
+ * scores change, so a trial never makes an unprofitable route attractive.
+ */
+static inline float BotSFJ_TrialScore(float score, int trial, int trialClass, float startDistance)
+{
+	if (!(score > 0.0f) || !isfinite(startDistance))
+		return score;
+	if (trialClass == BOT_SFJ_TRIAL_FAILING)
+		return score * 0.6f;
+	if (trial && trialClass == BOT_SFJ_TRIAL_UNTRIED && startDistance <= BOT_SFJ_TRIAL_RADIUS)
+		return score * 1.5f + 256.0f;
+	if (!trial && trialClass == BOT_SFJ_TRIAL_PROVEN && startDistance <= BOT_SFJ_PROVEN_RADIUS)
+		return score * 1.5f + 128.0f;
+	return score;
 }
 
 /*

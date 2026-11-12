@@ -664,6 +664,8 @@ typedef struct bot_state_s
 	int					sfjWalkIndex;
 	int					sfjWalkPath[BOT_SFJ_WALK_PATH_MAX];
 	int					sfjWalkRetryUntil;
+	int					sfjGoalViewTime;	// last goal line-of-sight check (BotSFJ_TravelGoalInView)
+	qboolean			sfjGoalVisible;
 	int					sfjWalkProgressTime;
 	int					sfjWalkCheckTime;
 	float				sfjWalkBest;

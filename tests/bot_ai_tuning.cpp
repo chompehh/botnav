@@ -5422,4 +5422,43 @@ BOOST_AUTO_TEST_CASE( human_yaw_is_for_problem_solving )
 	BOOST_CHECK( BotSFJ_HumanYawUseful(0, 1, 0, 0) );
 }
 
+BOOST_AUTO_TEST_CASE( lethal_or_repeatedly_failed_hop_blocks_until_a_pass )
+{
+	BOOST_CHECK( !BotSFJ_HopBlocked(0, 0, 0) );
+	BOOST_CHECK( BotSFJ_HopBlocked(1, 1, 0) );
+	BOOST_CHECK( !BotSFJ_HopBlocked(1, 1, 1) );
+	BOOST_CHECK( !BotSFJ_HopBlocked(0, BOT_SFJ_HOP_BLOCK_FAILURES - 1, 0) );
+	BOOST_CHECK( BotSFJ_HopBlocked(0, BOT_SFJ_HOP_BLOCK_FAILURES, 0) );
+	BOOST_CHECK( !BotSFJ_HopBlocked(0, 10, 2) );
+}
+
+BOOST_AUTO_TEST_CASE( strafe_trial_classifies_and_ranks_routes )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(0, 0, 0), BOT_SFJ_TRIAL_UNTRIED );
+	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(5, 4, 0), BOT_SFJ_TRIAL_UNTRIED );
+	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(2, 0, 0), BOT_SFJ_TRIAL_FAILING );
+	BOOST_CHECK_EQUAL( BotSFJ_RouteTrialClass(1, 0, 1), BOT_SFJ_TRIAL_PROVEN );
+
+	/* Trial mode: nearby untried beats an equal proven route; far untried is neutral. */
+	BOOST_CHECK_GT( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 500.0f),
+		BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_PROVEN, 500.0f) );
+	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 2000.0f), 100.0f );
+	/* Mode 0: nearby proven routes win. */
+	BOOST_CHECK_GT( BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_PROVEN, 500.0f),
+		BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_UNTRIED, 500.0f) );
+	/* Failed trials rank lower in both modes; no gain is never made attractive. */
+	BOOST_CHECK_LT( BotSFJ_TrialScore(100.0f, 1, BOT_SFJ_TRIAL_FAILING, 100.0f), 100.0f );
+	BOOST_CHECK_LT( BotSFJ_TrialScore(100.0f, 0, BOT_SFJ_TRIAL_FAILING, 100.0f), 100.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(-5.0f, 1, BOT_SFJ_TRIAL_UNTRIED, 0.0f), -5.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_TrialScore(0.0f, 0, BOT_SFJ_TRIAL_PROVEN, 0.0f), 0.0f );
+}
+
+BOOST_AUTO_TEST_CASE( visible_goal_keeps_bots_moving_forward )
+{
+	BOOST_CHECK( BotSFJ_BacktrackAllowed(0, 1, 2000.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackAllowed(1, 0, 2000.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackAllowed(1, 1, BOT_SFJ_BACKTRACK_NEAR) );
+	BOOST_CHECK( !BotSFJ_BacktrackAllowed(1, 1, BOT_SFJ_BACKTRACK_NEAR + 1.0f) );
+}
+
 BOOST_AUTO_TEST_SUITE_END()
