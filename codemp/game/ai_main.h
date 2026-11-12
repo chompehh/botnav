@@ -751,6 +751,14 @@ typedef struct bot_state_s
 	int					sfjPlannedEntry;
 	qboolean			sfjPlannedRetreat;
 	int					sfjLastRoute;
+	qboolean			sfjPlannedGoalLink;	// planned route is a short final link to the travel goal
+	int					sfjStickyRoute;		// route index + 1 the last plan chose (anti-flutter)
+	int					sfjStickyUntil;
+	int					sfjChainFrom;		// route index + 1 this attempt was chained from (0 = none)
+	int					sfjRouteGoalType;	// travel goal type when the current route started
+	int					sfjRouteLaunchTime;	// level.time of the current route hop's takeoff
+	qboolean			sfjRouteMomentumLost;	// speed fell under the walking floor after a takeoff
+	qboolean			sfjWasCarrying;		// carried a flag last frame (pickup edge detection)
 	int					sfjRecentRoutes[4];
 	int					sfjRecentRouteHead;
 	int					sfjRecentRouteUntil;

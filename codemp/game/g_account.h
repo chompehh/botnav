@@ -468,7 +468,30 @@ typedef struct
 	float start[3], end[3];
 	int forceJump, moveStyle, haveEnd, shortForceJump;
 	float connectorScore;
+	float objectiveLink;	/* > 0: lands near a flag stand (final link toward a flag/capture) */
 } strafetrack_export_coverage_t;
+
+/* Newer recordings rank up to 15% higher and the oldest 10% lower, so improved samples replace old ones. */
+static inline float G_StrafeTrackRecencyFactor(double created, double oldest, double newest)
+{
+	if (!(newest > oldest) || created != created)
+		return 1.0f;
+	if (created <= oldest)
+		return 0.9f;
+	if (created >= newest)
+		return 1.15f;
+	return 0.9f + 0.25f * (float)((created - oldest) / (newest - oldest));
+}
+
+/* Final links worth reserving: ends near a flag; short links and capture-journey routes rank first. */
+static inline float G_StrafeTrackObjectiveLinkScore(float endToFlag, int hops, int objectiveSuccess,
+	float recency, float evidence)
+{
+	if (!(endToFlag >= 0.0f) || endToFlag > 384.0f || hops <= 0 || !(evidence > 0.0f))
+		return 0.0f;
+	return (hops <= 3 ? 2.0f : 1.0f) * (objectiveSuccess ? 1.5f : 1.0f) *
+		(recency > 0.0f ? recency : 1.0f) * evidence * (1.0f + (384.0f - endToFlag) / 384.0f);
+}
 
 static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverage_t *a,
 	const strafetrack_export_coverage_t *b)
@@ -491,6 +514,7 @@ static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverag
 
 /*
  * Candidates are quality-sorted and in the same speed group. Reserve an eighth
+ * for final links onto a flag (best objective links first, distinct to 64u), an eighth
  * for short Force-jump starts, a quarter for all short connectors, then half for
  * start coverage (including those connectors), then distinct endpoints/movement
  * before quality fills.
@@ -498,12 +522,49 @@ static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverag
 static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_coverage_t *routes,
 	int count, int maximum, unsigned char *picked)
 {
-	int pass, i, j, selected = 0;
+	int pass, i, j, selected = 0, reserved;
 
 	memset(picked, 0, count);
+	while (selected < (maximum + 7) / 8)
+	{
+		int best = -1;
+
+		for (i = 0; i < count; i++)
+		{
+			int represented = 0;
+
+			if (picked[i] || !routes[i].haveEnd || !(routes[i].objectiveLink > 0.0f) ||
+				(best >= 0 && routes[i].objectiveLink <= routes[best].objectiveLink))
+				continue;
+			for (j = 0; j < count && !represented; j++)
+			{
+				float start = 0.0f, end = 0.0f;
+				int axis;
+
+				if (!picked[j] || routes[j].forceJump != routes[i].forceJump ||
+					routes[j].moveStyle != routes[i].moveStyle)
+					continue;
+				for (axis = 0; axis < 3; axis++)
+				{
+					const float ds = routes[i].start[axis] - routes[j].start[axis];
+					const float de = routes[i].end[axis] - routes[j].end[axis];
+					start += ds * ds;
+					end += de * de;
+				}
+				represented = start <= 64.0f * 64.0f && end <= 64.0f * 64.0f;
+			}
+			if (!represented)
+				best = i;
+		}
+		if (best < 0)
+			break;
+		picked[best] = 1;
+		selected++;
+	}
+	reserved = selected;
 	for (pass = 0; pass < 2; pass++)
 	{
-		const int limit = pass ? maximum / 4 : (maximum + 7) / 8;
+		const int limit = reserved + (pass ? maximum / 4 : (maximum + 7) / 8);
 		while (selected < limit)
 		{
 			int best = -1;
@@ -530,7 +591,7 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 	}
 	for (pass = 0; pass < 3; pass++)
 	{
-		const int limit = pass ? maximum : (maximum + 1) / 2;
+		const int limit = pass ? maximum : reserved + (maximum + 1) / 2;
 		for (i = 0; i < count && selected < limit; i++)
 		{
 			int represented = 0;

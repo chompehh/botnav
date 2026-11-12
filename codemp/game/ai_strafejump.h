@@ -3266,21 +3266,157 @@ static inline int BotSFJ_RouteTrialClass(int attempts, int interrupted, int comp
 }
 
 /*
- * Trial mode favours nearby untried routes; otherwise nearby proven routes win.
- * Routes that failed their trial always rank lower. Only positive (goal-gaining)
- * scores change, so a trial never makes an unprofitable route attractive.
+ * Bayesian completion rate of a route's resolved attempts (interruptions are
+ * not evidence). Deaths count as extra failures. Untried routes rate 0.5.
  */
-static inline float BotSFJ_TrialScore(float score, int trial, int trialClass, float startDistance)
+static inline float BotSFJ_RouteSuccessRate(int attempts, int interrupted, int completions, int deaths)
 {
-	if (!(score > 0.0f) || !isfinite(startDistance))
+	int resolved = attempts - interrupted;
+
+	if (resolved < completions)
+		resolved = completions;
+	if (resolved < 0)
+		resolved = 0;
+	if (completions < 0)
+		completions = 0;
+	if (deaths < 0)
+		deaths = 0;
+	return ((float)completions + 1.0f) / ((float)resolved + (float)deaths + 2.0f);
+}
+
+/*
+ * Route selection bias from the bots' own tally. A flag carrier, or
+ * bot_strafetrial 0, exploits: proven routes win by their success rate and a
+ * carrier does not gamble on untried routes. With bot_strafetrial 1, untried
+ * routes keep their trial bonus while proven routes gain weight as their
+ * resolved attempts accumulate, so selection drifts toward the best routes.
+ * Only positive (goal-gaining) scores change.
+ */
+static inline float BotSFJ_SelectionScore(float score, int trial, int carrying, int trialClass,
+	float rate, int resolved, float startDistance)
+{
+	float weight;
+
+	if (!(score > 0.0f) || !isfinite(startDistance) || !isfinite(rate))
 		return score;
+	rate = BotSFJ_ClampSetting(rate, 0.0f, 1.0f);
+	if (resolved < 0)
+		resolved = 0;
 	if (trialClass == BOT_SFJ_TRIAL_FAILING)
-		return score * 0.6f;
-	if (trial && trialClass == BOT_SFJ_TRIAL_UNTRIED && startDistance <= BOT_SFJ_TRIAL_RADIUS)
+		return score * (carrying ? 0.4f : 0.6f);
+	if (!trial || carrying)
+	{
+		if (trialClass == BOT_SFJ_TRIAL_PROVEN && startDistance <= BOT_SFJ_PROVEN_RADIUS)
+			return score * (1.0f + rate) + 256.0f * rate;
+		if (carrying && trialClass == BOT_SFJ_TRIAL_UNTRIED)
+			return score * 0.75f;
+		return score;
+	}
+	if (trialClass == BOT_SFJ_TRIAL_UNTRIED && startDistance <= BOT_SFJ_TRIAL_RADIUS)
 		return score * 1.5f + 256.0f;
-	if (!trial && trialClass == BOT_SFJ_TRIAL_PROVEN && startDistance <= BOT_SFJ_PROVEN_RADIUS)
-		return score * 1.5f + 128.0f;
+	if (trialClass == BOT_SFJ_TRIAL_PROVEN && startDistance <= BOT_SFJ_PROVEN_RADIUS)
+	{
+		weight = rate * (float)resolved / ((float)resolved + 4.0f);
+		return score * (1.0f + weight) + 384.0f * weight;
+	}
 	return score;
+}
+
+/*
+ * Final links: one to three recorded hops that land near the travel goal
+ * (often a Force jump onto the flag platform, sometimes after a short walk
+ * back). They outrank longer routes that pass the goal by and are not
+ * vetoed for starting behind the bot.
+ */
+#define BOT_SFJ_GOAL_LINK_RADIUS 384.0f
+#define BOT_SFJ_GOAL_LINK_MAX_HOPS 3
+#define BOT_SFJ_GOAL_LINK_BACKTRACK 768.0f
+
+static inline int BotSFJ_GoalLinkRoute(int hops, float endToGoal, float botToGoal)
+{
+	return hops >= 1 && hops <= BOT_SFJ_GOAL_LINK_MAX_HOPS &&
+		isfinite(endToGoal) && isfinite(botToGoal) && endToGoal >= 0.0f &&
+		endToGoal <= BOT_SFJ_GOAL_LINK_RADIUS && botToGoal > endToGoal + 64.0f;
+}
+
+static inline int BotSFJ_GoalLinkBacktrackExempt(int goalLink, float startDistance)
+{
+	return goalLink && isfinite(startDistance) && startDistance >= 0.0f &&
+		startDistance <= BOT_SFJ_GOAL_LINK_BACKTRACK;
+}
+
+static inline float BotSFJ_GoalLinkBonus(int hops, int forceJump, float endToGoal,
+	float botToGoal, float reliability)
+{
+	if (!BotSFJ_GoalLinkRoute(hops, endToGoal, botToGoal) || !isfinite(reliability))
+		return 0.0f;
+	return (384.0f + BOT_SFJ_GOAL_LINK_RADIUS - endToGoal) * (forceJump ? 1.25f : 1.0f) *
+		BotSFJ_ClampSetting(reliability, 0.25f, 1.0f);
+}
+
+/*
+ * A hop that leaves the bot slower than walking speed is treated like a death:
+ * the human carried real speed through it, so the bot hit something. Knockback
+ * and grabs are not the hop's fault.
+ */
+#define BOT_SFJ_MOMENTUM_FLOOR 220.0f
+#define BOT_SFJ_MOMENTUM_RECORDED_MIN 300.0f
+#define BOT_SFJ_MOMENTUM_GRACE_MS 100
+
+static inline int BotSFJ_MomentumLost(int launched, float before, float after,
+	float recorded, int sinceLaunchMs, int knocked)
+{
+	return launched && !knocked && isfinite(before) && isfinite(after) && isfinite(recorded) &&
+		sinceLaunchMs >= BOT_SFJ_MOMENTUM_GRACE_MS && recorded >= BOT_SFJ_MOMENTUM_RECORDED_MIN &&
+		before >= BOT_SFJ_MOMENTUM_FLOOR && after < BOT_SFJ_MOMENTUM_FLOOR;
+}
+
+/*
+ * bot_flagprioritydistance: a non-carrier that lands this close to a flag (or
+ * the enemy carrying it) leaves its route for it, unless the target is on
+ * another level that the rest of the route actually climbs toward.
+ */
+static inline int BotSFJ_FlagPriorityStop(int carrying, int grounded, float priorityDistance,
+	float flagDistance, float flagDz, float remainingBest)
+{
+	if (carrying || !grounded || !(priorityDistance > 0.0f) || !isfinite(flagDistance) ||
+		flagDistance < 0.0f || flagDistance > priorityDistance)
+		return 0;
+	if (!isfinite(flagDz) || fabsf(flagDz) <= 64.0f)
+		return 1;
+	return !isfinite(remainingBest) || remainingBest < 0.0f || remainingBest >= flagDistance - 32.0f;
+}
+
+/*
+ * Chain edge weight from bot results and the human capture-journey prior:
+ * proven chains cost up to half, failing ones up to 1.5x. Additive evidence,
+ * never a veto, so a better chain can still be found.
+ */
+static inline float BotSFJ_ChainEdgeFactor(int successes, int failures, int humanPrior)
+{
+	float s, f, rate, confidence;
+
+	if (successes < 0)
+		successes = 0;
+	if (failures < 0)
+		failures = 0;
+	s = (float)successes + (humanPrior ? 2.0f : 0.0f);
+	f = (float)failures;
+	if (s + f <= 0.0f)
+		return 1.0f;
+	rate = (s + 1.0f) / (s + f + 2.0f);
+	confidence = (s + f) / (s + f + 4.0f);
+	return BotSFJ_ClampSetting(1.0f - confidence * (rate - 0.5f) * 2.0f * 0.5f, 0.5f, 1.5f);
+}
+
+/* A recent plan is kept unless a new one clearly beats it (carriers commit harder). */
+#define BOT_SFJ_STICKY_MS 1500
+#define BOT_SFJ_CARRIER_STICKY_MS 4000
+
+static inline int BotSFJ_PlanSticks(float previousScore, float bestScore, int carrying)
+{
+	return previousScore > 0.0f && isfinite(previousScore) && isfinite(bestScore) &&
+		previousScore * (carrying ? 1.35f : 1.15f) >= bestScore;
 }
 
 /*
