@@ -5337,6 +5337,40 @@ BOOST_AUTO_TEST_CASE( short_connector_quality_rewards_speed_and_observed_success
 	BOOST_CHECK_EQUAL( BotSFJ_TrackConnectorScore(256.0f, 600, 0.0f), 0.0f );
 }
 
+BOOST_AUTO_TEST_CASE( short_goal_connectors_reward_force_starts_without_rewarding_detours )
+{
+	const float flat = BotSFJ_ShortGoalBonus(1, 0, 500, 300, 0, 1);
+	BOOST_CHECK_GT(BotSFJ_ShortGoalBonus(1, 1, 500, 300, 0, 1), flat);
+	BOOST_CHECK_LE(BotSFJ_ShortGoalBonus(2, 1, 2000, 0, 0, 1), 192.0f);
+	BOOST_CHECK_LT(BotSFJ_ShortGoalBonus(1, 1, 500, 300, 512, 1), flat);
+	BOOST_CHECK_LT(BotSFJ_ShortGoalBonus(1, 0, 500, 300, 0, 0.25f), flat);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortGoalBonus(1, 1, 300, 500, 0, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortGoalBonus(3, 1, 500, 300, 0, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortGoalBonus(1, 1, 500, 300, 0, 0), 0);
+}
+
+BOOST_AUTO_TEST_CASE( route_evidence_uses_post_toggle_speed_context )
+{
+	/* Activating Speed 3 must consult its cooldown before spending force. */
+	const int retryUntil[] = {0, 0, 0, 5000};
+	BOOST_CHECK_GT(retryUntil[BotSFJ_TrackStatContext(1, 3)], 1000);
+	/* Turning Speed off must consult normal-hop evidence instead. */
+	BOOST_CHECK_EQUAL(retryUntil[BotSFJ_TrackStatContext(0, 3)], 0);
+	BOOST_CHECK_EQUAL(BotSFJ_TrackStatContext(-1, 3), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_TrackStatContext(1, 0), 0);
+	BOOST_CHECK(!BotSFJ_TrackSpeedReady(1, 3, 0, 3));
+	BOOST_CHECK(!BotSFJ_TrackSpeedReady(1, 3, 1, 2));
+	BOOST_CHECK(BotSFJ_TrackSpeedReady(1, 3, 1, 3));
+	BOOST_CHECK(!BotSFJ_TrackSpeedReady(0, 0, 1, 3));
+	BOOST_CHECK(BotSFJ_TrackSpeedReady(0, 0, 0, 3));
+	BOOST_CHECK(!BotSFJ_TrackSpeedReady(-1, -1, 1, 3));
+	BOOST_CHECK(BotSFJ_RecordedForceAir(1, 1, 0, 1));
+	BOOST_CHECK(!BotSFJ_RecordedForceAir(1, 0, 0, 1));
+	BOOST_CHECK(!BotSFJ_RecordedForceAir(1, 1, 1, 1));
+	BOOST_CHECK(!BotSFJ_RecordedForceAir(0, 1, 0, 1));
+	BOOST_CHECK(!BotSFJ_RecordedForceAir(1, 1, 0, 0));
+}
+
 BOOST_AUTO_TEST_CASE( expanded_route_graph_retains_short_link_to_primary_route )
 {
 	const int count = BOT_SFJ_MAX_TRACK_ROUTES;

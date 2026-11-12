@@ -200,6 +200,50 @@ BOOST_AUTO_TEST_CASE(export_reserves_quick_short_connectors_over_long_duplicates
 	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 0, 8, picked), 0);
 }
 
+BOOST_AUTO_TEST_CASE(short_force_starts_survive_faster_flat_connectors)
+{
+	strafetrack_export_coverage_t routes[] = {
+		coverage(0, 2000), coverage(3000, 5000), coverage(6000, 8000),
+		coverage(9000, 9256), coverage(12000, 12256, 1)
+	};
+	routes[3].connectorScore = BotSFJ_TrackConnectorScore(256, 500, 1.0f);
+	routes[4].connectorScore = BotSFJ_TrackConnectorScore(256, 1800, 1.0f);
+	routes[4].shortForceJump = 1;
+	unsigned char picked[5] = {};
+	BOOST_REQUIRE_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 5, 4, picked), 4);
+	BOOST_CHECK(picked[4]);
+	BOOST_CHECK(!picked[3]);
+	/* An invalid or unscored Force route must not displace a usable connector. */
+	routes[4].connectorScore = 0;
+	BOOST_REQUIRE_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 5, 4, picked), 4);
+	BOOST_CHECK(picked[3]);
+}
+
+BOOST_AUTO_TEST_CASE(unknown_takeoff_duration_does_not_invalidate_human_replay)
+{
+	const float takeoff[] = {-1033.8f, 8583.0f, 216.1f};
+	BOOST_CHECK(BotSFJ_TrackTakeoffValid(takeoff, -1));
+	BOOST_CHECK(BotSFJ_TrackTakeoffValid(takeoff, 0));
+	BOOST_CHECK(!BotSFJ_TrackTakeoffValid(takeoff, -2));
+	const float invalid[] = {0, std::numeric_limits<float>::quiet_NaN(), 0};
+	BOOST_CHECK(!BotSFJ_TrackTakeoffValid(invalid, -1));
+	BOOST_CHECK(!BotSFJ_HopNeedsApproach(1, 0, -1, 128.0f));
+}
+
+BOOST_AUTO_TEST_CASE(cooling_suffix_hands_off_only_after_grounded_prefix)
+{
+	const int available[] = {1, 1, 0, 1};
+	BOOST_CHECK_EQUAL(BotSFJ_AvailablePrefixEnd(available, 4, 0), 2);
+	BOOST_CHECK(BotSFJ_UsablePrefixFinished(2, 4, 1, 0, available[2]));
+	BOOST_CHECK(!BotSFJ_UsablePrefixFinished(2, 4, 0, 1, available[2]));
+	BOOST_CHECK(!BotSFJ_UsablePrefixFinished(2, 4, 1, 1, available[2]));
+	BOOST_CHECK(!BotSFJ_UsablePrefixFinished(0, 4, 1, 0, 0));
+	BOOST_CHECK(!BotSFJ_UsablePrefixFinished(2, 4, 1, 0, 1));
+	BOOST_CHECK(BotSFJ_UsablePrefixFinished(4, 4, 1, 0, 1));
+	/* A cooldown expiring en route must not extend the already selected prefix. */
+	BOOST_CHECK(BotSFJ_UsablePrefixFinished(2, 2, 1, 0, 1));
+}
+
 BOOST_AUTO_TEST_CASE(timed_match_waits_through_pause_without_later_loop_skip)
 {
 	auto samples = replay(130);

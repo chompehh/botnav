@@ -14,9 +14,11 @@ from dueltrack_report import csv_provenance
 def report(directory):
 	con = sqlite3.connect(":memory:")
 	con.execute("""CREATE TABLE routes(id INTEGER PRIMARY KEY, mapname TEXT, bot INTEGER,
-		start_speed REAL, max_speed REAL, end_speed REAL, distance REAL, duration_ms INTEGER)""")
+		start_speed REAL, max_speed REAL, end_speed REAL, distance REAL, duration_ms INTEGER,
+		node_count INTEGER)""")
 	con.execute("""CREATE TABLE nodes(route_id INTEGER, node_index INTEGER, side_only_pct REAL,
-		switch_pct REAL, air_yaw_rate REAL, PRIMARY KEY(route_id,node_index))""")
+		switch_pct REAL, air_yaw_rate REAL, force_jump INTEGER, takeoff_known INTEGER,
+		ground_ms INTEGER, PRIMARY KEY(route_id,node_index))""")
 	con.execute("""CREATE TABLE inputs(route_id INTEGER, frame INTEGER, time_ms INTEGER,
 		grounded INTEGER, speed REAL, yaw_rate REAL, wish_offset REAL, velocity_source TEXT,
 		style TEXT, PRIMARY KEY(route_id,frame))""")
@@ -33,16 +35,19 @@ def report(directory):
 		bot = int(row["bot"])
 		if not bot:
 			humans.add(route_id)
-		con.execute("INSERT INTO routes VALUES (?,?,?,?,?,?,?,?)", (
+		con.execute("INSERT INTO routes VALUES (?,?,?,?,?,?,?,?,?)", (
 			route_id, row["mapname"], bot, float(row["start_speed"]),
 			float(row["max_speed"]), float(row["end_speed"]),
-			float(row["distance"]), int(row["duration_ms"])))
+			float(row["distance"]), int(row["duration_ms"]), int(row["node_count"])))
 	for row in rows(directory / "strafetrack_nodes.csv"):
-		con.execute("INSERT INTO nodes VALUES (?,?,?,?,?)", (
+		con.execute("INSERT INTO nodes VALUES (?,?,?,?,?,?,?,?)", (
 			int(row["route_id"]), int(row["node_index"]),
 			float(row["side_only_pct"]) if row["side_only_pct"] else None,
 			float(row["switch_pct"]) if row["switch_pct"] else None,
-			float(row["air_yaw_rate"]) if row["air_yaw_rate"] else None))
+			float(row["air_yaw_rate"]) if row["air_yaw_rate"] else None,
+			int(row["force_jump"]) if row.get("force_jump") else None,
+			int(all(row.get("takeoff_" + axis) for axis in "xyz")),
+			int(row["ground_ms"]) if row.get("ground_ms") else None))
 	previous = {}
 	total = 0
 	for path in sorted(directory.glob("strafetrack_inputs*.csv")):
@@ -80,8 +85,18 @@ def report(directory):
 			con.executemany("INSERT INTO inputs VALUES (?,?,?,?,?,?,?,?,?)", batch)
 	print(json.dumps({"input_rows_read": total,
 		"limits": "One capture only. Missing velocity is explicitly estimated from consecutive positions. "
-		"Post-pmove offsets are not pre-acceleration angles; key styles do not prove a named technique."}))
+		"Post-pmove offsets are not pre-acceleration angles; key styles do not prove a named technique. "
+		"Route CSVs do not contain .botroute_stats failure/cooldown evidence."}))
 	queries = [
+		"""SELECT lower(mapname) mapname, count(*) human_routes,
+			sum(node_count BETWEEN 1 AND 2) short_routes,
+			sum(node_count BETWEEN 1 AND 2 AND EXISTS (
+				SELECT 1 FROM nodes WHERE route_id=routes.id AND node_index=0 AND force_jump=1))
+				short_force_starts FROM routes WHERE bot=0 GROUP BY 1 ORDER BY 1""",
+		"""SELECT lower(mapname) mapname, count(DISTINCT routes.id) affected_human_routes,
+			count(*) takeoffs_with_unknown_duration FROM routes JOIN nodes ON routes.id=nodes.route_id
+			WHERE routes.bot=0 AND takeoff_known=1 AND (ground_ms IS NULL OR ground_ms=-1)
+			GROUP BY 1 ORDER BY 1""",
 		"""SELECT count(*) routes, count(DISTINCT mapname) maps,
 			round(avg(start_speed),1) mean_start, round(avg(max_speed),1) mean_peak,
 			round(avg(end_speed),1) mean_end, sum(max_speed > start_speed) peak_exceeds_start

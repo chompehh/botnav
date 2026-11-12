@@ -13358,7 +13358,9 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	if (sqlite3_prepare_v2(db, "SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
 		"(r.distance * r.distance / MAX(r.duration_ms, 1)), n.x, n.y, n.z, r.speed_active, r.speed_level, "
 		"r.objective_success, r.created, r.max_speed, r.distance, r.duration_ms, "
-		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style "
+		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style, "
+		"(r.node_count BETWEEN 1 AND 2 AND EXISTS (SELECT 1 FROM LocalStrafeRouteNode "
+		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)) "
 		"FROM LocalStrafeRoute r "
 		"LEFT JOIN LocalStrafeRouteNode n ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ?1 AND r.node_count >= ?2 AND COALESCE(r.bot, 0) = 0 "
@@ -13410,6 +13412,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 				-1 : sqlite3_column_int(routes, 16);
 			candidateCoverage[candidates].moveStyle = sqlite3_column_type(routes, 17) == SQLITE_NULL ?
 				-1 : sqlite3_column_int(routes, 17);
+			candidateCoverage[candidates].shortForceJump = sqlite3_column_int(routes, 18);
 			if (sqlite3_column_type(routes, 6) != SQLITE_NULL)
 			{
 				end[0] = (float)sqlite3_column_double(routes, 6);
@@ -13728,6 +13731,7 @@ typedef struct
 	int speedLevel;
 	int objectiveSuccess;
 	int forceJump;
+	int shortForceJump;
 	int moveStyle;
 	int haveEnd;
 	int recordedAt;
@@ -13769,7 +13773,9 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 		"(r.distance * r.distance / MAX(r.duration_ms, 1)), n.x, n.y, n.z, "
 		"r.speed_active, r.speed_level, COALESCE(r.objective_success, 0), "
 		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style, r.created, "
-		"r.distance, r.duration_ms "
+		"r.distance, r.duration_ms, "
+		"(r.node_count BETWEEN 1 AND 2 AND EXISTS (SELECT 1 FROM LocalStrafeRouteNode "
+		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)) "
 		"FROM LocalStrafeRoute r LEFT JOIN LocalStrafeRouteNode n "
 		"ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ? AND COALESCE(r.bot, 0) = 0 "
@@ -13798,6 +13804,7 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 		candidate->objectiveSuccess = sqlite3_column_int(routes, 11) ? 1 : 0;
 		candidate->forceJump = sqlite3_column_type(routes, 12) == SQLITE_NULL ?
 			-1 : sqlite3_column_int(routes, 12);
+		candidate->shortForceJump = sqlite3_column_int(routes, 17);
 		candidate->moveStyle = sqlite3_column_type(routes, 13) == SQLITE_NULL ?
 			-1 : sqlite3_column_int(routes, 13);
 		candidate->recordedAt = sqlite3_column_type(routes, 14) == SQLITE_NULL ?
@@ -13871,6 +13878,7 @@ static int G_StrafeTrackSelectResetKeep(sqlite3 *db, const char *mapname,
 			VectorCopy(g_strafeResetCandidates[k].end, coverageRoutes[count].end);
 			coverageRoutes[count].haveEnd = g_strafeResetCandidates[k].haveEnd;
 			coverageRoutes[count].forceJump = g_strafeResetCandidates[k].forceJump;
+			coverageRoutes[count].shortForceJump = g_strafeResetCandidates[k].shortForceJump;
 			coverageRoutes[count].moveStyle = g_strafeResetCandidates[k].moveStyle;
 			coverageRoutes[count].connectorScore = g_strafeResetCandidates[k].connectorScore;
 			count++;
