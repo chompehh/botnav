@@ -5465,11 +5465,37 @@ BOOST_AUTO_TEST_CASE( short_feeders_value_flag_proximity_and_safe_goal_progress 
 	BOOST_CHECK_GT(BotSFJ_FeederBonus(2, 60, 1000, 100, 1), away);
 	BOOST_CHECK_GT(BotSFJ_FeederBonus(2, 60, 1000, 100, 1),
 		BotSFJ_FeederBonus(2, 60, 1000, 100, 0.3f));
-	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(3, 60, 1000, 100, 1), 0);
+	BOOST_CHECK_GT(BotSFJ_FeederBonus(3, 60, 1000, 100, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(4, 60, 1000, 100, 1), 0);
 	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(2, 60, -100, 100, 1), 0);
 	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(2, 1200, 1000, 100, 1), 0);
 	BOOST_CHECK(BotSFJ_Highway(13, 4200, 564, 810));
 	BOOST_CHECK(!BotSFJ_Highway(2, 4200, 564, 810));
+	BOOST_CHECK_GT(BotSFJ_HighwayTrialBonus(1000, 1, 0, BOT_SFJ_TRIAL_UNTRIED), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_HighwayTrialBonus(1000, 0, 0, BOT_SFJ_TRIAL_UNTRIED), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_HighwayTrialBonus(1000, 1, 1, BOT_SFJ_TRIAL_UNTRIED), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_HighwayTrialBonus(1000, 1, 0, BOT_SFJ_TRIAL_PROVEN), 0);
+}
+
+BOOST_AUTO_TEST_CASE( grounded_flag_priority_uses_on_foot_pickup )
+{
+	BOOST_CHECK(BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_ATTACK, 0, 1, 200, 512));
+	BOOST_CHECK(BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_RECOVER, 0, 1, 512, 512));
+	BOOST_CHECK(BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_SCORE, 0, 1, 200, 512));
+	BOOST_CHECK(!BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_ATTACK, 1, 1, 200, 512));
+	BOOST_CHECK(!BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_ATTACK, 0, 0, 200, 512));
+	BOOST_CHECK(!BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_ATTACK, 0, 1, 513, 512));
+	BOOST_CHECK(!BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_ENEMY, 0, 1, 200, 512));
+	BOOST_CHECK(!BotSFJ_FlagPickupPriority(BOT_SFJ_GOAL_FLAG_ATTACK, 0, 1, 200, 0));
+}
+
+BOOST_AUTO_TEST_CASE( interrupted_route_flaws_do_not_count_as_route_failures )
+{
+	BOOST_CHECK(!BotSFJ_RouteFailureCounts(1, 0, 1, 1));
+	BOOST_CHECK(!BotSFJ_RouteFailureCounts(1, 0, 0, 0));
+	BOOST_CHECK(BotSFJ_RouteFailureCounts(0, 1, 0, 0));
+	BOOST_CHECK(BotSFJ_RouteFailureCounts(0, 0, 1, 0));
+	BOOST_CHECK(BotSFJ_RouteFailureCounts(0, 0, 0, 1));
 }
 
 BOOST_AUTO_TEST_CASE( strafe_trial_classifies_and_ranks_routes )
@@ -5538,6 +5564,15 @@ BOOST_AUTO_TEST_CASE( momentum_under_walking_speed_counts_as_a_failed_hop )
 	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 480.0f, 230.0f, 450.0f, 300, 0) );
 	/* A slow human hop (a careful Force jump) is not held to the floor. */
 	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 280.0f, 150.0f, 250.0f, 300, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( recent_combat_hit_does_not_invalidate_a_recorded_hop )
+{
+	BOOST_CHECK(BotSFJ_CombatHitInterruptedHop(1000, 1200, 1500, 2000));
+	BOOST_CHECK(!BotSFJ_CombatHitInterruptedHop(1000, 900, 1100, 2000));
+	BOOST_CHECK(!BotSFJ_CombatHitInterruptedHop(1000, 1200, 3301, 2000));
+	BOOST_CHECK(!BotSFJ_CombatHitInterruptedHop(1000, 1500, 1400, 2000));
+	BOOST_CHECK(!BotSFJ_CombatHitInterruptedHop(0, 1200, 1500, 2000));
 }
 
 BOOST_AUTO_TEST_CASE( flag_landings_reward_long_routes_but_prefer_short_final_links )
