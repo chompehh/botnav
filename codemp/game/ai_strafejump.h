@@ -25,6 +25,7 @@
 #define BOT_SFJ_MAX_CORRIDOR_POINTS 513
 #define BOT_SFJ_WALK_PATH_MAX 16
 #define BOT_SFJ_WALK_LINK_DISTANCE 1024.0f
+#define BOT_SFJ_RECENT_ROUTES 16
 
 typedef enum
 {
@@ -2146,6 +2147,21 @@ static inline float BotSFJ_TrackConnectorScore(float distance, int durationMs, f
 	return evidence * distance / (seconds * (seconds + 0.25f));
 }
 
+/* Hop count, not path length, identifies short platform/flag connectors. */
+static inline float BotSFJ_ShortConnectorScore(int hops, float distance, int durationMs,
+	float evidence, float flagDistance)
+{
+	float seconds, proximity;
+
+	if (hops < 1 || hops > 2 || !isfinite(distance) || distance < BOT_SFJ_TRACK_MIN_DISTANCE ||
+		durationMs <= 0 || !isfinite(evidence) || evidence <= 0.0f)
+		return 0.0f;
+	seconds = (float)durationMs / 1000.0f;
+	proximity = isfinite(flagDistance) && flagDistance >= 0.0f ?
+		BotSFJ_ClampSetting(1.0f - flagDistance / 1536.0f, 0.0f, 1.0f) : 0.0f;
+	return evidence * distance / (seconds * (seconds + 0.25f)) * (1.0f + proximity);
+}
+
 /*
  * Hand-authored .botroute strafe-jump hints (start -> end).  A bot is "on" a
  * hint when it is within startRadius of the start, or alongside the route
@@ -3233,14 +3249,33 @@ static inline int BotSFJ_BacktrackAllowed(int backtrack, int goalVisible, float 
 }
 
 /*
- * A hop that killed the bot, or kept failing, with no bot pass on record ends
- * the usable route: the landing before it becomes the route's end marker.
+ * Recent passes can outweigh ordinary failures, but never a recorded lethal
+ * traversal. Old successes must not immunize a failing suffix forever.
  */
 #define BOT_SFJ_HOP_BLOCK_FAILURES 3
 
 static inline int BotSFJ_HopBlocked(int deaths, int failures, int passes)
 {
-	return passes <= 0 && (deaths > 0 || failures >= BOT_SFJ_HOP_BLOCK_FAILURES);
+	return deaths > 0 || (failures >= BOT_SFJ_HOP_BLOCK_FAILURES && failures > passes);
+}
+
+/* Marker 0 means untrimmed; marker n+1 saves an exclusive usable hop count n. */
+static inline int BotSFJ_LearnedEnd(int count, int marker, const int *deaths,
+	const int *failures, const int *passes)
+{
+	int node, end = marker > 0 && marker <= count + 1 ? marker - 1 : count;
+
+	for (node = 0; node < end; node++)
+		if (BotSFJ_HopBlocked(deaths[node], failures[node], passes[node]))
+			return node;
+	return end;
+}
+
+static inline int BotSFJ_RouteConflictBlocks(bot_sfj_conflict_t conflict,
+	bot_sfj_phase_t phase, int route)
+{
+	return conflict == BOT_SFJ_CONFLICT_HARD ||
+		(!route && BotSFJ_ConflictBlocks(conflict, phase));
 }
 
 /* bot_strafetrial: untried human routes get a trial of two resolved attempts. */
@@ -3322,6 +3357,37 @@ static inline float BotSFJ_SelectionScore(float score, int trial, int carrying, 
 	return score;
 }
 
+/* Explore destination families, not duplicate recordings of the same line. */
+static inline float BotSFJ_DiversityScore(float score, int trial, int carrying,
+	int uses, int nearbyUses)
+{
+	float novelty;
+
+	if (!(score > 0.0f) || !trial || carrying || nearbyUses <= uses || uses < 0)
+		return score;
+	novelty = (float)(nearbyUses - uses) / ((float)nearbyUses + 2.0f);
+	return score * (1.0f + 0.35f * novelty);
+}
+
+static inline int BotSFJ_Highway(int hops, float displacement, float average, float peak)
+{
+	return hops >= 4 && displacement >= 3000.0f && average >= 450.0f && peak >= 600.0f;
+}
+
+static inline float BotSFJ_FeederBonus(int hops, float gap, float progress,
+	float flagDistance, float reliability)
+{
+	float proximity;
+
+	if (hops < 1 || hops > 2 || !isfinite(gap) || gap < 0.0f || gap > 1024.0f ||
+		!isfinite(progress) || progress < 128.0f || !isfinite(reliability))
+		return 0.0f;
+	proximity = isfinite(flagDistance) && flagDistance >= 0.0f ?
+		BotSFJ_ClampSetting(1.0f - flagDistance / 1536.0f, 0.0f, 1.0f) : 0.0f;
+	return (128.0f + 256.0f * proximity) * (1.0f - gap / 2048.0f) *
+		BotSFJ_ClampSetting(reliability, 0.0f, 1.0f);
+}
+
 /*
  * Final links: one to three recorded hops that land near the travel goal
  * (often a Force jump onto the flag platform, sometimes after a short walk
@@ -3354,37 +3420,29 @@ static inline float BotSFJ_GoalLinkBonus(int hops, int forceJump, float endToGoa
 		BotSFJ_ClampSetting(reliability, 0.25f, 1.0f);
 }
 
+static inline float BotSFJ_FlagLandingBonus(int hops, int forceJump, float endToGoal,
+	float botToGoal, float reliability)
+{
+	if (hops <= BOT_SFJ_GOAL_LINK_MAX_HOPS)
+		return BotSFJ_GoalLinkBonus(hops, forceJump, endToGoal, botToGoal, reliability);
+	return BotSFJ_GoalLinkBonus(BOT_SFJ_GOAL_LINK_MAX_HOPS, 0,
+		endToGoal, botToGoal, reliability) * 0.35f;
+}
+
 /*
- * A hop that leaves the bot slower than walking speed is treated like a death:
- * the human carried real speed through it, so the bot hit something. Knockback
- * and grabs are not the hop's fault.
+ * A hop that lands slower than walking speed may have failed to carry momentum.
+ * This is not a death, and never a reason to release steering in mid-air.
  */
 #define BOT_SFJ_MOMENTUM_FLOOR 220.0f
 #define BOT_SFJ_MOMENTUM_RECORDED_MIN 300.0f
 #define BOT_SFJ_MOMENTUM_GRACE_MS 100
 
-static inline int BotSFJ_MomentumLost(int launched, float before, float after,
+static inline int BotSFJ_MomentumLost(int launched, int grounded, float before, float after,
 	float recorded, int sinceLaunchMs, int knocked)
 {
-	return launched && !knocked && isfinite(before) && isfinite(after) && isfinite(recorded) &&
+	return launched && grounded && !knocked && isfinite(before) && isfinite(after) && isfinite(recorded) &&
 		sinceLaunchMs >= BOT_SFJ_MOMENTUM_GRACE_MS && recorded >= BOT_SFJ_MOMENTUM_RECORDED_MIN &&
 		before >= BOT_SFJ_MOMENTUM_FLOOR && after < BOT_SFJ_MOMENTUM_FLOOR;
-}
-
-/*
- * bot_flagprioritydistance: a non-carrier that lands this close to a flag (or
- * the enemy carrying it) leaves its route for it, unless the target is on
- * another level that the rest of the route actually climbs toward.
- */
-static inline int BotSFJ_FlagPriorityStop(int carrying, int grounded, float priorityDistance,
-	float flagDistance, float flagDz, float remainingBest)
-{
-	if (carrying || !grounded || !(priorityDistance > 0.0f) || !isfinite(flagDistance) ||
-		flagDistance < 0.0f || flagDistance > priorityDistance)
-		return 0;
-	if (!isfinite(flagDz) || fabsf(flagDz) <= 64.0f)
-		return 1;
-	return !isfinite(remainingBest) || remainingBest < 0.0f || remainingBest >= flagDistance - 32.0f;
 }
 
 /*
@@ -3480,23 +3538,25 @@ static inline float BotSFJ_LoopPenalty(int loops)
 
 static inline int BotSFJ_RouteInputCommitted(int route, int grounded, int phase)
 {
-	return route > 0 && (!grounded || phase == BOT_SFJ_PHASE_TAKEOFF ||
-		phase == BOT_SFJ_PHASE_REJUMP || phase == BOT_SFJ_PHASE_LANDING ||
-		phase == BOT_SFJ_PHASE_AIR);
+	(void)grounded;
+	(void)phase;
+	return route > 0;
 }
 
 /*
  * Who keeps running instead of fighting:
- *  - an airborne recorded hop keeps movement, but permits combat reactions;
+ *  - a selected recorded route keeps control through approaches and landings;
  *  - a flag carrier only fights after a push/pull/grip/knockdown or saber/melee hit
  *    (lightning and projectiles do not stop a capture run);
  *  - a bot heading to the enemy flag fights once it is hit at all.
  */
-static inline int BotNav_RouteCombatHold(int enabled, int airborneOnRoute, int carrying,
+static inline int BotNav_RouteCombatHold(int enabled, int recordedRoute, int carrying,
 	int attackingFlag, int hardHitRecent, int anyHurtRecent)
 {
-	if (!enabled || airborneOnRoute)
+	if (!enabled)
 		return 0;
+	if (recordedRoute)
+		return 1;
 	if (carrying)
 		return !hardHitRecent;
 	if (attackingFlag)

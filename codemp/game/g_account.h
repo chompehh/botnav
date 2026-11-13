@@ -512,6 +512,25 @@ static inline int G_StrafeTrackExportEquivalent(const strafetrack_export_coverag
 	return start <= radius * radius && end <= radius * radius;
 }
 
+static inline int G_StrafeTrackExportBranch(const strafetrack_export_coverage_t *a,
+	const strafetrack_export_coverage_t *b)
+{
+	int axis;
+	float start = 0.0f, end = 0.0f;
+
+	if (!a->haveEnd || !b->haveEnd)
+		return 0;
+	for (axis = 0; axis < 3; axis++)
+	{
+		const float ds = a->start[axis] - b->start[axis];
+		const float de = a->end[axis] - b->end[axis];
+
+		start += ds * ds;
+		end += de * de;
+	}
+	return start <= 192.0f * 192.0f && end > 384.0f * 384.0f;
+}
+
 /*
  * Candidates are quality-sorted and in the same speed group. Reserve an eighth
  * for final links onto a flag (best objective links first, distinct to 64u), an eighth
@@ -565,7 +584,7 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 	for (pass = 0; pass < 2; pass++)
 	{
 		const int limit = reserved + (pass ? maximum / 4 : (maximum + 7) / 8);
-		while (selected < limit)
+		while (selected < limit && selected < maximum)
 		{
 			int best = -1;
 
@@ -592,7 +611,31 @@ static inline int G_StrafeTrackSelectExportCoverage(const strafetrack_export_cov
 	for (pass = 0; pass < 3; pass++)
 	{
 		const int limit = pass ? maximum : reserved + (maximum + 1) / 2;
-		for (i = 0; i < count && selected < limit; i++)
+		/* Preserve different exits from already-covered starts before quality fills. */
+		if (pass == 1)
+		{
+			const int branchLimit = selected + (maximum + 7) / 8;
+
+			for (i = 0; i < count && selected < branchLimit && selected < maximum; i++)
+			{
+				int branch = 0, represented = 0;
+
+				if (picked[i])
+					continue;
+				for (j = 0; j < count; j++)
+					if (picked[j])
+					{
+						branch |= G_StrafeTrackExportBranch(&routes[i], &routes[j]);
+						represented |= G_StrafeTrackExportEquivalent(&routes[i], &routes[j]);
+					}
+				if (branch && !represented)
+				{
+					picked[i] = 1;
+					selected++;
+				}
+			}
+		}
+		for (i = 0; i < count && selected < limit && selected < maximum; i++)
 		{
 			int represented = 0;
 
