@@ -63,6 +63,16 @@ static inline int BotSFJ_FlagGoal(int carrying, int ownUnsafe, float ownCost, fl
 	return BOT_SFJ_GOAL_FLAG_ATTACK;
 }
 
+static inline int BotSFJ_FlagPickupPriority(int goal, int carrying, int grounded,
+	float distance, float priorityDistance)
+{
+	return !carrying && grounded &&
+		(goal == BOT_SFJ_GOAL_FLAG_ATTACK || goal == BOT_SFJ_GOAL_FLAG_RECOVER ||
+		 goal == BOT_SFJ_GOAL_FLAG_SCORE) &&
+		isfinite(distance) && isfinite(priorityDistance) &&
+		priorityDistance > 0.0f && distance <= priorityDistance;
+}
+
 static inline int BotSFJ_DefenderGoal(int ownUnsafe, float ownCost, float teammateCost)
 {
 	if (ownUnsafe && ownCost >= 0.0f && (teammateCost < 0.0f || ownCost <= teammateCost))
@@ -3291,6 +3301,12 @@ enum
 	BOT_SFJ_TRIAL_FAILING
 };
 
+static inline int BotSFJ_RouteFailureCounts(int interrupted, int stalled,
+	int attemptFlawed, int failureNoted)
+{
+	return stalled || (!interrupted && (attemptFlawed || failureNoted));
+}
+
 static inline int BotSFJ_RouteTrialClass(int attempts, int interrupted, int completions)
 {
 	const int resolved = attempts - interrupted;
@@ -3374,12 +3390,20 @@ static inline int BotSFJ_Highway(int hops, float displacement, float average, fl
 	return hops >= 4 && displacement >= 3000.0f && average >= 450.0f && peak >= 600.0f;
 }
 
+static inline float BotSFJ_HighwayTrialBonus(float score, int trial, int carrying,
+	int trialClass)
+{
+	if (!(score > 0.0f) || !trial || carrying || trialClass != BOT_SFJ_TRIAL_UNTRIED)
+		return 0.0f;
+	return score * 0.25f + 128.0f;
+}
+
 static inline float BotSFJ_FeederBonus(int hops, float gap, float progress,
 	float flagDistance, float reliability)
 {
 	float proximity;
 
-	if (hops < 1 || hops > 2 || !isfinite(gap) || gap < 0.0f || gap > 1024.0f ||
+	if (hops < 1 || hops > 3 || !isfinite(gap) || gap < 0.0f || gap > 1024.0f ||
 		!isfinite(progress) || progress < 128.0f || !isfinite(reliability))
 		return 0.0f;
 	proximity = isfinite(flagDistance) && flagDistance >= 0.0f ?
@@ -3443,6 +3467,13 @@ static inline int BotSFJ_MomentumLost(int launched, int grounded, float before, 
 	return launched && grounded && !knocked && isfinite(before) && isfinite(after) && isfinite(recorded) &&
 		sinceLaunchMs >= BOT_SFJ_MOMENTUM_GRACE_MS && recorded >= BOT_SFJ_MOMENTUM_RECORDED_MIN &&
 		before >= BOT_SFJ_MOMENTUM_FLOOR && after < BOT_SFJ_MOMENTUM_FLOOR;
+}
+
+static inline int BotSFJ_CombatHitInterruptedHop(int launchTime, int lastHurtTime,
+	int now, int interruptionMs)
+{
+	return launchTime > 0 && lastHurtTime >= launchTime && lastHurtTime <= now &&
+		interruptionMs >= 0 && now - lastHurtTime <= interruptionMs;
 }
 
 /*
