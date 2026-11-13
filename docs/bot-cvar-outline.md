@@ -208,21 +208,22 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
 | `bot_onlystrafes` | `0` | Test preference: starts eligible strafe navigation without the frequency wait and also considers safe direct enemy corridors without requiring increasing separation. Requires enabled strafe jumps and positive frequency. Does not force jumping: combat, required interactions, physics, proximity, collision and hazard checks still take priority, with ordinary navigation as fallback. |
-| `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; an improvised jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe after an engagement. Uncommitted navigation strafes with a visible enemy are held back inside close-combat range (~384 units) or when the enemy is closing fast; committed airborne recorded hops retain their trajectory without opponent-distance cancellation. |
+| `bot_minstrafe` | `320` | Minimum opponent distance (units) before a bot starts a chase or escape strafe jump; an improvised jump is cancelled once the gap shrinks below 75% of this. Lower it (even `0`) to let bots chase or retreat with a strafe after an engagement. Uncommitted navigation strafes with a visible enemy are held back inside close-combat range (~384 units) or when the enemy is closing fast; selected recorded routes retain control through approaches, takeoffs and landings without opponent-distance cancellation. |
 | `bot_strafetrack` | `1` | Records human strafe-jump routes. `0` off, `1` record (the console prints when a route begins on a circle jump and when it ends), `2` also prints each landing with its hop style. Spectators are never recorded; bots only with `bot_strafetrack_bots`. See "Recorded strafe routes" below. |
 | `bot_strafetrack_bots` | `0` | Comparison mode: `1` also records bot strafe jumps (from the bot's own takeoff) into the same tables with `bot = 1` and the player name prefixed `[bot] `, so bot and human keys/yaw can be compared command by command after `exportStrafeTrack`. Bot recordings never go into `.botroute` files and are quiet unless `bot_strafetrack 2`. |
 | `bot_strafetrack_autoexport` | `1` | Automatically rewrites and reloads generated `.botroute` data after saved human routes or confirmed CTF objectives. `0` leaves database capture enabled but requires manual `exportStrafeTrack` to regenerate route files. |
 | `bot_strafetrack_exportinterval` | `60` | Minimum seconds between automatic route-file refreshes while the server is running; values below 10 are clamped to 10 seconds. End-of-match/map/shutdown refreshes are separate. |
 | `bot_trackexport_partmb` | `2000` | Size in MB at which `exportDuelTrack` and `exportStrafeTrack` start a new `_partN` CSV. Values outside 1–2000 use 2000 (GitHub release assets must be under 2 GiB). Use `24` for repository uploads. |
 | `bot_strafe_trusthuman` | `1` | `1` lets recorded human evidence decide trusted route hops (no recorded death, failures within bounds): predicted hazards, movers or open drops are advisory throughout the hop, including circle preparation, landing-release commands and rejumps. Legacy ledge recovery does not interrupt these trusted transitions, and both think-time and final-input flight checks honor trust. Recorded deaths make the hop untrusted, restoring every check. `0` restores strict hazard prediction. Ordinary walking approaches/connections and improvised jumps always keep their hazard checks. |
-| `bot_strafetrial` | `1` | Trial period for recorded human routes. A route is untried until bots have finished two attempts that were not interrupted. Proven means at least one completion, which includes reaching the route's end marker. Failing means two resolved attempts with no completion. Each route also has a success rate, (completions+1)/(resolved attempts+deaths+2). `1` (soak/learning): nearby untried routes (start within 1,024 units) score 1.5x+256 in route picks and walking route-start seeks. Proven routes within 768 units gain weight w = rate × resolved/(resolved+4) and score (1+w)x+384w, so a route that keeps working overtakes exploration after a few runs. Untried routes rank 1.25x in `exportStrafeTrack`. `0`, and any bot carrying a flag: proven routes within 768 units score (1+rate)x+256·rate, so the most reliable proven route wins. A carrier ranks untried routes at 0.75x. Failing routes score 0.6x (0.4x for carriers). This scoring only changes routes that already gain ground toward the goal. It never overrides forward-direction priority, hop availability or safety checks. |
-| `bot_flagprioritydistance` | `512` | CTF. A bot that is not carrying a flag, and whose goal is the enemy flag or recovering its own (flag or enemy carrier), stops its recorded route when it lands within this many units of the goal. It then goes for the flag or the carrier. The exception is a goal more than 64 units above or below: the route continues if its remaining landings get closer. Within this distance the bot walks straight to a reachable goal at the same height. It starts only short final-link routes (1-3 hops landing within 384 units of the goal) and does not walk to other route starts. `0` disables. |
+| `bot_strafetrial` | `1` | Trial period for recorded human routes. A route is untried until bots have finished two attempts that were not interrupted. Proven means at least one completion, including reaching a learned end marker. Failing means two resolved attempts with no completion. Success rate is (completions+1)/(resolved attempts+deaths+2). `1`: nearby untried routes (start within 1,024 units) score 1.5x+256; proven routes within 768 units gain weight w = rate × resolved/(resolved+4) and score (1+w)x+384w. Underused destination families receive up to 35% extra weight relative to more-used alternatives sharing a start area; duplicate recordings of the same exit share usage. Untried routes rank 1.25x in `exportStrafeTrack`. `0`, and flag carriers: proven routes within 768 units score (1+rate)x+256·rate, without the diversity bonus. Carriers rank untried routes at 0.75x. Failing routes score 0.6x (0.4x for carriers). Bonuses never make a nonprogressing route eligible or override forward priority, hop availability or safety. |
+| `bot_route_combathold` | `1` | Selected recorded routes suppress incidental combat through ground approaches, circle starts, flight and rejumps, even after damage. Outside routes, carriers hold combat unless recently hard-hit; flag attackers hold until damaged or encountering the enemy carrier. `0` permits combat without releasing recorded-route movement ownership. Hard engine states and required interactions always retain priority. |
+| `bot_flagprioritydistance` | `512` | CTF. Non-carriers attacking or recovering a flag can finish directly on foot within this distance when the goal is at compatible height and the swept, floor-checked approach is safe. Proximity alone no longer ends a recorded route or excludes longer routes and highway feeders. `0` disables the enlarged radius; the ordinary 256-unit safe direct-finish check remains. |
 | `bot_strafejumps_debug` | `0` | Levels are separate views. `1`: decisions only - coloured `[SFJ reject]`, `[SFJ start]` (route, Force Speed, goal), `[SFJ end]` (route, node, reason; an enemy-close end names the enemy as `[name]`), with start/walk/no-pick lines naming the goal player or flag instead of a generic "enemy", `[SFJ trust]` and `[SFJ speed]`. `2`: level 1 plus route planning and following - `[SFJ goal]` (goal type and player/flag, distance, route chain toward it, whether the next start is ahead or a ^3BACKTRACK^7), `[SFJ approach]`, replay and pick explanations. `3`: level 1 plus execution - `[SFJ yaw]` corner/replay yaw traces, `[SFJ edge]` ledge-escape candidates, hazard vetoes, and lines drawn to the goal (cyan) and next start/landing (green ahead, yellow backtrack). Colours: ^5cyan plan/goal, ^2green start/trust, ^3yellow end/reject, ^1red hazard, ^6magenta yaw, ^8orange edge. Older detail: `2` also reports starts and selected recorded-route explanations (goal, chosen/next-best route, entry, speed summary, replay sample and wallrun counts, reliability and prior results), `trusting human route hop` with node, deviation and bot/human speed, a 1 s `[SFJ replay]` heartbeat (sample, deviation, cross-track, speeds, copied keys and yaw), route ends for going off course or losing momentum, and recorded wallrun trigger/jump-off timings; `3+` adds hop traces. All levels print to the server console and every client console, and turning the cvar on prints a banner with the loaded route, replay and wallrun counts. Rejections are rate-limited to once per second per bot, level-2 info to every 250 ms. Includes initiation waits, final-input conflicts, and waypoint-skip rejection reasons. |
 | `bot_hopfrequency` | `0` | Deprecated but retained for existing configurations. Controls ambient and discretionary combat hops only; leave `0` to disable them. Emergency jumps, kicks and required map traversal are separate. Use `bot_strafejumpfrequency` for navigation strafe initiation. |
 | `bot_waypointskip` | `2` | Waypoint goal distance, in trail points, clamped 0–256 (`0` = legacy one-point-at-a-time). Out of visible combat the bot picks a goal this many points ahead along its trail direction, follows the points in between (taking the farthest directly reachable one, with a clear grounded hull path and safe floor, up to 8 points at a time), and chains a new goal in the same direction on arrival. The goal stops at flagged waypoints and the destination, which are still visited. When the next trail point fails, the bot looks for a visible unvisited point closer to the goal and only reverses direction after 750 ms without progress. Re-acquiring a lost waypoint also prefers points toward the goal instead of the nearest one, which is often behind. A visible enemy clears the goal. |
 | `bot_redirectcooldown` | `800` | Cooldown (ms) after a wall-triggered redirect reaction. During this window the bot keeps the chosen redirect heading instead of immediately rerolling another wall reaction, reducing tight-space spin loops and repeated reaction hopping. |
 
-`bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks, deliberate use, force use/jumps, saber techniques/defense, flipkicks, knockdowns, rolls, mounted/water/use states, forced movement, special jumps, steep or moving launch surfaces, and map-required interaction/jump/duck waypoint segments retain priority. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
+`bot_strafejumps` supports only the effective JKA/co-op-JKA physics selected by `PM_GetMovePhysics`; special/ramp/super-jump styles and force-speed/rage modifiers fall back to normal AI movement. Its conservative predictor uses live speed/gravity, the command's actual pmove slicing, JKA air acceleration, and the level 0-3 levitation launch adjustment made by the second `PM_CheckJump` call in the takeoff slice. It approximates future released-command air movement; it does not run pmove, inject velocity, or change shared physics. Close combat, attacks and saber techniques/defense can prevent improvised jumps, but soft combat conflicts do not interrupt a selected recorded route. Deliberate use, exclusive force movement, flipkicks, knockdowns, mounted/water/use states, forced movement, special jumps and required map interactions retain priority; eligible rolls can pause travel. Opportunistic random-use presses are suppressed only while this controller owns the command. Airborne jump is released; a landing may immediately re-jump only after pmove consumed a released command and cleared `PMF_JUMP_HELD`. Otherwise the landing release phase remains.
 
 Recorded human routes are considered before improvised waypoint corridors. Circle starts can be approached from up to 3,072 units away along a swept, floor-checked path, even when a legacy waypoint is closer or points elsewhere; mid-route joins still require forward alignment. Routes can cross fatal drops: a validated jump is checked along its flight path and at its landing, not against empty ground underneath. With `bot_strafe_trusthuman 1`, trusted recorded hops also retain input through circle preparation and landing-release/rejump transitions when prediction sees a ledge or hazard. Ordinary grounded approaches, walking connections, improvised jumps and untrusted hops retain all checks; required mover interactions remain barriers. Ordinary walking treats a wall or a small ledge riser ahead as an obstacle, not a pit: the floor is probed where the bot can actually reach, so it keeps walking (and jumping obstacles) instead of freezing.
 
@@ -230,9 +231,9 @@ On detecting a ledge before acquiring a route, navigation gives recorded circle-
 
 ### Flag final links, carrier commitment and chain learning
 
-- **Final links.** A route segment of 1-3 hops that lands within 384 units of the travel goal (the flag stand, or the capture point for carriers) is a final link. It may start up to 768 units behind the bot, and is treated as a forward start. This holds even when the goal is out of view, because a tall Force jump often hides it. Picking a final link adds a bonus: (768 − end distance) × reliability (0.25-1), and ×1.25 when the link starts with a Force jump. Chains whose last route is a final link get the same bonus. A picked final link, or a carrier's pick within 768 units, is not swapped for a "forward walk" diversion.
+- **Final links.** A route segment of 1-3 hops that lands within 384 units of the travel goal (the flag stand, or the capture point for carriers) is a final link. It may start up to 768 units behind the bot, and is treated as a forward start. This holds even when the goal is out of view, because a tall Force jump often hides it. Picking a final link adds a bonus: (768 − end distance) × reliability (0.25-1), and ×1.25 when the link starts with a Force jump. Chains whose last route is a final link get the same bonus. Longer routes landing near a flag goal receive 35% of the ordinary final-link bonus. A picked final link, or a carrier's pick within 768 units, is not swapped for a "forward walk" diversion.
 - **Plan stickiness.** A new plan replaces the previous first route only if it scores more than 1.15× higher. The previous plan is kept for 1.5 s; for flag carriers the margin is 1.35× and the plan is kept for 4 s. When the bot picks up or loses a flag, old plans and route-start walks are dropped. A carrier keeps walking to its chosen route start for at least 4 s. A route started before the pickup ends at the next landing unless its remaining landings get the bot at least 128 units closer to the capture point.
-- **Momentum floor.** If speed drops below 220 ups after a takeoff, the hop counts as a death: lethal failure, 60 s retry, and the route ends. This applies only after 100 ms in the air and only on hops the human ran at 300+ ups. Knockback and grabs are excluded.
+- **Momentum floor.** A landing below 220 ups on a hop the human carried at 300+ ups can count as an ordinary momentum failure, never a death. This is evaluated only on the ground, at least 100 ms after launch; knockback and grabs are excluded. Airborne speed dips and collision evidence do not release steering before landing. Only genuine terrain deaths produce lethal evidence.
 - **Chain results.** Bots record each route-to-route chain they run in `botroutes/<map>.botroute_chains` (`botroute_chains 1`, then `fromId fromAt toId toAt successes failures` per line). Entries are matched by recording identity, keep up to 2,048 pairs, and halve old tallies above 24. A completed chained route is a success; a stall or failure is a failure; interruptions are ignored. Chain edge costs are multiplied by 0.5-1.5 based on these results, so a better chain can still win. The route a human ran next on a capture journey (`objective_next` in the export) counts as two prior successes. Right after a route, the seed cost of its proven follow-up gets the same factor.
 
 ### Goal-aware route acquisition and recovery
@@ -646,16 +647,13 @@ Travel goals: legacy CTF navigation and strafe-route goals share the defender re
 
 Elevators: a bot standing on a rising mover (`ET_MOVER`, including one moving from its low to its high position) holds still and skips ledge escape until the lift reaches the top (at most 20 s), pausing (not ending) an active recorded route; brief ground flicker on the platform (up to 400 ms) does not end the ride. On a lift resting at its low end with the goal above, it waits up to 4.5 s for the lift to start. A close visible enemy cancels the wait only while the lift is not rising.
 
-Committed airborne recorded hops own movement, not combat aim: bots can face and
-react to nearby enemies while preserving the planned world-space input. After
-landing, `bot_route_combathold 1` (default) prioritizes flag goals: a carrier keeps
-running unless pushed, pulled, gripped, knocked down or hit by saber/melee
-(lightning and projectiles do not stop a capture run); a bot heading for the
-enemy flag keeps going until it takes damage or meets the enemy carrier.
-`0` disables those grounded goal-based combat holds, not airborne trajectory
-preservation. Genuine engine-state conflicts still apply. Before the first hop,
-soft conflicts (queued attack, short stall) pause a route for up to 1.5 s instead
-of ending it.
+Selected recorded routes own movement through approaches, circle preparation,
+flight, landing release and rejumps. `bot_route_combathold 1` (default) suppresses
+incidental combat for the whole route, not just grounded flag travel. With `0`,
+bots may face and react to enemies while preserving planned world-space input.
+Outside routes the existing carrier/flag-attacker damage rules still apply.
+Soft attack/weapon/defense conflicts cannot interrupt a selected route; genuine
+engine-state conflicts and required interactions still apply.
 
 FFA hunting: in FFA-style modes (not CTF/CTY/siege/duel) a bot with no other goal targets the nearest opponent's live position, refreshed every `bot_hunt_interval` ms (default `3000`, `0` disables), for both recorded-route goals and legacy waypoint destinations.
 
@@ -680,15 +678,16 @@ another start right away. A chain into another route at 250 u/s or more keeps
 its momentum and uses the earlier 48-unit entry. Each recorded ground restart
 gets its own approach timer, even after twenty seconds of successful route travel.
 Residual weapon cooldown without a visible enemy or queued attack does not
-interrupt navigation; real attacks and special movement retain their gates.
+interrupt navigation; exclusive special movement retains its gates.
 Nearby mid-route pickups remain available as described below.
 
 Recorded routes take precedence over single-jump hints and waypoint corridors.
 During approach and chaining, incidental waypoint jump/duck flags and navigation
 input cannot redirect the bot; nearby required mover interactions, deliberate
-use, combat and hard engine-forced states still take priority. While on a route,
+use and hard engine-forced states still take priority. While on a route,
 each landing node is the movement goal and the strafe frequency wait is skipped.
-Every takeoff still passes landing and hazard checks. Finishing without a
+Takeoffs retain landing and hazard checks unless recorded-hop trust makes
+prediction advisory. Finishing without a
 continuation, a sustained stall, a node timeout, or an overriding interaction
 returns control to ordinary navigation. A route approach step vetoed by a real hazard holds position facing the start instead of handing frames to legacy waypoint navigation; the approach watchdog ends a real stall.
 
@@ -763,6 +762,9 @@ Route choice and chaining:
   through swept, floor-checked connectors up to 1,024 units long. Connectivity
   is refreshed one route per frame and shared between bots, with travel-direction
   diversity and alternative destination entries after failed connector checks.
+  Verified outgoing links accumulate across refreshes instead of repeatedly
+  replacing the same small set. A changed learned endpoint invalidates its old
+  links immediately; new links start from the saved safe landing coordinate.
   Planning considers safe acquisition cost, recorded speed, and bounded hop
   evidence. Reliability is averaged across the selected range, not multiplied
   across every hop in a long recording. A longer, faster or more reliable route may be chosen over
@@ -776,6 +778,19 @@ Route choice and chaining:
   hop or turn a route with no net goal progress into a valid selection. A nearby
   flag within 256 units, at compatible height and directly reachable by a swept,
   floor-checked walk, is finished on foot rather than starting another detour.
+- Short connectors are identified by hop count, not a 768-unit path-length cap.
+  Export ranking favors 1-2 hop routes near either flag and those feeding a
+  speed-compatible highway (at least four hops, 3,000 units of displacement,
+  450 ups average and 600 ups peak). Runtime feeder bonuses require an available
+  connected chain and forward improvement toward the highway start; they grow
+  near flags and shrink with poor reliability or walking gap. Export reserves
+  space for different exits sharing a start area before filling quality slots.
+- With `bot_strafetrial 1`, non-carriers explore underused destination families:
+  starts within 192 units and endpoints within 384 units share resolved usage.
+  The novelty bonus is bounded at 35%; failing routes do not receive it.
+  Each bot also remembers 16 recent routes for 60 seconds and discounts repeated
+  routes or landings by 35%, except short final links. Carriers and trial-off
+  bots retain reliability-first selection without the novelty bonus.
 - Strategic destinations are distinct from the next landing: CTF flag/base or
   carrier goals, visible targets or last-seen enemy positions, and other explicit
   objectives guide route-network selection. Last-seen enemies are pursued only
@@ -785,7 +800,7 @@ Route choice and chaining:
   Connected routes may take a local detour to make overall progress. If no circle
   can be approached directly, idle bots can use a reachable waypoint trail to
   acquire a circle start; legacy navigation is a connector/fallback, not a nearer
-  waypoint veto. Close combat, recovery, camping and required interactions retain
+  waypoint veto. Recovery, camping and required interactions retain
   their ownership gates.
 - Nonnegative aggression favors route pursuit beyond the strafe start/stop
   distances. Defensive aggression and existing retreat decisions favor routes
@@ -794,15 +809,19 @@ Route choice and chaining:
 - Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by recording
   ID, creation time, start and last landing, and execution speed context so
   re-exports retain history without contaminating different recordings.
-  The versioned format begins with `botroute_stats 8`; each route stores start x/y/z, last landing x/y/z,
+  The versioned format begins with `botroute_stats 10`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
   traversal deaths, unsafe-arc rejections, and 32 groups of hop failures, passes,
   successful force-jump hold height, and successful yaw correction, followed by
   recording ID and creation time, then 32 groups of hop deaths, recent failures,
-  and recent passes, then (version 8) the learned backtrack-loop count.
+  and recent passes, then (version 8) the learned backtrack-loop count,
+  (version 9) collision count and last outcome, and (version 10) an exclusive
+  usable-hop marker plus its saved terminal x/y/z. Marker 0 means untrimmed;
+  marker n+1 retains n hops. The original recording endpoints remain identity
+  fields, separate from this learned terminal.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
-  unknown legacy history. Legacy eight-field and versions 2-7
+  unknown legacy history. Legacy eight-field and versions 2-9
   remain readable. Version 3 files are migrated once: hop failures, stalls
   and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
   cleared, while deaths, passes and completions are kept. Older formats cannot
@@ -819,13 +838,13 @@ Route choice and chaining:
   own arc prediction finds wall or ledge contact, an off-corridor landing or a
   slide, but no hazard (trigger_hurt, lava, slime, nodrop, open drop, damaging
   landing or mover), the bot still takes the hop the human took. Grounded
-  frames on a trusted hop are released only for hazards, not for ledge lips.
+  frames on a trusted hop are not released merely for ledge lips.
   With `bot_strafe_trusthuman 1` (default) recorded evidence, not the bot's
   scan, decides trusted hops: a predicted hazard, mover or open drop on a
   trusted hop is logged but does not block the takeoff, and a hazard seen in
   flight does not abort the hop. A trusted hop survives two momentum
   collisions (the bot copies the human's yaw after the second if it is losing speed) and ends on the
-  third; replay on a trusted hop is abandoned only at 1.5x the drift for twice
+  third after landing, retaining airborne steering; replay on a trusted hop is abandoned only at 1.5x the drift for twice
   as long. A hop loses that trust after a death on it (falling, `trigger_hurt`,
   lava, slime), or after five or more real
   failures (stalls, corroborated collisions, hazards) that outnumber its recent
@@ -837,9 +856,15 @@ Route choice and chaining:
   persists across maps/restarts but recovers as successful passes accumulate;
   lifetime stall and repeated whole-route noncompletion penalties are not stacked.
   Acquisition failures and interruptions do not count as launched-hop failures.
-  Successful prefixes remain usable; bots hand off at their last reached landing
-  before a quarantined hop rather than repeating it. This is an interruption,
-  not a whole-route completion or another failed hop. Similar-route comparisons
+  An actual hop death, or at least three recent failures outnumbering recent
+  passes, permanently shortens the usable route to the preceding recorded
+  landing. Historical passes cannot immunize a failing suffix. The marker and
+  coordinate survive reload even if recent counters later decay, and the route
+  network reconnects from that safe endpoint. Reaching this learned endpoint
+  is a completion of the usable prefix, not another failed hop. Temporary
+  cooldown handoffs remain interruptions. Existing death evidence is retained;
+  older formats cannot distinguish historical false momentum deaths.
+  Similar-route comparisons
   use the available entry/end and evidence within that range, in the intended
   post-toggle Speed context. Takeoff waits for the engine to confirm the recorded
   Speed state; Speed is not toggled mid-flight. Falling, lava, slime
@@ -1294,13 +1319,12 @@ are not randomized by this adjustment.
 FFA hunting, pursuit and fallback opponent waypoints exclude players in somebody
 else's private duel. A bot in a private duel still targets its own partner.
 
-An airborne recorded-route hop retains its planned world-space movement while
-turning toward a visible opponent. This includes flag carriers and flag attackers:
-they can use legal attacks or push/pull without converting an aim turn into a
-different jump direction. After landing, `bot_route_combathold` resumes its
-goal-priority rules. Carriers continue toward their goal unless recently hit by
-a hard attack, pushed/pulled, gripped or knocked down; attackers can also respond
-to ordinary damage or an encountered enemy carrier.
+A selected recorded route retains its planned world-space movement despite
+nearby opponents. With `bot_route_combathold 0`, legal combat aim/actions may
+continue without converting an aim turn into a different jump direction.
+The default `1` holds combat through the entire route, including edge landings
+and circle starts. Outside a route, carriers and flag attackers retain their
+ordinary damage-response rules. Hard movement restrictions still apply.
 
 Lethal-hazard push/pull selection is available without `bot_bully`.
 `bot_bully 1` lets it take priority over nonemergency queued attacks; it does not

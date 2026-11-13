@@ -637,6 +637,7 @@ typedef struct bot_state_s
 	qboolean			sfjRouteHopLaunched;
 	qboolean			sfjRouteFailureNoted;
 	int					sfjRouteLaunchedNode;
+	qboolean			sfjRouteLaunchTrusted;
 	float				sfjRouteSampleSpeed;
 	vec3_t				sfjRouteSampleVelocity;
 	qboolean			sfjRouteCollision;
@@ -759,7 +760,7 @@ typedef struct bot_state_s
 	int					sfjRouteLaunchTime;	// level.time of the current route hop's takeoff
 	qboolean			sfjRouteMomentumLost;	// speed fell under the walking floor after a takeoff
 	qboolean			sfjWasCarrying;		// carried a flag last frame (pickup edge detection)
-	int					sfjRecentRoutes[4];
+	int					sfjRecentRoutes[BOT_SFJ_RECENT_ROUTES];
 	int					sfjRecentRouteHead;
 	int					sfjRecentRouteUntil;
 	int					sfjNextWaypointAcquire;

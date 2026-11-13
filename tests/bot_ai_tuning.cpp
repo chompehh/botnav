@@ -91,10 +91,10 @@ BOOST_AUTO_TEST_CASE( strafe_hazard_force_uses_enemy_relative_direction_and_prio
 	BOOST_CHECK( !BotNav_HazardMayOverride(1, 1, 1) );
 }
 
-BOOST_AUTO_TEST_CASE( strafe_flag_carriers_react_in_air_then_resume_capture_priority )
+BOOST_AUTO_TEST_CASE( strafe_routes_hold_combat_through_air_and_ground )
 {
-	BOOST_CHECK( !BotNav_RouteCombatHold(1, 1, 1, 0, 0, 0) );
-	BOOST_CHECK( !BotNav_RouteCombatHold(1, 1, 0, 1, 0, 0) );
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 1, 1, 0, 0, 0) );
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 1, 0, 1, 0, 0) );
 	BOOST_CHECK( BotNav_RouteCombatHold(1, 0, 1, 0, 0, 0) );
 	BOOST_CHECK( BotNav_RouteCombatHold(1, 0, 0, 1, 0, 0) );
 	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 1, 0, 1, 0) );
@@ -5213,8 +5213,8 @@ BOOST_AUTO_TEST_CASE( route_runners_hold_combat )
 {
 	/* disabled */
 	BOOST_CHECK( !BotNav_RouteCombatHold(0, 1, 1, 1, 0, 0) );
-	/* A committed hop keeps movement ownership, but does not suppress combat. */
-	BOOST_CHECK( !BotNav_RouteCombatHold(1, 1, 0, 0, 1, 1) );
+	/* Damage does not turn a recorded hop or its next takeoff into combat movement. */
+	BOOST_CHECK( BotNav_RouteCombatHold(1, 1, 0, 0, 1, 1) );
 	/* carriers ignore lightning/projectiles, not saber/push/grip */
 	BOOST_CHECK( BotNav_RouteCombatHold(1, 0, 1, 0, 0, 1) );
 	BOOST_CHECK( !BotNav_RouteCombatHold(1, 0, 1, 0, 1, 1) );
@@ -5231,13 +5231,14 @@ BOOST_AUTO_TEST_CASE( route_input_commitment_survives_enemy_and_landing_transiti
 	{
 		BOOST_CHECK( BotSFJ_RouteInputCommitted(1, 0, phase) );
 		BOOST_CHECK( !BotSFJ_RouteInputCommitted(0, 0, phase) );
-		const int committed = BotSFJ_RouteInputCommitted(1, 1, phase);
-		BOOST_CHECK_EQUAL( committed, phase == BOT_SFJ_PHASE_TAKEOFF ||
-			phase == BOT_SFJ_PHASE_LANDING || phase == BOT_SFJ_PHASE_REJUMP ||
-			phase == BOT_SFJ_PHASE_AIR );
+		BOOST_CHECK( BotSFJ_RouteInputCommitted(1, 1, phase) );
+		BOOST_CHECK( !BotSFJ_RouteConflictBlocks(BOT_SFJ_CONFLICT_SOFT,
+			(bot_sfj_phase_t)phase, 1) );
+		BOOST_CHECK( BotSFJ_RouteConflictBlocks(BOT_SFJ_CONFLICT_HARD,
+			(bot_sfj_phase_t)phase, 1) );
 		for (int hardHit = 0; hardHit < 2; ++hardHit)
 			for (int hurt = 0; hurt < 2; ++hurt)
-				BOOST_CHECK( !BotNav_RouteCombatHold(1,
+				BOOST_CHECK( BotNav_RouteCombatHold(1,
 					BotSFJ_RouteInputCommitted(1, 0, phase), 0, 0, hardHit, hurt) );
 	}
 }
@@ -5422,14 +5423,53 @@ BOOST_AUTO_TEST_CASE( human_yaw_is_for_problem_solving )
 	BOOST_CHECK( BotSFJ_HumanYawUseful(0, 1, 0, 0) );
 }
 
-BOOST_AUTO_TEST_CASE( lethal_or_repeatedly_failed_hop_blocks_until_a_pass )
+BOOST_AUTO_TEST_CASE( lethal_or_recently_failing_hops_trim_despite_old_passes )
 {
 	BOOST_CHECK( !BotSFJ_HopBlocked(0, 0, 0) );
 	BOOST_CHECK( BotSFJ_HopBlocked(1, 1, 0) );
-	BOOST_CHECK( !BotSFJ_HopBlocked(1, 1, 1) );
+	BOOST_CHECK( BotSFJ_HopBlocked(1, 1, 1) );
 	BOOST_CHECK( !BotSFJ_HopBlocked(0, BOT_SFJ_HOP_BLOCK_FAILURES - 1, 0) );
 	BOOST_CHECK( BotSFJ_HopBlocked(0, BOT_SFJ_HOP_BLOCK_FAILURES, 0) );
-	BOOST_CHECK( !BotSFJ_HopBlocked(0, 10, 2) );
+	BOOST_CHECK( BotSFJ_HopBlocked(0, 10, 2) );
+	BOOST_CHECK( !BotSFJ_HopBlocked(0, 3, 5) );
+}
+
+BOOST_AUTO_TEST_CASE( learned_terminal_survives_reload_without_failure_counters )
+{
+	int deaths[4] = {}, failures[4] = {}, passes[4] = {2, 2, 1, 0};
+	failures[2] = 3;
+	const int end = BotSFJ_LearnedEnd(4, 0, deaths, failures, passes);
+	BOOST_CHECK_EQUAL(end, 2);
+	const int savedMarker = end + 1;
+	std::memset(failures, 0, sizeof(failures));
+	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, savedMarker, deaths, failures, passes), 2);
+	deaths[1] = 1;
+	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, savedMarker, deaths, failures, passes), 1);
+	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, 1, deaths, failures, passes), 0);
+}
+
+BOOST_AUTO_TEST_CASE( route_diversity_prefers_underused_exits_without_inventing_goal_gain )
+{
+	const float used = BotSFJ_DiversityScore(1000, 1, 0, 12, 12);
+	BOOST_CHECK_GT(BotSFJ_DiversityScore(1000, 1, 0, 0, 12), used);
+	BOOST_CHECK_LT(BotSFJ_DiversityScore(600, 1, 0, 0, 12), used);
+	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(1000, 0, 0, 0, 12), used);
+	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(1000, 1, 1, 0, 12), used);
+	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(-20, 1, 0, 0, 12), -20);
+	BOOST_CHECK_LE(BotSFJ_DiversityScore(1000, 1, 0, 0, 100000), 1350);
+}
+
+BOOST_AUTO_TEST_CASE( short_feeders_value_flag_proximity_and_safe_goal_progress )
+{
+	const float away = BotSFJ_FeederBonus(2, 60, 1000, 2000, 1);
+	BOOST_CHECK_GT(BotSFJ_FeederBonus(2, 60, 1000, 100, 1), away);
+	BOOST_CHECK_GT(BotSFJ_FeederBonus(2, 60, 1000, 100, 1),
+		BotSFJ_FeederBonus(2, 60, 1000, 100, 0.3f));
+	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(3, 60, 1000, 100, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(2, 60, -100, 100, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_FeederBonus(2, 1200, 1000, 100, 1), 0);
+	BOOST_CHECK(BotSFJ_Highway(13, 4200, 564, 810));
+	BOOST_CHECK(!BotSFJ_Highway(2, 4200, 564, 810));
 }
 
 BOOST_AUTO_TEST_CASE( strafe_trial_classifies_and_ranks_routes )
@@ -5488,27 +5528,26 @@ BOOST_AUTO_TEST_CASE( goal_links_onto_the_flag_outrank_and_may_backtrack )
 
 BOOST_AUTO_TEST_CASE( momentum_under_walking_speed_counts_as_a_failed_hop )
 {
-	BOOST_CHECK( BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( BotSFJ_MomentumLost(1, 1, 480.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 0, 480.0f, 150.0f, 450.0f, 300, 0) );
 	/* Not launched yet, knocked back, just took off, or already slow: not the hop's fault. */
-	BOOST_CHECK( !BotSFJ_MomentumLost(0, 480.0f, 150.0f, 450.0f, 300, 0) );
-	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, 300, 1) );
-	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 150.0f, 450.0f, BOT_SFJ_MOMENTUM_GRACE_MS - 1, 0) );
-	BOOST_CHECK( !BotSFJ_MomentumLost(1, 200.0f, 150.0f, 450.0f, 300, 0) );
-	BOOST_CHECK( !BotSFJ_MomentumLost(1, 480.0f, 230.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(0, 1, 480.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 480.0f, 150.0f, 450.0f, 300, 1) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 480.0f, 150.0f, 450.0f, BOT_SFJ_MOMENTUM_GRACE_MS - 1, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 200.0f, 150.0f, 450.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 480.0f, 230.0f, 450.0f, 300, 0) );
 	/* A slow human hop (a careful Force jump) is not held to the floor. */
-	BOOST_CHECK( !BotSFJ_MomentumLost(1, 280.0f, 150.0f, 250.0f, 300, 0) );
+	BOOST_CHECK( !BotSFJ_MomentumLost(1, 1, 280.0f, 150.0f, 250.0f, 300, 0) );
 }
 
-BOOST_AUTO_TEST_CASE( landing_near_the_flag_stops_the_route )
+BOOST_AUTO_TEST_CASE( flag_landings_reward_long_routes_but_prefer_short_final_links )
 {
-	BOOST_CHECK( BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 10.0f, 50.0f) );
-	BOOST_CHECK( !BotSFJ_FlagPriorityStop(1, 1, 512.0f, 400.0f, 10.0f, 50.0f) );
-	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 0, 512.0f, 400.0f, 10.0f, 50.0f) );
-	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 512.0f, 600.0f, 10.0f, 50.0f) );
-	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 0.0f, 100.0f, 10.0f, 50.0f) );
-	/* Flag on a ledge above: keep a route that climbs to it, stop one that does not. */
-	BOOST_CHECK( !BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 200.0f, 60.0f) );
-	BOOST_CHECK( BotSFJ_FlagPriorityStop(0, 1, 512.0f, 400.0f, 200.0f, 600.0f) );
+	const float longBonus = BotSFJ_FlagLandingBonus(8, 0, 80, 1200, 1);
+	BOOST_CHECK_GT(longBonus, 0);
+	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(2, 1, 80, 1200, 1), longBonus);
+	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(8, 0, 20, 1200, 1), longBonus);
+	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 600, 1200, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 80, 70, 1), 0);
 }
 
 BOOST_AUTO_TEST_CASE( chain_results_weight_edges_without_vetoing_them )

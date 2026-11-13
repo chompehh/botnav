@@ -13387,7 +13387,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		"WHERE lower(r.mapname) = ?1 AND r.node_count >= ?2 AND COALESCE(r.bot, 0) = 0 "
 		"ORDER BY r.id IN (SELECT id FROM LocalStrafeRoute "
 		"WHERE lower(mapname) = ?1 AND node_count >= ?2 AND COALESCE(bot, 0) = 0 "
-		"AND distance BETWEEN ?4 AND ?5 AND duration_ms > 0 "
+		"AND (distance BETWEEN ?4 AND ?5 OR node_count BETWEEN 1 AND 2) AND duration_ms > 0 "
 		"ORDER BY distance / (duration_ms * (duration_ms + 250.0)) DESC LIMIT ?6) DESC, "
 		"(r.distance * r.distance / MAX(r.duration_ms, 1)) DESC, r.distance DESC LIMIT ?3",
 		-1, &routes, NULL) == SQLITE_OK &&
@@ -13468,6 +13468,23 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			}
 			candidateCoverage[candidates].connectorScore = BotSFJ_TrackConnectorScore(
 				(float)sqlite3_column_double(routes, 14), sqlite3_column_int(routes, 15), evidence);
+			{
+				float nearFlag = candidateFlagDistance[candidates];
+				float shortScore;
+
+				for (group = 0; group < flagCount; group++)
+				{
+					const float d = Distance(&candidateStarts[candidates * 3], flagStands[group]);
+
+					if (nearFlag < 0.0f || d < nearFlag)
+						nearFlag = d;
+				}
+				shortScore = BotSFJ_ShortConnectorScore(candidateNodeCount[candidates],
+					(float)sqlite3_column_double(routes, 14), sqlite3_column_int(routes, 15),
+					evidence * (candidateObjectiveSuccess[candidates] > 0 ? 1.25f : 1.0f), nearFlag);
+				if (shortScore > candidateCoverage[candidates].connectorScore)
+					candidateCoverage[candidates].connectorScore = shortScore;
+			}
 			candidateEvidence[candidates] = evidence;
 			candidateOrder[candidates] = candidates;
 			candidates++;
@@ -13476,10 +13493,44 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		for (c = 0; c < candidates; c++)
 		{
 			const float recency = G_StrafeTrackRecencyFactor(candidateCreated[c], createdOldest, createdNewest);
+			int highway;
 
 			candidateScores[c] *= recency;
 			candidateCoverage[c].objectiveLink = G_StrafeTrackObjectiveLinkScore(candidateFlagDistance[c],
 				candidateNodeCount[c], candidateObjectiveSuccess[c] > 0, recency, candidateEvidence[c]);
+			if (candidateNodeCount[c] > 2 || !candidateCoverage[c].haveEnd)
+				continue;
+			for (highway = 0; highway < candidates; highway++)
+			{
+				const strafetrack_export_coverage_t *h = &candidateCoverage[highway];
+				float gap, nearFlag = candidateFlagDistance[c], bonus;
+				int flag;
+
+				if (candidateSpeedActive[c] != candidateSpeedActive[highway] ||
+					(candidateSpeedActive[c] == 1 && candidateSpeedLevel[c] != candidateSpeedLevel[highway]) ||
+					!h->haveEnd || !BotSFJ_Highway(candidateNodeCount[highway],
+						sqrtf(BotSFJ_Dist2DSq(h->start, h->end)),
+						candidateAverageSpeeds[highway], candidateMaxSpeeds[highway]) ||
+					fabsf(candidateCoverage[c].end[2] - h->start[2]) > 64.0f)
+					continue;
+				gap = Distance(candidateCoverage[c].end, h->start);
+				for (flag = 0; flag < flagCount; flag++)
+				{
+					const float d = Distance(candidateCoverage[c].start, flagStands[flag]);
+
+					if (nearFlag < 0.0f || d < nearFlag)
+						nearFlag = d;
+				}
+				bonus = BotSFJ_FeederBonus(candidateNodeCount[c], gap,
+					Distance(candidateCoverage[c].start, h->start) - gap,
+					nearFlag, candidateEvidence[c]);
+				/* One useful highway connection is enough; duplicate highways do not stack. */
+				if (bonus > 0.0f)
+				{
+					candidateCoverage[c].connectorScore += bonus;
+					break;
+				}
+			}
 		}
 		g_strafeTrackSortScores = candidateScores;
 		qsort(candidateOrder, candidates, sizeof(candidateOrder[0]), G_StrafeTrackCompareScore);

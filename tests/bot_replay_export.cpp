@@ -179,6 +179,47 @@ BOOST_AUTO_TEST_CASE(export_coverage_keeps_movement_types_and_fills_spare_slots)
 	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 4, 0, picked), 0);
 }
 
+BOOST_AUTO_TEST_CASE(export_keeps_an_alternative_exit_before_filling_with_other_starts)
+{
+	const strafetrack_export_coverage_t routes[] = {
+		coverage(0, 2000), coverage(5000, 6000), coverage(10000, 11000),
+		coverage(15000, 16000), coverage(50, -2000)
+	};
+	unsigned char picked[5] = {};
+	BOOST_REQUIRE_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 5, 4, picked), 4);
+	BOOST_CHECK(picked[0]);
+	BOOST_CHECK(picked[4]);
+	BOOST_CHECK(!picked[3]);
+	BOOST_CHECK(!G_StrafeTrackExportBranch(&routes[0], &routes[1]));
+}
+
+BOOST_AUTO_TEST_CASE(export_reservations_cannot_exceed_a_single_available_slot)
+{
+	strafetrack_export_coverage_t routes[] = {
+		coverage(0, 2000), coverage(5000, 6000), coverage(10000, 11000, 1)
+	};
+	routes[0].objectiveLink = 100;
+	routes[2].connectorScore = 100;
+	routes[2].shortForceJump = 1;
+	unsigned char picked[3] = {};
+	BOOST_CHECK_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 3, 1, picked), 1);
+	BOOST_CHECK(picked[0]);
+	BOOST_CHECK(!picked[1]);
+	BOOST_CHECK(!picked[2]);
+}
+
+BOOST_AUTO_TEST_CASE(long_one_or_two_hop_flag_connectors_survive_the_old_distance_cap)
+{
+	const float score = BotSFJ_ShortConnectorScore(2, 1400, 1800, 1, 2000);
+	BOOST_CHECK_GT(score, 0);
+	BOOST_CHECK_EQUAL(BotSFJ_TrackConnectorScore(1400, 1800, 1), 0);
+	BOOST_CHECK_GT(BotSFJ_ShortConnectorScore(2, 1400, 1800, 1, 100), score);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortConnectorScore(3, 1400, 1800, 1, 100), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortConnectorScore(2, 1400, 0, 1, 100), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_ShortConnectorScore(2,
+		std::numeric_limits<float>::quiet_NaN(), 1800, 1, 100), 0);
+}
+
 BOOST_AUTO_TEST_CASE(export_reserves_quick_short_connectors_over_long_duplicates)
 {
 	strafetrack_export_coverage_t routes[] = {
