@@ -269,9 +269,9 @@ BOOST_AUTO_TEST_CASE(final_links_onto_a_flag_are_reserved_on_top_of_coverage)
 		coverage(21000, 23000), coverage(24000, 26000), coverage(27000, 29000)
 	};
 	unsigned char picked[12] = {};
-	routes[3].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f);
-	routes[4].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f);
-	routes[5].objectiveLink = G_StrafeTrackObjectiveLinkScore(300.0f, 6, 0, 1.0f, 1.0f);
+	routes[3].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f, 1.0f);
+	routes[4].objectiveLink = G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f, 1.0f);
+	routes[5].objectiveLink = G_StrafeTrackObjectiveLinkScore(300.0f, 6, 0, 1.0f, 1.0f, 1.0f);
 	/* An eighth of 9 is two final links; near-duplicates (64u) collapse to the stronger one. */
 	BOOST_REQUIRE_EQUAL(G_StrafeTrackSelectExportCoverage(routes, 12, 9, picked), 9);
 	BOOST_CHECK(picked[3]);
@@ -280,10 +280,10 @@ BOOST_AUTO_TEST_CASE(final_links_onto_a_flag_are_reserved_on_top_of_coverage)
 	/* The reservation comes on top of the general start coverage. */
 	BOOST_CHECK(picked[0]);
 	BOOST_CHECK(picked[6]);
-	BOOST_CHECK_GT(G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f),
-		G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f));
-	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(500.0f, 2, 1, 1.0f, 1.0f), 0.0f);
-	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(-1.0f, 2, 1, 1.0f, 1.0f), 0.0f);
+	BOOST_CHECK_GT(G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f, 1.0f),
+		G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f, 1.0f));
+	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(500.0f, 2, 1, 1.0f, 1.0f, 1.0f), 0.0f);
+	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(-1.0f, 2, 1, 1.0f, 1.0f, 1.0f), 0.0f);
 	BOOST_CHECK_GT(G_StrafeTrackRecencyFactor(200, 100, 200), G_StrafeTrackRecencyFactor(100, 100, 200));
 	BOOST_CHECK_EQUAL(G_StrafeTrackRecencyFactor(150, 100, 100), 1.0f);
 }
@@ -393,3 +393,12 @@ BOOST_AUTO_TEST_CASE(lookahead_is_time_bounded_and_stops_before_transitions)
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_CASE( faster_human_captures_rank_their_flag_links_higher )
+{
+	BOOST_CHECK_GT(G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f, BotSFJ_CaptureSpeed(20000.0f)),
+		G_StrafeTrackObjectiveLinkScore(40.0f, 2, 1, 1.0f, 1.0f, BotSFJ_CaptureSpeed(90000.0f)));
+	/* Capture speed means nothing for a route that was not on a capture journey. */
+	BOOST_CHECK_EQUAL(G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f, 2.0f),
+		G_StrafeTrackObjectiveLinkScore(40.0f, 2, 0, 1.0f, 1.0f, 1.0f));
+}

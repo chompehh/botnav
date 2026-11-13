@@ -3373,16 +3373,39 @@ static inline float BotSFJ_SelectionScore(float score, int trial, int carrying, 
 	return score;
 }
 
-/* Explore destination families, not duplicate recordings of the same line. */
+/*
+ * Explore destination families, not duplicate recordings of the same line.
+ * A start cluster's alternatives each get a few tries even with
+ * bot_strafetrial 0, so the most-used route is compared, not merely repeated.
+ */
+#define BOT_SFJ_CLUSTER_TRY_RUNS 3
+
 static inline float BotSFJ_DiversityScore(float score, int trial, int carrying,
 	int uses, int nearbyUses)
 {
-	float novelty;
+	float novelty, result;
 
-	if (!(score > 0.0f) || !trial || carrying || nearbyUses <= uses || uses < 0)
+	if (!(score > 0.0f) || carrying || nearbyUses <= uses || uses < 0)
 		return score;
 	novelty = (float)(nearbyUses - uses) / ((float)nearbyUses + 2.0f);
-	return score * (1.0f + 0.35f * novelty);
+	result = score * (1.0f + (trial ? 0.35f : 0.2f) * novelty);
+	if (uses < BOT_SFJ_CLUSTER_TRY_RUNS && nearbyUses >= 2 * BOT_SFJ_CLUSTER_TRY_RUNS)
+		result += 256.0f * novelty;
+	return result;
+}
+
+/* Picking the route this bot just ran again, while a nearby alternative is available. */
+static inline float BotSFJ_RepeatPenalty(int recentlyRun, int alternatives, int carrying)
+{
+	return recentlyRun && alternatives > 0 && !carrying ? 0.8f : 1.0f;
+}
+
+/* Between-route shuffles that walking covers: a chain must gain this much unless it links onto the goal. */
+#define BOT_SFJ_CHAIN_MIN_GAIN 128.0f
+
+static inline int BotSFJ_ChainGainEnough(float goalGain, int goalLink)
+{
+	return goalLink || (isfinite(goalGain) && goalGain >= BOT_SFJ_CHAIN_MIN_GAIN);
 }
 
 static inline int BotSFJ_Highway(int hops, float displacement, float average, float peak)
@@ -3435,22 +3458,32 @@ static inline int BotSFJ_GoalLinkBacktrackExempt(int goalLink, float startDistan
 		startDistance <= BOT_SFJ_GOAL_LINK_BACKTRACK;
 }
 
+/*
+ * Landing on the goal grows exponentially as the landing closes in (doubling
+ * every 96u), on top of a linear term over the link radius. captureEvidence
+ * (BotSFJ_CaptureEvidence, 1-3) scales links proven to lead to fast captures.
+ */
+#define BOT_SFJ_GOAL_LINK_HALVING 96.0f
+
 static inline float BotSFJ_GoalLinkBonus(int hops, int forceJump, float endToGoal,
-	float botToGoal, float reliability)
+	float botToGoal, float reliability, float captureEvidence)
 {
 	if (!BotSFJ_GoalLinkRoute(hops, endToGoal, botToGoal) || !isfinite(reliability))
 		return 0.0f;
-	return (384.0f + BOT_SFJ_GOAL_LINK_RADIUS - endToGoal) * (forceJump ? 1.25f : 1.0f) *
-		BotSFJ_ClampSetting(reliability, 0.25f, 1.0f);
+	if (!isfinite(captureEvidence) || captureEvidence < 1.0f)
+		captureEvidence = 1.0f;
+	return (BOT_SFJ_GOAL_LINK_RADIUS - endToGoal +
+		1536.0f * exp2f(-endToGoal / BOT_SFJ_GOAL_LINK_HALVING)) * (forceJump ? 1.25f : 1.0f) *
+		BotSFJ_ClampSetting(reliability, 0.25f, 1.0f) * captureEvidence;
 }
 
 static inline float BotSFJ_FlagLandingBonus(int hops, int forceJump, float endToGoal,
-	float botToGoal, float reliability)
+	float botToGoal, float reliability, float captureEvidence)
 {
 	if (hops <= BOT_SFJ_GOAL_LINK_MAX_HOPS)
-		return BotSFJ_GoalLinkBonus(hops, forceJump, endToGoal, botToGoal, reliability);
+		return BotSFJ_GoalLinkBonus(hops, forceJump, endToGoal, botToGoal, reliability, captureEvidence);
 	return BotSFJ_GoalLinkBonus(BOT_SFJ_GOAL_LINK_MAX_HOPS, 0,
-		endToGoal, botToGoal, reliability) * 0.35f;
+		endToGoal, botToGoal, reliability, captureEvidence) * 0.35f;
 }
 
 /*
@@ -3562,6 +3595,96 @@ static inline float BotSFJ_LoopPenalty(int loops)
 		return 1.0f;
 	factor = 1.0f / (1.0f + 0.5f * (float)loops);
 	return factor < 0.15f ? 0.15f : factor;
+}
+
+/*
+ * Route starts the bot made toward its current goal, with the goal distance at
+ * each start. Starting the same route again without having gained
+ * BOT_SFJ_GOAL_PROGRESS since is a loop: the planner skips it for
+ * BOT_SFJ_LOOP_RETRY_MS and the route learns a loop.
+ */
+#define BOT_SFJ_PROGRESS_MEMORY 8
+#define BOT_SFJ_PROGRESS_WINDOW_MS 45000
+
+static inline int BotSFJ_RouteRepeatsWithoutProgress(const int *routes, const float *distances,
+	const int *times, int count, int route, float goalDistance, int now)
+{
+	int k;
+
+	if (!routes || !distances || !times || route < 0 || !isfinite(goalDistance))
+		return 0;
+	for (k = 0; k < count; k++)
+		if (routes[k] == route + 1 && times[k] > 0 && now - times[k] <= BOT_SFJ_PROGRESS_WINDOW_MS &&
+			isfinite(distances[k]) && goalDistance > distances[k] - BOT_SFJ_GOAL_PROGRESS)
+			return 1;
+	return 0;
+}
+
+/*
+ * A walk back to a route start must pay for itself across the whole planned
+ * chain: the chain has to gain the walk twice (out and back) plus a margin over
+ * simply continuing forward on foot. Short links onto the goal are exempt.
+ */
+static inline int BotSFJ_BacktrackChainPaysOff(float chainGoalGain, float walkDistance)
+{
+	if (!isfinite(chainGoalGain) || !isfinite(walkDistance))
+		return 0;
+	return BotSFJ_BacktrackPaysOff(chainGoalGain, (walkDistance > 0.0f ? walkDistance : 0.0f) * 2.0f);
+}
+
+/*
+ * Landed near the goal and the rest of the route does not get closer: finish
+ * on foot instead of hopping on and carrying momentum away. A route that began
+ * under another goal (e.g. before a flag pickup) is cut anywhere it leads away.
+ */
+#define BOT_SFJ_GOAL_CUT_RADIUS 768.0f
+#define BOT_SFJ_GOAL_CUT_SLACK 64.0f
+#define BOT_SFJ_GOAL_CHANGED_SLACK 128.0f
+
+static inline int BotSFJ_RemainingRouteLeadsAway(float botToGoal, float remainingBest, int goalChanged)
+{
+	if (!isfinite(botToGoal) || !isfinite(remainingBest) || botToGoal < 0.0f || remainingBest < 0.0f)
+		return 0;
+	if (goalChanged)
+		return remainingBest > botToGoal - BOT_SFJ_GOAL_CHANGED_SLACK;
+	return botToGoal <= BOT_SFJ_GOAL_CUT_RADIUS && remainingBest > botToGoal - BOT_SFJ_GOAL_CUT_SLACK;
+}
+
+/*
+ * Capture evidence: japro's pickup-to-capture time for the human journey a
+ * route came from, and the bots' own captures after running it. Faster
+ * captures weigh more (0.5x-2x of a reference capture); the factor is 1 with
+ * no evidence and approaches 3 with plenty of fast captures.
+ */
+#define BOT_SFJ_CAPTURE_REFERENCE_MS 40000.0f
+
+static inline float BotSFJ_CaptureSpeed(float captureMs)
+{
+	if (!isfinite(captureMs) || captureMs <= 0.0f)
+		return 1.0f;
+	return BotSFJ_ClampSetting(BOT_SFJ_CAPTURE_REFERENCE_MS / captureMs, 0.5f, 2.0f);
+}
+
+static inline float BotSFJ_CaptureEvidence(int humanSuccess, float humanCaptureMs,
+	int botCaptures, float botCaptureMsSum)
+{
+	float weight = 0.0f;
+
+	if (humanSuccess > 0)
+		weight += 2.0f * BotSFJ_CaptureSpeed(humanCaptureMs);
+	if (botCaptures > 0)
+		weight += (float)botCaptures * BotSFJ_CaptureSpeed(botCaptureMsSum / (float)botCaptures);
+	if (!(weight > 0.0f))
+		return 1.0f;
+	return 1.0f + 2.0f * weight / (weight + 3.0f);
+}
+
+/* Chain cost multiplier for entering a route with capture evidence (1 down to 0.5). */
+static inline float BotSFJ_CaptureEdgeFactor(float captureEvidence)
+{
+	if (!isfinite(captureEvidence) || captureEvidence < 1.0f)
+		return 1.0f;
+	return 2.0f / (1.0f + captureEvidence);
 }
 
 /* ---- Route combat hold ---- */

@@ -678,6 +678,13 @@ typedef struct bot_state_s
 	float				sfjLoopBestDist;
 	int					sfjGoalProgressTime;	// last time the travel goal got closer
 	float				sfjGoalProgressBest;
+	int					sfjProgressRoute[BOT_SFJ_PROGRESS_MEMORY];	// route index + 1 started toward the goal
+	float				sfjProgressDist[BOT_SFJ_PROGRESS_MEMORY];	// goal distance at that start
+	int					sfjProgressTime[BOT_SFJ_PROGRESS_MEMORY];
+	int					sfjProgressHead;
+	int					sfjProgressGoalType;	// goal type the progress memory belongs to
+	int					sfjJourneyStat[BOT_SFJ_RECENT_ROUTES];	// route stat slots run since spawn (capture credit)
+	int					sfjJourneyCount;
 	int					huntClient;			// FFA: hunted opponent's client number + 1 (0 none)
 	int					huntRefreshTime;
 	vec3_t				huntOrigin;			// snapshot of that opponent's position

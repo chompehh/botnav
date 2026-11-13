@@ -5453,10 +5453,12 @@ BOOST_AUTO_TEST_CASE( route_diversity_prefers_underused_exits_without_inventing_
 	const float used = BotSFJ_DiversityScore(1000, 1, 0, 12, 12);
 	BOOST_CHECK_GT(BotSFJ_DiversityScore(1000, 1, 0, 0, 12), used);
 	BOOST_CHECK_LT(BotSFJ_DiversityScore(600, 1, 0, 0, 12), used);
-	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(1000, 0, 0, 0, 12), used);
+	/* bot_strafetrial 0 still gives an untried cluster alternative a turn, more gently. */
+	BOOST_CHECK_GT(BotSFJ_DiversityScore(1000, 0, 0, 0, 12), used);
+	BOOST_CHECK_LT(BotSFJ_DiversityScore(1000, 0, 0, 0, 12), BotSFJ_DiversityScore(1000, 1, 0, 0, 12));
 	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(1000, 1, 1, 0, 12), used);
 	BOOST_CHECK_EQUAL(BotSFJ_DiversityScore(-20, 1, 0, 0, 12), -20);
-	BOOST_CHECK_LE(BotSFJ_DiversityScore(1000, 1, 0, 0, 100000), 1350);
+	BOOST_CHECK_LE(BotSFJ_DiversityScore(1000, 1, 0, 0, 100000), 1350 + 256);
 }
 
 BOOST_AUTO_TEST_CASE( short_feeders_value_flag_proximity_and_safe_goal_progress )
@@ -5542,14 +5544,14 @@ BOOST_AUTO_TEST_CASE( goal_links_onto_the_flag_outrank_and_may_backtrack )
 	BOOST_CHECK( BotSFJ_GoalLinkBacktrackExempt(1, 600.0f) );
 	BOOST_CHECK( !BotSFJ_GoalLinkBacktrackExempt(1, 1200.0f) );
 	BOOST_CHECK( !BotSFJ_GoalLinkBacktrackExempt(0, 100.0f) );
-	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 1, 64.0f, 900.0f, 1.0f),
-		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f) );
-	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f),
-		BotSFJ_GoalLinkBonus(1, 0, 300.0f, 900.0f, 1.0f) );
-	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f),
-		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.1f) );
-	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.0f), 0.0f );
-	BOOST_CHECK_EQUAL( BotSFJ_GoalLinkBonus(5, 1, 64.0f, 900.0f, 1.0f), 0.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 1, 64.0f, 900.0f, 1.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 300.0f, 900.0f, 1.0f, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 1.0f, 1.0f),
+		BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.1f, 1.0f) );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 900.0f, 0.0f, 1.0f), 0.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_GoalLinkBonus(5, 1, 64.0f, 900.0f, 1.0f, 1.0f), 0.0f );
 }
 
 BOOST_AUTO_TEST_CASE( momentum_under_walking_speed_counts_as_a_failed_hop )
@@ -5577,12 +5579,12 @@ BOOST_AUTO_TEST_CASE( recent_combat_hit_does_not_invalidate_a_recorded_hop )
 
 BOOST_AUTO_TEST_CASE( flag_landings_reward_long_routes_but_prefer_short_final_links )
 {
-	const float longBonus = BotSFJ_FlagLandingBonus(8, 0, 80, 1200, 1);
+	const float longBonus = BotSFJ_FlagLandingBonus(8, 0, 80, 1200, 1, 1);
 	BOOST_CHECK_GT(longBonus, 0);
-	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(2, 1, 80, 1200, 1), longBonus);
-	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(8, 0, 20, 1200, 1), longBonus);
-	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 600, 1200, 1), 0);
-	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 80, 70, 1), 0);
+	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(2, 1, 80, 1200, 1, 1), longBonus);
+	BOOST_CHECK_GT(BotSFJ_FlagLandingBonus(8, 0, 20, 1200, 1, 1), longBonus);
+	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 600, 1200, 1, 1), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_FlagLandingBonus(8, 0, 80, 70, 1, 1), 0);
 }
 
 BOOST_AUTO_TEST_CASE( chain_results_weight_edges_without_vetoing_them )
@@ -5614,3 +5616,80 @@ BOOST_AUTO_TEST_CASE( visible_goal_keeps_bots_moving_forward )
 }
 
 BOOST_AUTO_TEST_SUITE_END()
+
+BOOST_AUTO_TEST_CASE( rerunning_a_route_without_goal_progress_is_a_loop )
+{
+	const int routes[BOT_SFJ_PROGRESS_MEMORY] = { 4, 7 };
+	const float distances[BOT_SFJ_PROGRESS_MEMORY] = { 2000.0f, 1500.0f };
+	const int times[BOT_SFJ_PROGRESS_MEMORY] = { 10000, 14000 };
+
+	/* Route 3 (stored as 4) started at 2000u; back at 1950u is no progress. */
+	BOOST_CHECK( BotSFJ_RouteRepeatsWithoutProgress(routes, distances, times,
+		BOT_SFJ_PROGRESS_MEMORY, 3, 1950.0f, 20000) );
+	/* Real progress since, a route never run, or an old start: not a loop. */
+	BOOST_CHECK( !BotSFJ_RouteRepeatsWithoutProgress(routes, distances, times,
+		BOT_SFJ_PROGRESS_MEMORY, 3, 1700.0f, 20000) );
+	BOOST_CHECK( !BotSFJ_RouteRepeatsWithoutProgress(routes, distances, times,
+		BOT_SFJ_PROGRESS_MEMORY, 5, 1950.0f, 20000) );
+	BOOST_CHECK( !BotSFJ_RouteRepeatsWithoutProgress(routes, distances, times,
+		BOT_SFJ_PROGRESS_MEMORY, 3, 1950.0f, 10000 + BOT_SFJ_PROGRESS_WINDOW_MS + 1) );
+}
+
+BOOST_AUTO_TEST_CASE( backtracking_needs_the_whole_chain_to_pay_for_the_walk )
+{
+	/* Two or three hops forward after walking 300u back: keep going on foot. */
+	BOOST_CHECK( !BotSFJ_BacktrackChainPaysOff(600.0f, 300.0f) );
+	BOOST_CHECK( BotSFJ_BacktrackChainPaysOff(1200.0f, 300.0f) );
+	BOOST_CHECK( !BotSFJ_BacktrackChainPaysOff(NAN, 0.0f) );
+	/* Shuffles between neighbouring routes do not count as progress. */
+	BOOST_CHECK( !BotSFJ_ChainGainEnough(60.0f, 0) );
+	BOOST_CHECK( BotSFJ_ChainGainEnough(60.0f, 1) );
+	BOOST_CHECK( BotSFJ_ChainGainEnough(400.0f, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( landing_by_the_flag_ends_a_route_that_leads_away )
+{
+	/* 200u from the flag; the remaining landings are no closer. */
+	BOOST_CHECK( BotSFJ_RemainingRouteLeadsAway(200.0f, 180.0f, 0) );
+	/* The route's next landing is on the flag platform: keep hopping. */
+	BOOST_CHECK( !BotSFJ_RemainingRouteLeadsAway(400.0f, 40.0f, 0) );
+	/* Far from the flag, a route may swing away before closing in. */
+	BOOST_CHECK( !BotSFJ_RemainingRouteLeadsAway(2000.0f, 2100.0f, 0) );
+	/* A route begun under another goal is cut anywhere it leads away. */
+	BOOST_CHECK( BotSFJ_RemainingRouteLeadsAway(2000.0f, 2100.0f, 1) );
+}
+
+BOOST_AUTO_TEST_CASE( flag_landing_priority_grows_exponentially_with_capture_evidence )
+{
+	const float at32 = BotSFJ_GoalLinkBonus(1, 0, 32.0f, 1200.0f, 1.0f, 1.0f);
+	const float at128 = BotSFJ_GoalLinkBonus(1, 0, 128.0f, 1200.0f, 1.0f, 1.0f);
+	const float at224 = BotSFJ_GoalLinkBonus(1, 0, 224.0f, 1200.0f, 1.0f, 1.0f);
+
+	/* Closing in gains more for each step than the step before. */
+	BOOST_CHECK_GT( at32 - at128, at128 - at224 );
+	/* Fast captures weigh more than slow ones; any capture beats none. */
+	BOOST_CHECK_GT( BotSFJ_CaptureEvidence(1, 20000.0f, 0, 0.0f),
+		BotSFJ_CaptureEvidence(1, 90000.0f, 0, 0.0f) );
+	BOOST_CHECK_GT( BotSFJ_CaptureEvidence(1, 90000.0f, 0, 0.0f), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CaptureEvidence(0, 0.0f, 0, 0.0f), 1.0f );
+	BOOST_CHECK_GT( BotSFJ_CaptureEvidence(0, 0.0f, 4, 4 * 30000.0f),
+		BotSFJ_CaptureEvidence(0, 0.0f, 4, 4 * 120000.0f) );
+	BOOST_CHECK_LE( BotSFJ_CaptureEvidence(1, 1.0f, 100000, 100000.0f), 3.0f );
+	BOOST_CHECK_GT( BotSFJ_GoalLinkBonus(1, 0, 64.0f, 1200.0f, 1.0f,
+		BotSFJ_CaptureEvidence(1, 20000.0f, 0, 0.0f)), BotSFJ_GoalLinkBonus(1, 0, 64.0f, 1200.0f, 1.0f, 1.0f) );
+	BOOST_CHECK_LT( BotSFJ_CaptureEdgeFactor(BotSFJ_CaptureEvidence(1, 20000.0f, 0, 0.0f)), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_CaptureEdgeFactor(1.0f), 1.0f );
+}
+
+BOOST_AUTO_TEST_CASE( cluster_alternatives_get_a_turn_over_a_repeated_pick )
+{
+	BOOST_CHECK_LT( BotSFJ_RepeatPenalty(1, 2, 0), 1.0f );
+	/* No alternative nearby, or carrying the flag: repeating is fine. */
+	BOOST_CHECK_EQUAL( BotSFJ_RepeatPenalty(1, 0, 0), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_RepeatPenalty(1, 2, 1), 1.0f );
+	BOOST_CHECK_EQUAL( BotSFJ_RepeatPenalty(0, 2, 0), 1.0f );
+	/* An untried alternative beside a route run 12 times gets a real try bonus. */
+	BOOST_CHECK_GT( BotSFJ_DiversityScore(800.0f, 0, 0, 0, 12) - 800.0f, 256.0f * 0.5f );
+	/* Once tried a few times, only the gentle novelty term remains. */
+	BOOST_CHECK_LT( BotSFJ_DiversityScore(800.0f, 0, 0, BOT_SFJ_CLUSTER_TRY_RUNS, 12), 1000.0f );
+}

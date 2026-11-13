@@ -5263,6 +5263,7 @@ typedef struct
 	vec3_t nodeTakeoff[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeGroundMs[BOT_SFJ_TRACK_MAX_NODES];
 	int objectiveSuccess;
+	int objectiveCaptureMs;	/* pickup-to-capture time of the human capture journey (0 = unknown) */
 	int objectiveNext;	/* route_id the human ran next in a capture journey (0 = none) */
 	int objectiveNextIndex;	/* loaded index of objectiveNext, -1 if not loaded */
 	int routeId;
@@ -5318,6 +5319,8 @@ typedef struct
 	int stalls;
 	int interrupted;
 	int loops;	/* walks toward this route that turned into backtrack loops */
+	int captures;	/* bot flag captures in a journey that ran this route */
+	float captureMs;	/* summed pickup-to-capture time of those captures */
 	int collisions;	/* momentum-losing wall impacts, including ones a trusted hop survived */
 	int lastOutcome;	/* 1 clean finish, -1 failed/died/collided, 0 unknown */
 	int terminalMarker;
@@ -5461,6 +5464,11 @@ static void BotSFJ_ParseTrackRoute(const char **text, const char *path)
 		else if (!Q_stricmp(token, "objective_success"))
 		{
 			if (COM_ParseInt(text, &route.objectiveSuccess) || route.objectiveSuccess < 0)
+				valid = qfalse;
+		}
+		else if (!Q_stricmp(token, "objective_capture_ms"))
+		{
+			if (COM_ParseInt(text, &route.objectiveCaptureMs) || route.objectiveCaptureMs < 0)
 				valid = qfalse;
 		}
 		else if (!Q_stricmp(token, "route_id"))
@@ -5858,7 +5866,7 @@ static qboolean BotSFJ_RouteStatHasEvidence(const bot_sfj_route_stat_t *stat)
 	int node;
 
 	if (stat->attempts || stat->loops || stat->collisions || stat->deaths || stat->unsafe ||
-		stat->terminalMarker)
+		stat->terminalMarker || stat->captures)
 		return qtrue;
 	for (node = 0; node < BOT_SFJ_TRACK_MAX_NODES; node++)
 		if (stat->hopFailures[node] || stat->hopPasses[node] || stat->hopDeaths[node] ||
@@ -5921,7 +5929,7 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 	COM_BeginParseSession(path);
 	if (!Q_stricmp(COM_Parse(&text), "botroute_stats"))
 	{
-		if (COM_ParseInt(&text, &version) || (version < 2 || version > 10))
+		if (COM_ParseInt(&text, &version) || (version < 2 || version > 11))
 		{
 			free(buffer);
 			return;
@@ -6036,6 +6044,10 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 			trap->Print(S_COLOR_YELLOW "Invalid learned strafe terminal in %s\n", path);
 			break;
 		}
+		if (version >= 11 && (COM_ParseInt(&text, &stat.captures) ||
+			COM_ParseFloat(&text, &stat.captureMs) || stat.captures < 0 ||
+			!isfinite(stat.captureMs) || stat.captureMs < 0.0f))
+			break;
 		if (stat.attempts < 0 || stat.completions < 0 || stat.completions > stat.attempts ||
 			stat.stalls < 0 || stat.interrupted < 0 || stat.speedContext < -1 ||
 			stat.speedContext > 3 || stat.deaths < 0 || stat.unsafe < 0 ||
@@ -6271,7 +6283,7 @@ static void BotSFJ_WriteRouteStats(void)
 		trap->Print(S_COLOR_YELLOW "Could not write strafe route results: %s\n", path);
 		return;
 	}
-	trap->FS_Write("botroute_stats 10\n", strlen("botroute_stats 10\n"), f);
+	trap->FS_Write("botroute_stats 11\n", strlen("botroute_stats 11\n"), f);
 	memset(referenced, 0, sizeof(referenced));
 	for (i = 0; i < g_botSfjTrackRouteCount; i++)
 		for (context = 0; context < 4; context++)
@@ -6315,6 +6327,8 @@ static void BotSFJ_WriteRouteStats(void)
 		trap->FS_Write(line, strlen(line), f);
 		line = va(" %i %.1f %.1f %.1f", stat->terminalMarker,
 			stat->terminal[0], stat->terminal[1], stat->terminal[2]);
+		trap->FS_Write(line, strlen(line), f);
+		line = va(" %i %.0f", stat->captures, stat->captureMs);
 		trap->FS_Write(line, strlen(line), f);
 		trap->FS_Write("\n", 1, f);
 	}
@@ -6699,6 +6713,44 @@ void BotSFJ_ClientDied(int clientNum, int meansOfDeath)
 	}
 	bs->sfjPendingHopTime = 0;
 	bs->sfjTravelGoalValid = qfalse;
+	bs->sfjJourneyCount = 0;
+	bs->sfjProgressGoalType = BOT_SFJ_GOAL_NONE;
+	memset(bs->sfjProgressRoute, 0, sizeof(bs->sfjProgressRoute));
+}
+
+/*
+ * A bot captured: every route it ran since spawning helped, and a faster
+ * capture (japro's pickup-to-capture time) earns more. Called from g_team.c.
+ */
+void BotSFJ_NoteCapture(int clientNum, int captureMs)
+{
+	bot_state_t *bs;
+	int k, n;
+
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS || !botstates[clientNum])
+		return;
+	bs = botstates[clientNum];
+	n = bs->sfjJourneyCount < BOT_SFJ_RECENT_ROUTES ? bs->sfjJourneyCount : BOT_SFJ_RECENT_ROUTES;
+	for (k = 0; k < n; k++)
+	{
+		const int index = bs->sfjJourneyStat[k];
+
+		if (index < 0 || index >= g_botSfjRouteStatCount)
+			continue;
+		g_botSfjRouteStats[index].captures++;
+		g_botSfjRouteStats[index].captureMs += captureMs > 0 ?
+			(float)captureMs : BOT_SFJ_CAPTURE_REFERENCE_MS;
+		/* Keep recent captures decisive, like chain results. */
+		if (g_botSfjRouteStats[index].captures > 24)
+		{
+			g_botSfjRouteStats[index].captures /= 2;
+			g_botSfjRouteStats[index].captureMs *= 0.5f;
+		}
+		g_botSfjRouteStatsDirty = qtrue;
+	}
+	bs->sfjJourneyCount = 0;
+	bs->sfjProgressGoalType = BOT_SFJ_GOAL_NONE;
+	memset(bs->sfjProgressRoute, 0, sizeof(bs->sfjProgressRoute));
 }
 
 static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qboolean stalled)
@@ -6791,6 +6843,8 @@ void BotSFJ_ReloadRouteHints(void)
 			botstates[i]->sfjChainFrom = 0;
 			memset(botstates[i]->sfjRecentRoutes, 0, sizeof(botstates[i]->sfjRecentRoutes));
 			botstates[i]->sfjRecentRouteHead = botstates[i]->sfjRecentRouteUntil = 0;
+			memset(botstates[i]->sfjProgressRoute, 0, sizeof(botstates[i]->sfjProgressRoute));
+			botstates[i]->sfjJourneyCount = 0;
 			botstates[i]->sfjForceJumpHop = qfalse;
 			botstates[i]->sfjTravelGoalValid = qfalse;
 			botstates[i]->sfjTravelPlanTime = 0;
@@ -7058,6 +7112,26 @@ static const float *BotSFJ_RouteEndpoint(const bot_sfj_track_route_t *route, int
 			return g_botSfjRouteStats[index].terminal;
 	}
 	return end > 0 ? route->node[end - 1] : route->start;
+}
+
+/* Human capture journey (with japro capture time) plus bot captures after running the route. */
+static float BotSFJ_RouteCaptureEvidence(const bot_sfj_track_route_t *route)
+{
+	int context, captures = 0;
+	float captureMs = 0.0f;
+
+	for (context = 0; context < 4; context++)
+	{
+		const int index = route->stat[context];
+
+		if (index >= 0 && index < g_botSfjRouteStatCount)
+		{
+			captures += g_botSfjRouteStats[index].captures;
+			captureMs += g_botSfjRouteStats[index].captureMs;
+		}
+	}
+	return BotSFJ_CaptureEvidence(route->objectiveSuccess, (float)route->objectiveCaptureMs,
+		captures, captureMs);
 }
 
 /* The flag/objective (else the waypoint destination) is in line of sight; cached briefly. */
@@ -7579,27 +7653,6 @@ static float BotSFJ_FlagDistance(const float *position)
 	return distance;
 }
 
-static qboolean BotSFJ_RecentLanding(const bot_state_t *bs, const float *end)
-{
-	int n;
-
-	if (level.time >= bs->sfjRecentRouteUntil)
-		return qfalse;
-	for (n = 0; n < BOT_SFJ_RECENT_ROUTES; n++)
-	{
-		const int index = bs->sfjRecentRoutes[n] - 1;
-		int marker;
-
-		if (index < 0 || index >= g_botSfjTrackRouteCount)
-			continue;
-		marker = BotSFJ_RouteEffectiveEnd(&g_botSfjTrackRoutes[index]);
-		if (marker > 0 && DistanceSquared(end,
-			BotSFJ_RouteEndpoint(&g_botSfjTrackRoutes[index], marker)) <= 384.0f * 384.0f)
-			return qtrue;
-	}
-	return qfalse;
-}
-
 static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	const vec3_t moveDirection, float pickupRadius, int exclude, const float *fleeFrom,
 	int *entryOut)
@@ -7610,6 +7663,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	float seed[BOT_SFJ_MAX_TRACK_ROUTES], cost[BOT_SFJ_MAX_TRACK_ROUTES];
 	static float edges[BOT_SFJ_MAX_TRACK_ROUTES * BOT_SFJ_MAX_TRACK_ROUTES];
 	float quality[BOT_SFJ_MAX_TRACK_ROUTES];
+	float capture[BOT_SFJ_MAX_TRACK_ROUTES];
 	float routeScores[BOT_SFJ_MAX_TRACK_ROUTES];
 	int replacements[BOT_SFJ_MAX_TRACK_ROUTES];
 	int similarBetter[BOT_SFJ_MAX_TRACK_ROUTES];
@@ -7621,6 +7675,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	float successRate[BOT_SFJ_MAX_TRACK_ROUTES];
 	int resolvedRuns[BOT_SFJ_MAX_TRACK_ROUTES];
 	int familyUses[BOT_SFJ_MAX_TRACK_ROUTES], nearbyUses[BOT_SFJ_MAX_TRACK_ROUTES];
+	int alternatives[BOT_SFJ_MAX_TRACK_ROUTES];
 	int goalLink[BOT_SFJ_MAX_TRACK_ROUTES], bestDestination[BOT_SFJ_MAX_TRACK_ROUTES];
 	int rejected[6] = { 0, 0, 0, 0, 0, 0 };
 	float bestScore = 0.0f;
@@ -7641,6 +7696,7 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	for (i = 0; i < count; i++)
 	{
 		routeScores[i] = -999999.0f;
+		capture[i] = BotSFJ_RouteCaptureEvidence(&g_botSfjTrackRoutes[i]);
 		effective[i] = BotSFJ_RouteEffectiveEnd(&g_botSfjTrackRoutes[i]);
 		replacements[i] = BotSFJ_SuperiorReplacement(&g_botSfjTrackRoutes[i],
 			BotSFJ_RouteNodeContext(&g_botSfjTrackRoutes[i], ps, 0));
@@ -7711,6 +7767,24 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		}
 		if (!BotSFJ_TrackRetryAllows(i, bs->sfjRouteRetryUntil, level.time))
 		{
+			rejected[1]++;
+			continue;
+		}
+		/* Started before toward this goal and no closer since: a loop, not progress. */
+		if (!fleeFrom && bs->sfjTravelGoalValid &&
+			bs->sfjProgressGoalType == bs->sfjTravelGoalType &&
+			BotSFJ_RouteRepeatsWithoutProgress(bs->sfjProgressRoute, bs->sfjProgressDist,
+				bs->sfjProgressTime, BOT_SFJ_PROGRESS_MEMORY, i, botToGoal, level.time))
+		{
+			if (i >= 0 && i < BOT_SFJ_MAX_TRACK_ROUTES)
+				bs->sfjRouteRetryUntil[i] = level.time + BOT_SFJ_LOOP_RETRY_MS;
+			if (statIndex >= 0 && statIndex < g_botSfjRouteStatCount)
+			{
+				g_botSfjRouteStats[statIndex].loops++;
+				g_botSfjRouteStatsDirty = qtrue;
+			}
+			BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_FAIL, BOT_SFJ_DEBUG_KIND_TRUST, 1000,
+				"loop", "route %d already run toward this goal without progress; skipping", i);
 			rejected[1]++;
 			continue;
 		}
@@ -7840,6 +7914,18 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	}
 	for (i = 0; i < count; i++)
 	{
+		const bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[i];
+		const int statIndex = route->stat[BotSFJ_RouteNodeContext(route, ps, entries[i])];
+
+		if (seed[i] < 0.0f)
+			continue;
+		/* Learned loops make a start costlier; capture-proven routes (faster = more) cheaper. */
+		if (statIndex >= 0 && statIndex < g_botSfjRouteStatCount)
+			seed[i] /= BotSFJ_LoopPenalty(g_botSfjRouteStats[statIndex].loops);
+		seed[i] *= BotSFJ_CaptureEdgeFactor(capture[i]);
+	}
+	for (i = 0; i < count; i++)
+	{
 		familyUses[i] = 0;
 		if (effective[i] <= 0)
 			continue;
@@ -7853,10 +7939,16 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	for (i = 0; i < count; i++)
 	{
 		nearbyUses[i] = familyUses[i];
+		alternatives[i] = 0;
 		for (j = 0; j < count; j++)
-			if (seed[j] >= 0.0f && familyUses[j] > nearbyUses[i] &&
-				DistanceSquared(g_botSfjTrackRoutes[i].start, g_botSfjTrackRoutes[j].start) <= 192.0f * 192.0f)
+		{
+			if (j == i || seed[j] < 0.0f ||
+				DistanceSquared(g_botSfjTrackRoutes[i].start, g_botSfjTrackRoutes[j].start) > 192.0f * 192.0f)
+				continue;
+			if (familyUses[j] > nearbyUses[i])
 				nearbyUses[i] = familyUses[j];
+			alternatives[i]++;
+		}
 	}
 	/* A failed route yields to a similar route that is available right now and ranks better. */
 	for (i = 0; i < count; i++)
@@ -7938,7 +8030,8 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 						500.0f, 0.5f, 2.0f);
 			}
 			edges[i * count + j] = usable && connection >= 0.0f ?
-				connection + length * 0.25f / (quality[j] * speedFactor) : -1.0f;
+				(connection + length * 0.25f / (quality[j] * speedFactor)) *
+					BotSFJ_CaptureEdgeFactor(capture[j]) : -1.0f;
 			if (edges[i * count + j] >= 0.0f &&
 				g_botSfjTrackRoutes[i].objectiveNextIndex == j)
 				edges[i * count + j] *= BotSFJ_ChainEdgeFactor(0, 0, 1);
@@ -7974,6 +8067,15 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			if (first[i] < 0)
 				continue;
 			end = BotSFJ_RouteEndpoint(route, first[i] == i ? ends[i] : effective[i]);
+			/* Turning back only pays when the whole chain gains the walk twice over. */
+			if (!fleeFrom && bs->sfjTravelGoalValid && backtrack[first[i]] && !goalLink[first[i]] &&
+				!BotSFJ_BacktrackChainPaysOff(botToGoal - Distance(end, bs->sfjTravelGoal),
+					seedDistance[first[i]]))
+				continue;
+			/* Short shuffles between neighbouring routes: walking does that. */
+			if (!fleeFrom && bs->sfjTravelGoalValid &&
+				!BotSFJ_ChainGainEnough(botToGoal - Distance(end, bs->sfjTravelGoal), goalLink[first[i]]))
+				continue;
 			VectorSubtract(end, ps->origin, delta);
 			delta[2] = 0.0f;
 			distance = VectorNormalize(delta);
@@ -8059,10 +8161,10 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 					const float bonus = flagGoal ?
 						BotSFJ_FlagLandingBonus(linkEnd - linkEntry,
 							route->nodeStyle[linkEntry].forceJump, Distance(end, bs->sfjTravelGoal),
-							botToGoal, quality[i]) :
+							botToGoal, quality[i], capture[i]) :
 						BotSFJ_GoalLinkBonus(linkEnd - linkEntry,
 							route->nodeStyle[linkEntry].forceJump, Distance(end, bs->sfjTravelGoal),
-							botToGoal, quality[i]);
+							botToGoal, quality[i], 1.0f);
 
 					score += bonus;
 				}
@@ -8075,11 +8177,12 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 				if (trialClass[first[i]] != BOT_SFJ_TRIAL_FAILING)
 					score = BotSFJ_DiversityScore(score, bot_strafetrial.integer, carrying,
 						familyUses[first[i]], nearbyUses[first[i]]);
+				/* Give a nearby alternative a turn instead of rerunning the same pick. */
+				if (score > 0.0f)
+					score *= BotSFJ_RepeatPenalty(level.time < bs->sfjRecentRouteUntil &&
+						BotNav_RecentContains(bs->sfjRecentRoutes, BOT_SFJ_RECENT_ROUTES, first[i]),
+						alternatives[first[i]], carrying);
 			}
-			if (!goalLink[first[i]] &&
-				(BotSFJ_RecentLanding(bs, end) || (level.time < bs->sfjRecentRouteUntil &&
-				 BotNav_RecentContains(bs->sfjRecentRoutes, BOT_SFJ_RECENT_ROUTES, first[i]))))
-				score *= 0.65f;
 			if (score <= 0.0f)
 				rejected[5]++;
 			if (score > routeScores[first[i]])
@@ -8846,6 +8949,28 @@ static void BotSFJ_StartTrackRoute(bot_state_t *bs, const playerState_t *ps,
 		bs->sfjRecentRouteHead, routeIndex);
 	bs->sfjRecentRouteUntil = level.time + 60000;
 	bs->sfjRouteStat = route->stat[BotSFJ_RouteNodeContext(route, ps, entry)];
+	if (bs->sfjRouteStat >= 0)
+	{
+		int k, n = bs->sfjJourneyCount < BOT_SFJ_RECENT_ROUTES ? bs->sfjJourneyCount : BOT_SFJ_RECENT_ROUTES;
+
+		for (k = 0; k < n && bs->sfjJourneyStat[k] != bs->sfjRouteStat; k++)
+			;
+		if (k == n)
+			bs->sfjJourneyStat[bs->sfjJourneyCount++ % BOT_SFJ_RECENT_ROUTES] = bs->sfjRouteStat;
+	}
+	if (bs->sfjTravelGoalValid)
+	{
+		/* Loop memory belongs to one goal; a new goal starts it afresh. */
+		if (bs->sfjProgressGoalType != bs->sfjTravelGoalType)
+		{
+			memset(bs->sfjProgressRoute, 0, sizeof(bs->sfjProgressRoute));
+			bs->sfjProgressGoalType = bs->sfjTravelGoalType;
+		}
+		bs->sfjProgressRoute[bs->sfjProgressHead] = routeIndex + 1;
+		bs->sfjProgressDist[bs->sfjProgressHead] = Distance(ps->origin, bs->sfjTravelGoal);
+		bs->sfjProgressTime[bs->sfjProgressHead] = level.time;
+		bs->sfjProgressHead = (bs->sfjProgressHead + 1) % BOT_SFJ_PROGRESS_MEMORY;
+	}
 	BotSFJ_NodeApproachRoute(route, entry, &approach, bs);
 
 	bs->sfjRoute = routeIndex + 1;
@@ -9451,17 +9576,19 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 			if (remainingBest < 0.0f || d < remainingBest)
 				remainingBest = d;
 		}
-		if (carrying && bs->sfjRouteGoalType != BOT_SFJ_GOAL_FLAG_SCORE)
+		/* Landed by the flag (or the goal changed) and the rest leads away: stop hopping. */
+		if ((bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK ||
+				bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_SCORE) &&
+			BotSFJ_RemainingRouteLeadsAway(Distance(ps->origin, bs->sfjTravelGoal), remainingBest,
+				bs->sfjRouteGoalType != bs->sfjTravelGoalType))
 		{
-			if (bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_SCORE && remainingBest >= 0.0f &&
-				remainingBest > Distance(ps->origin, bs->sfjTravelGoal) - 128.0f)
-			{
-				BotSFJ_FinishTrackAttempt(bs, qfalse, qfalse);
-				BotSFJ_EndTrackRoute(bs, "flag taken: replanning toward the capture point");
-				return qfalse;
-			}
-			bs->sfjRouteGoalType = bs->sfjTravelGoalType;
+			BotSFJ_FinishTrackAttempt(bs, qfalse, qfalse);
+			BotSFJ_EndTrackRoute(bs, bs->sfjRouteGoalType != bs->sfjTravelGoalType ?
+				"goal changed: remaining hops lead away, replanning" :
+				"landed near the flag: remaining hops lead away, finishing on foot");
+			return qfalse;
 		}
+		bs->sfjRouteGoalType = bs->sfjTravelGoalType;
 	}
 	if (BotSFJ_UsablePrefixFinished(bs->sfjRouteNode, bs->sfjRouteEndNode, grounded,
 		bs->sfjRouteHopLaunched, bs->sfjRouteNode >= bs->sfjRouteEndNode ||
