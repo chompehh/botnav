@@ -1076,6 +1076,9 @@ int Team_TouchOurFlag( gentity_t *ent, gentity_t *other, int team ) {
 	else
 		AddScore(other, ent->r.currentOrigin, CTF_CAPTURE_BONUS);
 
+	if (other->r.svFlags & SVF_BOT)
+		BotSFJ_NoteCapture(other->s.number, cl->pers.stats.startTimeFlag ?
+			level.time - cl->pers.stats.startTimeFlag : 0);
 	if (cl->pers.stats.startTimeFlag) {//JAPRO SHITTY FLAG TIMER
 		const float time = (level.time - cl->pers.stats.startTimeFlag) / 1000.0f;
 		//int average = floorf(cl->pers.stats.displacementFlag / time) + 0.5f;

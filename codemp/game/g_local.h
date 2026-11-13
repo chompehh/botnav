@@ -1886,6 +1886,7 @@ float BotSFJ_RouteExportFactor( const char *lowerMap, const float *start, const 
 	int routeId, int recordedAt, int speedActive, int speedLevel );
 qboolean BotSFJ_ClientIsStrafeJumping( int clientNum );
 void BotSFJ_ClientDied( int clientNum, int meansOfDeath );
+void BotSFJ_NoteCapture( int clientNum, int captureMs );
 void BotSFJ_ResolvedMotion( int clientNum, int previousGround, int upmove );
 void G_WriteClientSessionData( gclient_t *client );
 void player_die (gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int damage, int mod);

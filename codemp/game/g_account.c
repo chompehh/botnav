@@ -13259,6 +13259,7 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 	static int candidateSpeedActive[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateSpeedLevel[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateObjectiveSuccess[STRAFETRACK_EXPORT_CANDIDATES];
+	static int candidateCaptureMs[STRAFETRACK_EXPORT_CANDIDATES];
 	static int candidateNodeCount[STRAFETRACK_EXPORT_CANDIDATES];
 	static float candidateFlagDistance[STRAFETRACK_EXPORT_CANDIDATES];
 	static float candidateEvidence[STRAFETRACK_EXPORT_CANDIDATES];
@@ -13374,6 +13375,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		G_StrafeTrackAppend(&text, "\n");
 
 	G_StrafeTrackAppend(&text, STRAFETRACK_BEGIN_MARKER "\n");
+	/* Capture times come from the CTF objective events (pickup to capture, as japro times them). */
+	G_EnsureCTFTrackSchema(db);
 	/* Keep quick short links in the candidate pool before ranking long, fast routes.
 	 * Objective markers lack phase/role context and do not multiply route quality. */
 	if (sqlite3_prepare_v2(db, "SELECT r.id, r.start_x, r.start_y, r.start_z, r.start_speed, "
@@ -13381,7 +13384,11 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 		"r.objective_success, r.created, r.max_speed, r.distance, r.duration_ms, "
 		"(SELECT MAX(force_jump) FROM LocalStrafeRouteNode WHERE route_id=r.id), r.move_style, "
 		"(r.node_count BETWEEN 1 AND 2 AND EXISTS (SELECT 1 FROM LocalStrafeRouteNode "
-		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)), r.node_count "
+		"WHERE route_id=r.id AND node_index=0 AND force_jump=1)), r.node_count, "
+		"(SELECT MIN(c.time_ms - p.time_ms) FROM LocalCTFObjectiveEvent c "
+		"JOIN LocalCTFObjectiveEvent p ON p.journey_id = c.journey_id AND p.event = 1 "
+		"AND p.time_ms <= c.time_ms WHERE r.journey_id IS NOT NULL AND c.journey_id = r.journey_id "
+		"AND c.event = 4) "
 		"FROM LocalStrafeRoute r "
 		"LEFT JOIN LocalStrafeRouteNode n ON n.route_id = r.id AND n.node_index = r.node_count - 1 "
 		"WHERE lower(r.mapname) = ?1 AND r.node_count >= ?2 AND COALESCE(r.bot, 0) = 0 "
@@ -13423,6 +13430,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			candidateScores[candidates] = (float)sqlite3_column_double(routes, 5);
 			candidateObjectiveSuccess[candidates] = sqlite3_column_type(routes, 11) == SQLITE_NULL ?
 				-1 : sqlite3_column_int(routes, 11);
+			candidateCaptureMs[candidates] = sqlite3_column_type(routes, 20) == SQLITE_NULL ||
+				sqlite3_column_int(routes, 20) <= 0 ? 0 : sqlite3_column_int(routes, 20);
 			candidateCreated[candidates] = sqlite3_column_type(routes, 12) == SQLITE_NULL ?
 				0 : sqlite3_column_int(routes, 12);
 			candidateMaxSpeeds[candidates] = (float)sqlite3_column_double(routes, 13);
@@ -13496,8 +13505,12 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 			int highway;
 
 			candidateScores[c] *= recency;
+			/* Routes from a capture journey rank higher, more so when that capture was fast. */
+			if (candidateObjectiveSuccess[c] > 0)
+				candidateScores[c] *= 1.0f + 0.25f * BotSFJ_CaptureSpeed((float)candidateCaptureMs[c]);
 			candidateCoverage[c].objectiveLink = G_StrafeTrackObjectiveLinkScore(candidateFlagDistance[c],
-				candidateNodeCount[c], candidateObjectiveSuccess[c] > 0, recency, candidateEvidence[c]);
+				candidateNodeCount[c], candidateObjectiveSuccess[c] > 0, recency, candidateEvidence[c],
+				BotSFJ_CaptureSpeed((float)candidateCaptureMs[c]));
 			if (candidateNodeCount[c] > 2 || !candidateCoverage[c].haveEnd)
 				continue;
 			for (highway = 0; highway < candidates; highway++)
@@ -13585,6 +13598,8 @@ static int G_StrafeTrackWriteRouteFile(sqlite3 *db, const char *mapnameIn, qbool
 				G_StrafeTrackAppend(&text, va("\tspeed_level %i\n", candidateSpeedLevel[k]));
 			if (candidateObjectiveSuccess[k] >= 0)
 				G_StrafeTrackAppend(&text, va("\tobjective_success %i\n", candidateObjectiveSuccess[k] > 0 ? 1 : 0));
+			if (candidateObjectiveSuccess[k] > 0 && candidateCaptureMs[k] > 0)
+				G_StrafeTrackAppend(&text, va("\tobjective_capture_ms %i\n", candidateCaptureMs[k]));
 			/* The route a human ran next on a capture journey: a chain prior for the bots. */
 			if (candidateObjectiveSuccess[k] > 0 && nextRoute)
 			{

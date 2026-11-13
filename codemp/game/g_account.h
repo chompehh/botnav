@@ -484,12 +484,15 @@ static inline float G_StrafeTrackRecencyFactor(double created, double oldest, do
 }
 
 /* Final links worth reserving: ends near a flag; short links and capture-journey routes rank first. */
+/* captureSpeed scales capture-journey routes by how fast that capture was (1 when unknown). */
 static inline float G_StrafeTrackObjectiveLinkScore(float endToFlag, int hops, int objectiveSuccess,
-	float recency, float evidence)
+	float recency, float evidence, float captureSpeed)
 {
 	if (!(endToFlag >= 0.0f) || endToFlag > 384.0f || hops <= 0 || !(evidence > 0.0f))
 		return 0.0f;
-	return (hops <= 3 ? 2.0f : 1.0f) * (objectiveSuccess ? 1.5f : 1.0f) *
+	if (!(captureSpeed > 0.0f) || !objectiveSuccess)
+		captureSpeed = 1.0f;
+	return (hops <= 3 ? 2.0f : 1.0f) * (objectiveSuccess ? 1.5f * captureSpeed : 1.0f) *
 		(recency > 0.0f ? recency : 1.0f) * evidence * (1.0f + (384.0f - endToFlag) / 384.0f);
 }
 
