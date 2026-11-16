@@ -370,10 +370,12 @@ XCVAR_DEF( bot_strafetrack_autoexport, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_trackexport_partmb, "2000", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafetrack_exportinterval, "60", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_route_combathold, "1", NULL, CVAR_ARCHIVE, qtrue )
+XCVAR_DEF( bot_soakmode, "0", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_hunt_interval, "3000", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafetrack_bots, "0", NULL, CVAR_ARCHIVE, qtrue )
-// 1 keeps current hit checks; higher values sample saber arcs and grip aim transitions more finely.
+// 1 keeps current saber hit checks; higher values sample saber arcs more finely.
 XCVAR_DEF( g_hitDetectionSubsteps, "1", NULL, CVAR_ARCHIVE, qtrue )
+XCVAR_DEF( g_forceInputDebug, "0", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_minledge, "200", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_wallmargin, "32", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafe_tolerance, "80", NULL, CVAR_ARCHIVE, qtrue )

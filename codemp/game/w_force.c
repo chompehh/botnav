@@ -1510,33 +1510,68 @@ void ForceTeamForceReplenish( gentity_t *self )
 	}
 }
 
+static void WP_ForceInputDiagnostic(gentity_t *self, int power, const char *result,
+	int target, int samples)
+{
+	if (!g_forceInputDebug.integer || !self || !self->client ||
+		self->s.number >= MAX_CLIENTS ||
+		self->client->forceInputDebugTime > level.time)
+		return;
+
+	self->client->forceInputDebugTime = level.time + 1000;
+	trap->Print("force-input client=%d power=%s result=%s target=%d samples=%d "
+		"cmd=%d resolved=%d server=%d aim=%.1f,%.1f hand=%d weapon=%d "
+		"force=%d gripDelay=%d throwDelay=%d\n",
+		self->s.number, power == FP_GRIP ? "grip" : power == FP_PULL ? "pull" : "push",
+		result, target, samples, self->client->pers.cmd.serverTime,
+		self->client->ps.commandTime, level.time,
+		self->client->ps.viewangles[PITCH], self->client->ps.viewangles[YAW],
+		self->client->ps.forceHandExtend,
+		self->client->ps.weaponTime - self->client->saberDelay,
+		self->client->ps.fd.forcePower,
+		self->client->ps.fd.forceGripUseTime - level.time,
+		self->client->ps.powerups[PW_DISINT_4] - level.time);
+}
+
 void ForceGrip( gentity_t *self )
 {
 	trace_t tr;
 	vec3_t tfrom, tto, fwd, currentAngles, previousAngles;
 	int targetNum = ENTITYNUM_NONE;
 	int sample, samples;
-	qboolean havePrevious;
+	int i;
+	int rejectedTarget = ENTITYNUM_NONE;
+	const char *rejection = "no-ray-target";
+	qboolean havePrevious, sameViewFrame;
 
 	if (!self || !self->client)
 		return;
 	VectorCopy(self->client->ps.viewangles, currentAngles);
-	havePrevious = self->client->forceGripCheckValid &&
-		level.time > self->client->forceGripCheckTime &&
-		level.time - self->client->forceGripCheckTime <= 100;
+	sameViewFrame = self->client->forceGripCheckTeleportBit ==
+		(self->client->ps.eFlags & EF_TELEPORT_BIT);
+	for (i = 0; i < 3; i++)
+	{
+		if (self->client->forceGripCheckDeltaAngles[i] != self->client->ps.delta_angles[i])
+			sameViewFrame = qfalse;
+	}
+	havePrevious = self->s.number < MAX_CLIENTS && G_ForceGripSweepContinuous(
+		self->client->forceGripCheckValid, self->client->forceGripCheckTime,
+		self->client->ps.commandTime, self->client->forceGripCheckServerTime,
+		level.time, DistanceSquared(self->client->ps.origin,
+			self->client->forceGripCheckOrigin), sameViewFrame);
 	if (havePrevious)
 		VectorCopy(self->client->forceGripCheckViewAngles, previousAngles);
-	VectorCopy(currentAngles, self->client->forceGripCheckViewAngles);
-	self->client->forceGripCheckTime = level.time;
-	self->client->forceGripCheckValid = qtrue;
+	self->client->forceGripCheckValid = qfalse;
 
 	if ( self->health <= 0 )
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, "dead", ENTITYNUM_NONE, 0);
 		return;
 	}
 
 	if (self->client->ps.forceHandExtend != HANDEXTEND_NONE)
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, "hand-lock", ENTITYNUM_NONE, 0);
 		return;
 	}
 
@@ -1551,6 +1586,7 @@ void ForceGrip( gentity_t *self )
 		}
 		else 
 		{
+			WP_ForceInputDiagnostic(self, FP_GRIP, "weapon-lock", ENTITYNUM_NONE, 0);
 			return;
 		}
 	}
@@ -1558,17 +1594,29 @@ void ForceGrip( gentity_t *self )
 
 	if (self->client->ps.fd.forceGripUseTime > level.time)
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, "grip-cooldown", ENTITYNUM_NONE, 0);
 		return;
 	}
 
 	if ( !WP_ForcePowerUsable( self, FP_GRIP ) )
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, "power-unusable", ENTITYNUM_NONE, 0);
 		return;
 	}
 
+	VectorCopy(currentAngles, self->client->forceGripCheckViewAngles);
+	VectorCopy(self->client->ps.origin, self->client->forceGripCheckOrigin);
+	self->client->forceGripCheckTime = self->client->ps.commandTime;
+	self->client->forceGripCheckServerTime = level.time;
+	self->client->forceGripCheckTeleportBit = self->client->ps.eFlags & EF_TELEPORT_BIT;
+	for (i = 0; i < 3; i++)
+		self->client->forceGripCheckDeltaAngles[i] = self->client->ps.delta_angles[i];
+	self->client->forceGripCheckValid = qtrue;
+
 	VectorCopy(self->client->ps.origin, tfrom);
 	tfrom[2] += self->client->ps.viewheight;
-	samples = havePrevious ? G_HitDetectionSubsteps(g_hitDetectionSubsteps.integer) : 1;
+	samples = havePrevious ? G_ForceGripSweepSamples(previousAngles[PITCH],
+		previousAngles[YAW], currentAngles[PITCH], currentAngles[YAW]) : 1;
 	for (sample = 1; sample <= samples; sample++)
 	{
 		vec3_t sampleAngles;
@@ -1592,12 +1640,19 @@ void ForceGrip( gentity_t *self )
 
 		JP_Trace(&tr, tfrom, NULL, NULL, tto, self->s.number, MASK_PLAYERSOLID, qfalse, 0, 0);
 
-		if (tr.fraction != 1.0 && tr.entityNum != ENTITYNUM_NONE &&
-			g_entities[tr.entityNum].client &&
-			!g_entities[tr.entityNum].client->ps.fd.forceGripCripple &&
-			g_entities[tr.entityNum].client->ps.fd.forceGripBeingGripped < level.time &&
-			ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_GRIP) &&
-			(g_friendlyFire.value || !OnSameTeam(self, &g_entities[tr.entityNum])))
+		if (tr.fraction == 1.0 || tr.entityNum == ENTITYNUM_NONE)
+			continue;
+		rejectedTarget = tr.entityNum;
+		if (!g_entities[tr.entityNum].client)
+			rejection = "blocked-or-nonclient";
+		else if (g_entities[tr.entityNum].client->ps.fd.forceGripCripple ||
+			g_entities[tr.entityNum].client->ps.fd.forceGripBeingGripped >= level.time)
+			rejection = "target-already-gripped";
+		else if (!ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_GRIP))
+			rejection = "target-immune";
+		else if (!g_friendlyFire.value && OnSameTeam(self, &g_entities[tr.entityNum]))
+			rejection = "teammate";
+		else
 		{
 			targetNum = tr.entityNum;
 			break;
@@ -1606,6 +1661,8 @@ void ForceGrip( gentity_t *self )
 
 	if (targetNum != ENTITYNUM_NONE)
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, "acquired", targetNum, samples);
+		self->client->forceGripCheckValid = qfalse;
 		if (g_entities[targetNum].s.number < MAX_CLIENTS &&
 			g_entities[targetNum].client->ps.m_iVehicleNum)
 		{
@@ -1629,6 +1686,7 @@ void ForceGrip( gentity_t *self )
 	}
 	else
 	{
+		WP_ForceInputDiagnostic(self, FP_GRIP, rejection, rejectedTarget, samples);
 		self->client->ps.fd.forceGripEntityNum = ENTITYNUM_NONE;
 		return;
 	}
@@ -3349,16 +3407,20 @@ void ForceThrow( gentity_t *self, qboolean pull )
 	vec3_t		thispush_org;
 	vec3_t		tfrom, tto, fwd, a;
 	int			powerUse = 0;
+	int			clientEffects = 0;
 
 	visionArc = 0;
+	powerUse = pull ? FP_PULL : FP_PUSH;
 
 	if (self->client->ps.forceHandExtend != HANDEXTEND_NONE && ((self->client->ps.forceHandExtend != HANDEXTEND_KNOCKDOWN || !G_InGetUpAnim(&self->client->ps)) || (g_tweakForce.integer & FT_JK2GETUPS)))
 	{
+		WP_ForceInputDiagnostic(self, powerUse, "hand-lock", ENTITYNUM_NONE, 0);
 		return;
 	}
 
 	if (!g_useWhileThrowing.integer && self->client->ps.saberInFlight)
 	{
+		WP_ForceInputDiagnostic(self, powerUse, "saber-in-flight", ENTITYNUM_NONE, 0);
 		return;
 	}
 
@@ -3373,30 +3435,28 @@ void ForceThrow( gentity_t *self, qboolean pull )
 		{
 			//Rolling and allowed to pull.
 		}
-		else 
+		else
+		{
+			WP_ForceInputDiagnostic(self, powerUse, "weapon-lock", ENTITYNUM_NONE, 0);
 			return;
+		}
 	}
 //[JAPRO - Serverside - Force - Fix push/pull during getup - Start]
 
 	if ( self->health <= 0 )
 	{
+		WP_ForceInputDiagnostic(self, powerUse, "dead", ENTITYNUM_NONE, 0);
 		return;
 	}
 	if ( self->client->ps.powerups[PW_DISINT_4] > level.time )
 	{
+		WP_ForceInputDiagnostic(self, powerUse, "throw-cooldown", ENTITYNUM_NONE, 0);
 		return;
-	}
-	if (pull)
-	{
-		powerUse = FP_PULL;
-	}
-	else
-	{
-		powerUse = FP_PUSH;
 	}
 
 	if ( !WP_ForcePowerUsable( self, powerUse ) )
 	{
+		WP_ForceInputDiagnostic(self, powerUse, "power-unusable", ENTITYNUM_NONE, 0);
 		return;
 	}
 
@@ -3537,6 +3597,7 @@ void ForceThrow( gentity_t *self, qboolean pull )
 			{
 				if (!ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_PULL))
 				{
+					WP_ForceInputDiagnostic(self, powerUse, "target-immune", tr.entityNum, 1);
 					return;
 				}
 			}
@@ -3544,6 +3605,7 @@ void ForceThrow( gentity_t *self, qboolean pull )
 			{
 				if (!ForcePowerUsableOn(self, &g_entities[tr.entityNum], FP_PUSH))
 				{
+					WP_ForceInputDiagnostic(self, powerUse, "target-immune", tr.entityNum, 1);
 					return;
 				}
 			}
@@ -3552,6 +3614,7 @@ void ForceThrow( gentity_t *self, qboolean pull )
 		else
 		{
 			//didn't get anything, so just
+			WP_ForceInputDiagnostic(self, powerUse, "no-ray-target", ENTITYNUM_NONE, 1);
 			return;
 		}
 	}
@@ -4045,6 +4108,8 @@ void ForceThrow( gentity_t *self, qboolean pull )
 
 						//fullbody push effect
 						push_list[x]->client->pushEffectTime = level.time + 600;
+						BotSFJ_Interference(push_list[x]->s.number);
+						clientEffects++;
 
 						if (push_list[x]->client->sess.raceMode) { //push and pull.. OP?
 							if (pull) {
@@ -4263,6 +4328,11 @@ void ForceThrow( gentity_t *self, qboolean pull )
 	{
 		self->client->ps.fd.forceGripBeingGripped = 0;
 	}
+	if (g_forceInputDebug.integer)
+		WP_ForceInputDiagnostic(self, powerUse,
+			va("%s candidates=%d affected=%d", clientEffects ? "client-impulse" :
+				ent_count ? "candidates-no-client-impulse" : "no-legal-target-aim-range-los-team",
+				ent_count, clientEffects), ENTITYNUM_NONE, 0);
 }
 
 void WP_ForcePowerStop( gentity_t *self, forcePowers_t forcePower )
@@ -4463,6 +4533,7 @@ void DoGripAction(gentity_t *self, forcePowers_t forcePower)
 		return;
 	}
 
+	BotSFJ_Interference(gripEnt->s.number);
 	if (self->client->ps.fd.forcePowerDebounce[FP_GRIP] < level.time)
 	{ //2 damage per second while choking, resulting in 10 damage total (not including The Squeeze<tm>)
 		self->client->ps.fd.forcePowerDebounce[FP_GRIP] = level.time + 1000;
@@ -5064,6 +5135,8 @@ int WP_DoSpecificPower( gentity_t *self, usercmd_t *ucmd, forcePowers_t forcepow
 	// OVERRIDEFIXME
 	if ( !WP_ForcePowerAvailable( self, forcepower, 0 ) )
 	{
+		if (forcepower == FP_GRIP || forcepower == FP_PUSH || forcepower == FP_PULL)
+			WP_ForceInputDiagnostic(self, forcepower, "insufficient-force", ENTITYNUM_NONE, 0);
 		//This is fucked up.  why did they make 2 ways of activating forcepowers
 		if ((g_tweakWeapons.integer & WT_TRIBES) &&
 			!self->client->sess.raceMode && 
@@ -5249,6 +5322,65 @@ int WP_DoSpecificPower( gentity_t *self, usercmd_t *ucmd, forcePowers_t forcepow
 	}
 
 	return powerSucceeded;
+}
+
+/* Acquisition belongs to resolved usercmds; ongoing power updates and
+ * regeneration remain frame-driven in WP_ForcePowersUpdate. */
+void WP_ForceInputUpdate(gentity_t *self, usercmd_t *ucmd)
+{
+	qboolean gripHeld;
+	int selected;
+
+	if (!self || !self->client || self->s.number >= MAX_CLIENTS)
+		return;
+
+	if (level.intermissiontime || (self->client->ps.pm_flags & PMF_FOLLOW) ||
+		self->client->sess.sessionTeam == TEAM_SPECTATOR ||
+		self->client->ps.fd.forceDeactivateAll ||
+		(level.pause.state != PAUSE_NONE && !self->client->sess.raceMode))
+	{
+		self->client->forceGripCheckValid = qfalse;
+		return;
+	}
+
+	/* Class cvars can change between frames; do not acquire with the previous
+	 * frame's replicated restrictions or force ranks. */
+	G_JVMApplyClass(self, qfalse);
+	selected = self->client->ps.fd.forcePowerSelected;
+	gripHeld = (ucmd->buttons & BUTTON_FORCEGRIP) ||
+		((ucmd->buttons & BUTTON_FORCEPOWER) && selected == FP_GRIP);
+	if (!(ucmd->buttons & BUTTON_FORCEPOWER))
+		self->client->ps.fd.forceButtonNeedRelease = 0;
+
+	if (!gripHeld)
+	{
+		self->client->forceGripCheckValid = qfalse;
+		if (self->client->ps.fd.forcePowersActive & (1 << FP_GRIP))
+			WP_ForcePowerStop(self, FP_GRIP);
+	}
+	else if (self->client->ps.fd.forceGripEntityNum != ENTITYNUM_NONE ||
+		!WP_ForcePowerAvailable(self, FP_GRIP, 0))
+	{
+		self->client->forceGripCheckValid = qfalse;
+		if (!(self->client->ps.fd.forcePowersActive & (1 << FP_GRIP)))
+			WP_ForceInputDiagnostic(self, FP_GRIP, "unavailable-or-existing-target",
+				self->client->ps.fd.forceGripEntityNum, 0);
+	}
+	else
+	{
+		WP_DoSpecificPower(self, ucmd, FP_GRIP);
+		/* Match the frame path's immediate first application, without running
+		 * an active grip once per usercmd (damage/motion keep their debounces). */
+		if (self->client->ps.fd.forcePowersActive & (1 << FP_GRIP))
+			WP_ForcePowerRun(self, FP_GRIP, ucmd);
+	}
+
+	if ((ucmd->buttons & BUTTON_FORCEPOWER) &&
+		(selected == FP_PUSH || selected == FP_PULL) &&
+		BG_CanUseFPNow(level.gametype, &self->client->ps, level.time, selected))
+	{
+		WP_DoSpecificPower(self, ucmd, (forcePowers_t)selected);
+	}
 }
 
 void FindGenericEnemyIndex(gentity_t *self)
@@ -5705,10 +5837,12 @@ void WP_ForcePowersUpdate( gentity_t *self, usercmd_t *ucmd )
 
 	if (self->client->ps.pm_flags & PMF_FOLLOW)
 	{ //not a "real" game client, it's a spectator following someone
+		self->client->forceGripCheckValid = qfalse;
 		return;
 	}
 	if (self->client->sess.sessionTeam == TEAM_SPECTATOR)
 	{
+		self->client->forceGripCheckValid = qfalse;
 		return;
 	}
 
@@ -6077,7 +6211,8 @@ void WP_ForcePowersUpdate( gentity_t *self, usercmd_t *ucmd )
 
 	if ( ucmd->buttons & BUTTON_FORCEGRIP )
 	{ //grip is one of the powers with its own button.. if it's held, call the specific grip power function.
-		WP_DoSpecificPower( self, ucmd, FP_GRIP );
+		if (self->s.number >= MAX_CLIENTS)
+			WP_DoSpecificPower( self, ucmd, FP_GRIP );
 	}
 	else
 	{ //see if we're using it generically.. if not, stop.
@@ -6124,7 +6259,10 @@ void WP_ForcePowersUpdate( gentity_t *self, usercmd_t *ucmd )
 	{
 		if (self->client->ps.fd.forcePowerSelected == FP_LEVITATION)
 			ForceJumpCharge( self, ucmd );
-		else
+		else if (self->s.number >= MAX_CLIENTS ||
+			(self->client->ps.fd.forcePowerSelected != FP_GRIP &&
+			 self->client->ps.fd.forcePowerSelected != FP_PUSH &&
+			 self->client->ps.fd.forcePowerSelected != FP_PULL))
 			WP_DoSpecificPower( self, ucmd, self->client->ps.fd.forcePowerSelected );
 	}
 	else

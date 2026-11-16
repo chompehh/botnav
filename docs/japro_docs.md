@@ -24,16 +24,34 @@
 	g_redDamageScale		1	
 	g_redDFADamageScale		1
 	d_saberSPStyleDamage		0	//Toggle use of SP style damage in normal game.
-	g_hitDetectionSubsteps	1	//1-4 swept saber/Force Grip aim samples per update; improves hit registration without changing damage values.
+	g_hitDetectionSubsteps	1	//1-4 swept saber samples per update; grip uses its own bounded command-timed sweep.
 
 #### Force 
 	g_tweakForce		0	//Configured with /tweakForce command.
+	g_forceInputDebug	0	//1=Server-console force input diagnostics, limited to one message/client/second. 0=off.
 	g_fixSaberInGrip	0	//1=Grip does not turn off lightsaber. 2=Same as 1 and also target can toggle lightsaber in grip. 3=Same as 2 and also target can switch saberstyle in grip.
 	g_fixLightning		0	//1=Lightning gives forcepoints to target. 2=Same as 1 with reduced damage. 3=Same as 2 with no melee bonus.
 	g_fixGetups			0  //1=Allow grip during knockdown recovery. 2=Allow grip/push/pull during knockdown recovery.
 	g_teamAbsorbScale	1	//Scale forcepoints gained from teampush/teampull etc.
 	g_teamHealScale		1	//Scale health given from team heal.
 	g_teamEnergizeScale	1	//Scale forcepoints given from team energize.
+
+Held grip acquisition follows resolved movement commands, including commands within the
+same server frame. It traces the short pitch/yaw arc between consecutive held, legally
+usable inputs (up to 64 rays); the sweep is independent of `g_hitDetectionSubsteps`.
+Release, respawn, teleport/forced view changes, movement over 64 units, and command or
+server gaps over 100 ms discard history. The current ray is still checked without history.
+Range, line of sight, teams, immunity, resource costs and recovery/cooldown rules are
+unchanged. Lower-level grip still breaks when its normal facing rule fails.
+
+Selected push/pull via `+forcepower` also activates after the issuing movement command,
+rather than polling a later frame's buttons/aim. Dedicated push/pull generic commands
+already use post-movement aim and have no generic-command flood debounce here.
+A cast animation/sound does not guarantee a legal target: empty casts, blocked sight,
+range/cone rejection, teams, absorb and counter-force remain normal gameplay.
+`g_forceInputDebug 1` distinguishes lockouts, unusable powers, missing legal targets,
+grip acquisition and applied client impulses; it reports resolved command/server times
+and aim without sending chat messages. Disable it after investigation.
 
 #### Guns 
 	g_tweakWeapons				0	//Configured with /tweakWeapons command	

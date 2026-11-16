@@ -1045,6 +1045,17 @@ BOOST_AUTO_TEST_CASE(baked_baseline_keeps_last_learned_saber_and_force_preferenc
 		BOTLEARN_BASELINE_FOLLOW_ANY, 10.0f, 10.0f), BOTLEARN_BONUS_CAP);
 }
 
+BOOST_AUTO_TEST_CASE(human_jump_outcomes_bias_combat_travel_without_crossing_modes)
+{
+	BOOST_CHECK_GT(BotLearn_StrafeJumpPrior(1, BOTLEARN_TOK_JUMP, 1, 7), 0);
+	BOOST_CHECK_LT(BotLearn_StrafeJumpPrior(0, BOTLEARN_TOK_SWING, 1, 7), 0);
+	BOOST_CHECK_LT(BotLearn_StrafeJumpPrior(1, BOTLEARN_TOK_THROW, 1, 7), 0);
+	BOOST_CHECK_EQUAL(BotLearn_StrafeJumpPrior(0, BOTLEARN_TOK_THROW, 1, 7), 0);
+	BOOST_CHECK_EQUAL(BotLearn_StrafeJumpPrior(2, BOTLEARN_TOK_JUMP, 1, 7), 0);
+	BOOST_CHECK_EQUAL(BotLearn_StrafeJumpPrior(1, BOTLEARN_TOK_JUMP, 0, 7), 0);
+	BOOST_CHECK_LE(BotLearn_StrafeJumpPrior(1, BOTLEARN_TOK_JUMP, 100, 7), BOTLEARN_BONUS_CAP);
+}
+
 BOOST_AUTO_TEST_CASE(baked_baseline_respects_safety_dimensions)
 {
 	const int base = BotLearn_ContextKey(150, 150, 100, 100, 0, 1, 1);

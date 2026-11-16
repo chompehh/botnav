@@ -3,6 +3,17 @@
 
 #include <math.h>
 #include <stddef.h>
+#include "g_strafe_route.h"
+
+static inline int BotSFJ_RecordedEntryLaunch(int entryKind, int node,
+	int wasGrounded, int grounded, int upmove, float verticalSpeed, int rolling)
+{
+	if (!wasGrounded || grounded)
+		return 0;
+	if (!node && entryKind == STRAFE_ROUTE_ENTRY_ROLL)
+		return rolling;
+	return upmove > 0 && verticalSpeed > 0.0f;
+}
 
 #define BOT_SFJ_INTENT_MAX_AGE_MS 250
 #define BOT_SFJ_ABORT_COOLDOWN_MS 500
@@ -377,7 +388,7 @@ static inline int BotSFJ_TrackHopTrusted(int deaths, int failures, int passes)
 static inline int BotSFJ_TrackHopTrustedForSpeed(int deaths, int failures, int passes, int speed)
 {
 	if (speed)
-		return deaths <= 0 && (failures < 2 || failures <= passes / 2);
+		return deaths <= 0 && (failures < 2 || failures <= passes);
 	return BotSFJ_TrackHopTrusted(deaths, failures, passes);
 }
 
@@ -502,10 +513,17 @@ static inline int BotSFJ_HopRetryDelayForSpeed(int failures, int lethal, int spe
 	return speed ? (delay < 150000 ? delay * 2 : 300000) : delay;
 }
 
+static inline int BotSFJ_HopEvidenceRetryDelay(int failures, int passes, int lethal, int speed)
+{
+	const int excessFailures = !lethal && passes > 0 ? failures - passes : failures;
+
+	return BotSFJ_HopRetryDelayForSpeed(excessFailures > 0 ? excessFailures : 1, lethal, speed);
+}
+
 static inline float BotSFJ_HopReliability(int failures, int passes)
 {
 	return 0.25f + 0.75f *
-		((float)passes + 1.0f) / ((float)passes + 1.0f + 4.0f * failures);
+		((float)passes + 1.0f) / ((float)passes + 1.0f + (float)failures);
 }
 
 static inline void BotSFJ_HopEvidenceBound(int *failures, int *passes)
@@ -524,6 +542,17 @@ static inline void BotSFJ_HopEvidenceNote(int *failures, int *passes, int succes
 		++*passes;
 	else
 		++*failures;
+}
+
+static inline void BotSFJ_RepairHopEvidence(int failures, int passes, int deaths,
+	int *recentFailures, int *recentPasses)
+{
+	if (!deaths && passes > 0 && passes >= failures && *recentFailures > *recentPasses)
+	{
+		*recentFailures = failures;
+		*recentPasses = passes;
+		BotSFJ_HopEvidenceBound(recentFailures, recentPasses);
+	}
 }
 
 /* A failed suffix must not erase the value of the hops before it. */
@@ -946,6 +975,13 @@ static inline int BotSFJ_StartIntervalMs(int frequency)
 	if (frequency > 1000)
 		frequency = 1000;
 	return 100000 / frequency;
+}
+
+static inline int BotSFJ_CombatStartInterval(int frequency, int prior, int learned)
+{
+	const float bonus = BotSFJ_ClampSetting((float)prior + (float)learned, -30.0f, 30.0f);
+
+	return (int)((float)BotSFJ_StartIntervalMs(frequency) * (1.0f - bonus * 0.01f));
 }
 
 static inline int BotSFJ_WaypointSkipAllows(int requiredFlags, float heightDelta,
@@ -2420,6 +2456,8 @@ static inline void BotSFJ_BackwardAxes(int *forward, int *right)
 #define BOT_SFJ_REPLAY_FLAG_WALLRUN 4
 #define BOT_SFJ_REPLAY_FLAG_FORCEJUMP 8
 #define BOT_SFJ_REPLAY_FLAG_WALLKNOWN 16	/* wall_run was recorded (not NULL) */
+#define BOT_SFJ_REPLAY_FLAG_CROUCH STRAFE_ROUTE_REPLAY_FLAG_CROUCH
+#define BOT_SFJ_REPLAY_FLAG_ROLL STRAFE_ROUTE_REPLAY_FLAG_ROLL
 #define BOT_SFJ_REPLAY_KEEP_DISTANCE 20.0f
 #define BOT_SFJ_REPLAY_KEEP_YAW 4.0f
 #define BOT_SFJ_REPLAY_KEEP_MS 100
@@ -3273,12 +3311,59 @@ static inline int BotSFJ_HopBlocked(int deaths, int failures, int passes)
 static inline int BotSFJ_LearnedEnd(int count, int marker, const int *deaths,
 	const int *failures, const int *passes)
 {
-	int node, end = marker > 0 && marker <= count + 1 ? marker - 1 : count;
+	int node;
 
-	for (node = 0; node < end; node++)
-		if (BotSFJ_HopBlocked(deaths[node], failures[node], passes[node]))
+	/* Nonlethal failures cool down and retry; old markers cannot make them permanent. */
+	(void)marker;
+	(void)failures;
+	(void)passes;
+	for (node = 0; node < count; node++)
+		if (deaths[node] > 0)
 			return node;
-	return end;
+	return count;
+}
+
+static inline int BotSFJ_RouteEvidenceAllows(int interfered, int failureNoted)
+{
+	return !interfered && !failureNoted;
+}
+
+static inline int BotSFJ_NavigationAwake(int humansActive, int humansOnly, int soak)
+{
+	return humansActive || !humansOnly || soak;
+}
+
+static inline int BotSFJ_FFACombatPriority(int ffa, int grounded, int visible,
+	float distance, float targetDistance, int combatMovement)
+{
+	return ffa && grounded && visible && !combatMovement && isfinite(distance) &&
+		distance >= 0.0f && isfinite(targetDistance) &&
+		(targetDistance <= 0.0f || distance <= targetDistance * 0.5f);
+}
+
+static inline int BotSFJ_OpponentEscaping(float distance, float minStrafe,
+	float enemySpeed, float outwardSpeed)
+{
+	return isfinite(distance) && isfinite(enemySpeed) && isfinite(outwardSpeed) &&
+		distance >= (minStrafe > 128.0f ? minStrafe : 128.0f) &&
+		enemySpeed >= 400.0f && outwardSpeed >= 100.0f;
+}
+
+/* Exploration favors a patch until it has four resolved, uncontaminated trials. */
+static inline float BotSFJ_PriorityScore(float score, int high, int trial, int resolved)
+{
+	if (!(score > 0.0f) || !high || !trial || resolved >= 4)
+		return score;
+	return score * 1.5f + 256.0f;
+}
+
+/* Cost in walking-equivalent units: every transfer must justify lost momentum. */
+static inline float BotSFJ_RouteTransferCost(float gap, float entrySpeed)
+{
+	const float stop = BotSFJ_ClampSetting((entrySpeed - 250.0f) / 350.0f, 0.0f, 1.0f);
+
+	return 96.0f + BotSFJ_ClampSetting(gap / 256.0f, 0.0f, 1.0f) * 128.0f +
+		stop * 64.0f;
 }
 
 static inline int BotSFJ_RouteConflictBlocks(bot_sfj_conflict_t conflict,
@@ -3483,7 +3568,7 @@ static inline float BotSFJ_FlagLandingBonus(int hops, int forceJump, float endTo
 	if (hops <= BOT_SFJ_GOAL_LINK_MAX_HOPS)
 		return BotSFJ_GoalLinkBonus(hops, forceJump, endToGoal, botToGoal, reliability, captureEvidence);
 	return BotSFJ_GoalLinkBonus(BOT_SFJ_GOAL_LINK_MAX_HOPS, 0,
-		endToGoal, botToGoal, reliability, captureEvidence) * 0.35f;
+		endToGoal, botToGoal, reliability, captureEvidence);
 }
 
 /*

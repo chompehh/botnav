@@ -28,6 +28,48 @@ BOOST_AUTO_TEST_CASE( hit_detection_substeps_are_bounded_and_interpolate_short_a
 	BOOST_CHECK_CLOSE(G_HitDetectionInterpolateAngle(1.0f, 359.0f, 0.5f), 0.0f, 0.001f);
 }
 
+BOOST_AUTO_TEST_CASE( force_grip_sweep_uses_fresh_contiguous_commands_not_server_frames )
+{
+	/* Several usercmds can resolve during one server frame. */
+	BOOST_CHECK(G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 1000, 0.0f, 1));
+	BOOST_CHECK(G_ForceGripSweepContinuous(1, 1000, 1100, 1000, 1100, 4096.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(0, 1000, 1008, 1000, 1000, 0.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1000, 1000, 1050, 0.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 999, 1000, 1050, 0.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1101, 1000, 1050, 0.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 1101, 0.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 999, 0.0f, 1));
+	/* Teleports, forced view changes and discontinuous origins cannot reuse aim. */
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 1000, 0.0f, 0));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 1000, 4097.0f, 1));
+	BOOST_CHECK(!G_ForceGripSweepContinuous(1, 1000, 1008, 1000, 1000, NAN, 1));
+}
+
+BOOST_AUTO_TEST_CASE( force_grip_fast_yaw_sweep_samples_crossed_target_in_both_directions )
+{
+	const float starts[] = { -65.0f, 65.0f, 330.0f, 30.0f };
+	const float ends[] = { 65.0f, -65.0f, 30.0f, 330.0f };
+	for (int direction = 0; direction < 4; direction++)
+	{
+		const int samples = G_ForceGripSweepSamples(0.0f, starts[direction],
+			0.0f, ends[direction]);
+		bool crossedTarget = false;
+		/* A target at yaw 2 degrees is not under either endpoint ray. */
+		for (int sample = 1; sample <= samples; sample++)
+		{
+			const float yaw = G_HitDetectionInterpolateAngle(starts[direction],
+				ends[direction], (float)sample / samples);
+			if (fabsf(G_HitDetectionAngleDelta(yaw, 2.0f)) < 3.0f)
+				crossedTarget = true;
+		}
+		BOOST_CHECK(crossedTarget);
+		BOOST_CHECK_LE(samples, G_FORCE_GRIP_SWEEP_MAX_SAMPLES);
+	}
+	BOOST_CHECK_EQUAL(G_ForceGripSweepSamples(0.0f, 359.0f, 0.0f, 1.0f), 1);
+	BOOST_CHECK_EQUAL(G_ForceGripSweepSamples(-89.0f, 0.0f, 89.0f, 180.0f),
+		G_FORCE_GRIP_SWEEP_MAX_SAMPLES);
+}
+
 BOOST_AUTO_TEST_CASE( strafe_forward_acquisition_beats_higher_rated_backtracking )
 {
 	BOOST_CHECK( BotSFJ_StartIsBacktrack(200, -0.5f) );
@@ -416,6 +458,11 @@ BOOST_AUTO_TEST_CASE( strafejump_frequency_and_waypoint_skip_safety )
 	BOOST_CHECK_EQUAL( BotSFJ_StartIntervalMs( 100 ), 1000 );
 	BOOST_CHECK_EQUAL( BotSFJ_StartIntervalMs( 200 ), 500 );
 	BOOST_CHECK_EQUAL( BotSFJ_StartIntervalMs( 2000 ), 100 );
+	BOOST_CHECK_EQUAL( BotSFJ_CombatStartInterval(100, 0, 0), 1000 );
+	BOOST_CHECK_EQUAL( BotSFJ_CombatStartInterval(100, 10, 10), 800 );
+	BOOST_CHECK_EQUAL( BotSFJ_CombatStartInterval(100, 30, 30), 700 );
+	BOOST_CHECK_EQUAL( BotSFJ_CombatStartInterval(100, -30, -30), 1300 );
+	BOOST_CHECK_EQUAL( BotSFJ_CombatStartInterval(0, 30, 30), 0 );
 	BOOST_CHECK( BotSFJ_WaypointSkipAllows( 0, 0.0f, 1.0f, 1 ) );
 	BOOST_CHECK( !BotSFJ_WaypointSkipAllows( 1, 0.0f, 1.0f, 1 ) );
 	BOOST_CHECK( !BotSFJ_WaypointSkipAllows( 0, 33.0f, 1.0f, 1 ) );
@@ -3020,6 +3067,18 @@ BOOST_AUTO_TEST_CASE( saber_throw_hold_telemetry_records_transitions_and_bounded
 	BOOST_CHECK( NewBotAI_SaberThrowDecisionSampleDue( 1, 1, -1 ) );
 }
 
+BOOST_AUTO_TEST_CASE( recorded_roll_entries_require_actual_airborne_rolls_not_jump_input )
+{
+	BOOST_CHECK(BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 0, 1, 0, -127, -80, 1));
+	BOOST_CHECK(!BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 0, 1, 1, -127, 0, 1));
+	BOOST_CHECK(!BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 0, 0, 0, -127, -80, 1));
+	BOOST_CHECK(!BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 0, 1, 0, 0, -80, 0));
+	BOOST_CHECK(!BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_NORMAL, 0, 1, 0, 0, -80, 1));
+	BOOST_CHECK(BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_WALLRUN, 0, 1, 0, 127, 225, 0));
+	BOOST_CHECK(BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 1, 1, 0, 127, 225, 0));
+	BOOST_CHECK(!BotSFJ_RecordedEntryLaunch(STRAFE_ROUTE_ENTRY_ROLL, 1, 1, 0, 0, -80, 1));
+}
+
 BOOST_AUTO_TEST_CASE( strafejump_glancing_walls_slide_instead_of_rejecting )
 {
 	// Wall facing -X; moving mostly along +Y with a slight push into it: a graze.
@@ -3419,6 +3478,11 @@ BOOST_AUTO_TEST_CASE( route_failures_are_contextual_and_retries_are_bounded )
 	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 1, 1 ), BotSFJ_HopRetryDelay( 1, 0 ) );
 	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 3, 0 ), BotSFJ_HopRetryDelay( 1, 0 ) );
 	BOOST_CHECK_EQUAL( BotSFJ_HopRetryDelay( 100, 1 ), 300000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 0), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 1), 30000 );
+	BOOST_CHECK_GT( BotSFJ_HopEvidenceRetryDelay(8, 0, 0, 0), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 1, 0),
+		BotSFJ_HopRetryDelay(8, 1) );
 	BOOST_CHECK_LT( BotSFJ_HopReliability( 2, 0 ), BotSFJ_HopReliability( 1, 0 ) );
 	BOOST_CHECK_GT( BotSFJ_HopReliability( 1, 5 ), BotSFJ_HopReliability( 1, 0 ) );
 }
@@ -5308,7 +5372,7 @@ BOOST_AUTO_TEST_CASE( speed_hops_lose_trust_sooner_and_recover_with_success )
 	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 1, 0, 1) );
 	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(0, 2, 0, 1) );
 	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 2, 0, 0) );
-	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(0, 2, 3, 1) );
+	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 2, 3, 1) );
 	BOOST_CHECK( BotSFJ_TrackHopTrustedForSpeed(0, 2, 4, 1) );
 	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(1, 0, 16, 1) );
 	BOOST_CHECK( !BotSFJ_TrackHopTrustedForSpeed(1, 0, 16, 0) );
@@ -5434,18 +5498,89 @@ BOOST_AUTO_TEST_CASE( lethal_or_recently_failing_hops_trim_despite_old_passes )
 	BOOST_CHECK( !BotSFJ_HopBlocked(0, 3, 5) );
 }
 
-BOOST_AUTO_TEST_CASE( learned_terminal_survives_reload_without_failure_counters )
+BOOST_AUTO_TEST_CASE( nonlethal_terminals_recover_but_observed_deaths_still_trim )
 {
 	int deaths[4] = {}, failures[4] = {}, passes[4] = {2, 2, 1, 0};
 	failures[2] = 3;
 	const int end = BotSFJ_LearnedEnd(4, 0, deaths, failures, passes);
-	BOOST_CHECK_EQUAL(end, 2);
-	const int savedMarker = end + 1;
+	BOOST_CHECK_EQUAL(end, 4);
+	const int savedMarker = 3;
 	std::memset(failures, 0, sizeof(failures));
-	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, savedMarker, deaths, failures, passes), 2);
+	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, savedMarker, deaths, failures, passes), 4);
 	deaths[1] = 1;
 	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, savedMarker, deaths, failures, passes), 1);
-	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, 1, deaths, failures, passes), 0);
+	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, 1, deaths, failures, passes), 1);
+}
+
+BOOST_AUTO_TEST_CASE( mostly_successful_routes_repair_old_recent_rejections )
+{
+	int failures = 7, passes = 2;
+	BotSFJ_RepairHopEvidence(8, 40, 0, &failures, &passes);
+	BOOST_CHECK_GT(passes, failures);
+	BOOST_CHECK(BotSFJ_TrackHopTrustedForSpeed(0, failures, passes, 1));
+	BOOST_CHECK_GT(BotSFJ_HopReliability(failures, passes), 0.8f);
+	failures = 7;
+	passes = 2;
+	BotSFJ_RepairHopEvidence(8, 40, 1, &failures, &passes);
+	BOOST_CHECK_EQUAL(failures, 7);
+	BOOST_CHECK_EQUAL(passes, 2);
+	BotSFJ_RepairHopEvidence(40, 8, 0, &failures, &passes);
+	BOOST_CHECK_EQUAL(failures, 7);
+	BOOST_CHECK_EQUAL(passes, 2);
+}
+
+BOOST_AUTO_TEST_CASE( continuous_highway_beats_a_comparable_transfer_plan )
+{
+	const float transfer = BotSFJ_RouteTransferCost(64, 500);
+	const float edges[9] = {-1, -1, -1, -1, -1, 850 + transfer, -1, -1, -1};
+	const float seeds[3] = {1000, 100, -1};
+	float cost[3];
+	int first[3];
+	BotSFJ_RoutePaths(3, edges, seeds, cost, first);
+	BOOST_CHECK_GT(cost[2], cost[0]);
+	BOOST_CHECK_EQUAL(first[2], 1);
+	BOOST_CHECK_CLOSE(BotSFJ_FlagLandingBonus(8, 0, 64, 4000, 1, 1),
+		BotSFJ_FlagLandingBonus(2, 0, 64, 4000, 1, 1), 0.001f);
+	BOOST_CHECK_GT(BotSFJ_RouteTransferCost(500, 500), transfer);
+	BOOST_CHECK_LT(BotSFJ_RouteTransferCost(0, 250), transfer);
+}
+
+BOOST_AUTO_TEST_CASE( patch_priority_is_bounded_to_unresolved_trial_work )
+{
+	BOOST_CHECK_GT(BotSFJ_PriorityScore(1000, 1, 1, 0), 1000);
+	BOOST_CHECK_GT(BotSFJ_PriorityScore(1000, 1, 1, 3), 1000);
+	BOOST_CHECK_EQUAL(BotSFJ_PriorityScore(1000, 1, 1, 4), 1000);
+	BOOST_CHECK_EQUAL(BotSFJ_PriorityScore(1000, 1, 0, 0), 1000);
+	BOOST_CHECK_EQUAL(BotSFJ_PriorityScore(1000, 0, 1, 0), 1000);
+	BOOST_CHECK_EQUAL(BotSFJ_PriorityScore(-20, 1, 1, 0), -20);
+}
+
+BOOST_AUTO_TEST_CASE( interference_never_earns_either_outcome_and_soak_preserves_target_mode )
+{
+	BOOST_CHECK(BotSFJ_RouteEvidenceAllows(0, 0));
+	BOOST_CHECK(!BotSFJ_RouteEvidenceAllows(1, 0));
+	BOOST_CHECK(!BotSFJ_RouteEvidenceAllows(1, 1));
+	BOOST_CHECK(!BotSFJ_RouteEvidenceAllows(0, 1));
+	BOOST_CHECK(!BotSFJ_NavigationAwake(0, 1, 0));
+	BOOST_CHECK(BotSFJ_NavigationAwake(0, 1, 1));
+	BOOST_CHECK(BotSFJ_NavigationAwake(1, 1, 0));
+	BOOST_CHECK(BotSFJ_NavigationAwake(0, 0, 0));
+}
+
+BOOST_AUTO_TEST_CASE( ffa_routes_yield_on_landing_at_half_target_distance )
+{
+	BOOST_CHECK(BotSFJ_FFACombatPriority(1, 1, 1, 2048, 4096, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, 2049, 4096, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 0, 1, 100, 4096, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 0, 100, 4096, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(0, 1, 1, 100, 4096, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, 100, 4096, 1));
+	BOOST_CHECK(BotSFJ_FFACombatPriority(1, 1, 1, 100, 0, 0));
+	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, NAN, 4096, 0));
+	BOOST_CHECK(BotSFJ_OpponentEscaping(500, 320, 500, 300));
+	BOOST_CHECK(!BotSFJ_OpponentEscaping(500, 320, 500, -300));
+	BOOST_CHECK(!BotSFJ_OpponentEscaping(100, 320, 500, 300));
+	BOOST_CHECK(!BotSFJ_OpponentEscaping(500, 320, 300, 200));
 }
 
 BOOST_AUTO_TEST_CASE( route_diversity_prefers_underused_exits_without_inventing_goal_gain )

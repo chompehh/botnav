@@ -1684,6 +1684,7 @@ svcmd_t svcmds[] = {
 	{ "compactdueltrack",			Svcmd_CompactDuelTrack_f,			qfalse },
 	{ "DBInfo",						Svcmd_DBInfo_f,						qfalse },
 	{ "deleteAccount",				Svcmd_DeleteAccount_f,				qfalse },
+	{ "deleteroute",					Svcmd_DeleteRoute_f,					qfalse },
 	{ "dueltrackinfo",				Svcmd_DuelTrackInfo_f,				qfalse },
 
 	{ "entityinfo",					Svcmd_EntityInfo_f,					qfalse },
@@ -1722,6 +1723,7 @@ svcmd_t svcmds[] = {
 	{ "resetdueltracks",			Svcmd_ResetDuelTrack_f,				qfalse },
 	{ "resetlearningtrack",			Svcmd_ResetLearningTrack_f,			qfalse },
 	{ "resetstrafetrack",			Svcmd_ResetStrafeTrack_f,			qfalse },
+	{ "routepriority",				Svcmd_RoutePriority_f,				qfalse },
 	{ "resetScores",				Svcmd_ResetScores_f,				qfalse },
 
 	{ "saberDisable",				Svcmd_ToggleSaberDisable_f,			qfalse },

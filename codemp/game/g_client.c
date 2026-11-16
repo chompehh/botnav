@@ -4089,6 +4089,7 @@ void ClientSpawn(gentity_t *ent) {
 	index = ent - g_entities;
 	client = ent->client;
 	client->forceGripCheckValid = qfalse;
+	client->forceInputDebugTime = 0;
 	if (level.gametype == GT_JOM && client->jvmNextClass &&
 		client->sess.sessionTeam != TEAM_SPECTATOR) {
 		client->sess.jvmClass = JVM_Class(GT_JOM, TEAM_FREE, client->jvmNextClass - 1);

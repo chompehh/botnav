@@ -5237,11 +5237,27 @@ void ClientThink_real( gentity_t *ent ) {
 	commandTimeBefore = ent->client->ps.commandTime;
 	groundBefore = ent->client->ps.groundEntityNum;
 	Pmove (&pmove);
+	if (ent->client->ps.commandTime > commandTimeBefore)
+		WP_ForceInputUpdate(ent, &pmove.cmd);
 	G_RecordTrackedResolvedCommand(ent, &pmove.cmd,
 		ent->client->ps.commandTime - commandTimeBefore);
 
 	if ( !isNPC )
 	{
+		int touch;
+
+		/* Attribute body contact before the resolved landing can earn a pass. */
+		for (touch = 0; touch < pmove.numtouch; touch++)
+		{
+			const int other = pmove.touchents[touch];
+
+			if (other >= 0 && other < ENTITYNUM_WORLD && other != ent->s.number &&
+				g_entities[other].client && g_entities[other].health > 0)
+			{
+				BotSFJ_Interference(ent->s.number);
+				BotSFJ_Interference(other);
+			}
+		}
 		BotSFJ_ResolvedMotion(ent->s.number, groundBefore, pmove.cmd.upmove);
 		G_StrafeTrackCommand( ent );
 	}
