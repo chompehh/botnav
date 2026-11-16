@@ -36,6 +36,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 
 #include "g_local.h"
+#include <limits.h>
 #include "qcommon/q_shared.h"
 #include "botlib/botlib.h"		//bot lib interface
 #include "botlib/be_aas.h"
@@ -325,6 +326,7 @@ static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qbool
 static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int elapsedTime);
 static void BotSFJ_ApplyWallRun(bot_state_t *bs, bot_input_t *bi, int time);
 static void BotSFJ_ApplyRouteWallRun(bot_state_t *bs, bot_input_t *bi, int time);
+static int BotSFJ_RouteEntryKind(const bot_state_t *bs);
 static void BotNav_FilterCombatHazardInput(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs);
@@ -4338,6 +4340,7 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 	qboolean ignoreNavigation;
 	qboolean routeAir;
 	qboolean recordedForceAir;
+	qboolean recordedWallAir;
 	qboolean reactiveForce;
 
 	if (!reason)
@@ -4348,6 +4351,10 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 	routeAir = bs->sfjRoute > 0 && ps->groundEntityNum == ENTITYNUM_NONE;
 	recordedForceAir = BotSFJ_RecordedForceAir(bs->sfjRoute, bs->sfjRouteHopLaunched,
 		ps->groundEntityNum != ENTITYNUM_NONE, bs->sfjForceJumpHop) ? qtrue : qfalse;
+	recordedWallAir = bs->sfjRoute && bs->sfjRouteHopLaunched &&
+		(bs->sfjRouteWallStage || bs->sfjRouteWallDone) &&
+		(ps->legsAnim == BOTH_FORCEWALLRUNFLIP_START || ps->legsAnim == BOTH_FORCEWALLRUNFLIP_END ||
+		 ps->legsAnim == BOTH_FORCEWALLRUNFLIP_ALT);
 	reactiveForce = routeAir && (ps->fd.forcePowerSelected == FP_PUSH ||
 		ps->fd.forcePowerSelected == FP_PULL || ps->fd.forcePowerSelected == FP_HEAL ||
 		ps->fd.forcePowerSelected == FP_PROTECT || ps->fd.forcePowerSelected == FP_ABSORB);
@@ -4381,7 +4388,7 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 	if ((ps->fd.forceJumpCharge > 0 &&
 		!BotSFJ_TrackForceJumpChargeAllows(bs->sfjRoute, bs->sfjForceJumpHop,
 			bs->sfjRouteApproach)) ||
-		(ps->forceJumpFlip && !recordedForceAir) || bs->forceJumping > level.time)
+		(ps->forceJumpFlip && !recordedForceAir && !recordedWallAir) || bs->forceJumping > level.time)
 		BOT_SFJ_HARD("force jump charge/flip");
 	if (ps->fd.forcePowerLevel[FP_LEVITATION] < FORCE_LEVEL_0 ||
 		ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_3 ||
@@ -4391,10 +4398,12 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 		BOT_SFJ_HARD("waterjump/wall-stuck/respawn flags");
 	if (BG_InKnockDown(ps->legsAnim))
 		BOT_SFJ_HARD("knockdown");
-	if (BG_InRoll(ps, ps->legsAnim) && !bot_strafe_loosen.integer)
+	if (BG_InRoll(ps, ps->legsAnim) && !bot_strafe_loosen.integer &&
+		BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL)
 		BOT_SFJ_HARD("knockdown or roll");
 	if ((BG_InSpecialJump(ps->legsAnim) &&
-			!(recordedForceAir && BG_InBackFlip(ps->legsAnim))) || BG_InReboundJump(ps->legsAnim))
+			!recordedWallAir && !(recordedForceAir && BG_InBackFlip(ps->legsAnim))) ||
+		BG_InReboundJump(ps->legsAnim))
 		BOT_SFJ_HARD("special/rebound jump anim");
 	if (ps->saberLockTime > level.time)
 		BOT_SFJ_HARD("saber lock");
@@ -4432,7 +4441,7 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 		client->pers.cmd.buttons & BUTTON_USE, bs->sfjLastRandomUse))
 		BOT_SFJ_HARD("queued use");
 
-	if (BG_InRoll(ps, ps->legsAnim))
+	if (BG_InRoll(ps, ps->legsAnim) && BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL)
 		BOT_SFJ_SOFT("roll in progress (pausing strafe)");
 	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs))
 		BOT_SFJ_SOFT("queued attack");
@@ -5268,6 +5277,8 @@ typedef struct
 	int objectiveNextIndex;	/* loaded index of objectiveNext, -1 if not loaded */
 	int routeId;
 	int recordedAt;
+	int priority;
+	int entryKind;
 	bot_sfj_hop_style_t nodeStyle[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeSpeedActive[BOT_SFJ_TRACK_MAX_NODES];
 	int nodeSpeedLevel[BOT_SFJ_TRACK_MAX_NODES];
@@ -5283,6 +5294,14 @@ static int g_botSfjTrackRouteCount;
 static bot_sfj_replay_sample_t *g_botSfjReplaySamples;
 static int g_botSfjReplayCount;
 static int g_botSfjReplayCapacity;
+
+static int BotSFJ_RouteEntryKind(const bot_state_t *bs)
+{
+	if (!bs || bs->sfjRoute <= 0 || bs->sfjRoute > g_botSfjTrackRouteCount ||
+		bs->sfjRouteApproach || bs->sfjRouteNode != 0)
+		return STRAFE_ROUTE_ENTRY_NORMAL;
+	return g_botSfjTrackRoutes[bs->sfjRoute - 1].entryKind;
+}
 
 static const bot_sfj_replay_sample_t *BotSFJ_RouteSamples(int routeIndex)
 {
@@ -5474,6 +5493,17 @@ static void BotSFJ_ParseTrackRoute(const char **text, const char *path)
 		else if (!Q_stricmp(token, "route_id"))
 		{
 			if (COM_ParseInt(text, &route.routeId) || route.routeId < 0)
+				valid = qfalse;
+		}
+		else if (!Q_stricmp(token, "route_priority"))
+		{
+			if (COM_ParseInt(text, &route.priority) || route.priority < 0 || route.priority > 1)
+				valid = qfalse;
+		}
+		else if (!Q_stricmp(token, "entry_kind"))
+		{
+			if (COM_ParseInt(text, &route.entryKind) || route.entryKind < STRAFE_ROUTE_ENTRY_NORMAL ||
+				route.entryKind > STRAFE_ROUTE_ENTRY_WALLRUN)
 				valid = qfalse;
 		}
 		else if (!Q_stricmp(token, "objective_next"))
@@ -5929,7 +5959,7 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 	COM_BeginParseSession(path);
 	if (!Q_stricmp(COM_Parse(&text), "botroute_stats"))
 	{
-		if (COM_ParseInt(&text, &version) || (version < 2 || version > 11))
+		if (COM_ParseInt(&text, &version) || (version < 2 || version > 12))
 		{
 			free(buffer);
 			return;
@@ -6023,10 +6053,16 @@ static void BotSFJ_LoadRouteStats(const char *lowerMap)
 				stat.hopRecentPasses[node] = stat.hopPasses[node];
 			}
 			BotSFJ_HopEvidenceBound(&stat.hopRecentFailures[node], &stat.hopRecentPasses[node]);
+			if (version < 12)
+			{
+				BotSFJ_RepairHopEvidence(stat.hopFailures[node], stat.hopPasses[node],
+					stat.hopDeaths[node], &stat.hopRecentFailures[node], &stat.hopRecentPasses[node]);
+				g_botSfjRouteStatsDirty = qtrue;
+			}
 			if (!BotSFJ_TrackHopTrustedForSpeed(version >= 7 ? stat.hopDeaths[node] : stat.deaths,
 				stat.hopRecentFailures[node], stat.hopRecentPasses[node], stat.speedContext > 0))
 				stat.hopRetryUntil[node] = level.time +
-					BotSFJ_HopRetryDelayForSpeed(stat.hopRecentFailures[node],
+					BotSFJ_HopEvidenceRetryDelay(stat.hopRecentFailures[node], stat.hopRecentPasses[node],
 						(version >= 7 ? stat.hopDeaths[node] : stat.deaths) > 0, stat.speedContext > 0);
 		}
 		if (!valid)
@@ -6283,7 +6319,7 @@ static void BotSFJ_WriteRouteStats(void)
 		trap->Print(S_COLOR_YELLOW "Could not write strafe route results: %s\n", path);
 		return;
 	}
-	trap->FS_Write("botroute_stats 11\n", strlen("botroute_stats 11\n"), f);
+	trap->FS_Write("botroute_stats 12\n", strlen("botroute_stats 12\n"), f);
 	memset(referenced, 0, sizeof(referenced));
 	for (i = 0; i < g_botSfjTrackRouteCount; i++)
 		for (context = 0; context < 4; context++)
@@ -6346,6 +6382,174 @@ void BotSFJ_SaveRouteStats(void)
 	BotSFJ_WriteRouteStats();
 }
 
+static qboolean BotSFJ_DeletedId(int id, const int *ids, int count, qboolean all)
+{
+	int i;
+
+	if (all)
+		return qtrue;
+	for (i = 0; i < count; i++)
+		if (ids[i] == id)
+			return qtrue;
+	return qfalse;
+}
+
+static qboolean BotSFJ_FilterOutcomeFile(const char *path, qboolean chains,
+	const int *ids, int count, qboolean all)
+{
+	fileHandle_t file;
+	char *buffer, *output, *line;
+	const char *parse;
+	int length, used = 0, version, idField;
+	qboolean valid = qtrue;
+
+	if (all)
+	{
+		const char *header = chains ? "botroute_chains 1\n" : "botroute_stats 12\n";
+
+		trap->FS_Open(path, &file, FS_WRITE);
+		if (!file)
+		{
+			trap->Print(S_COLOR_YELLOW "deleteroute: cannot clear route outcomes: %s\n", path);
+			return qfalse;
+		}
+		trap->FS_Write(header, strlen(header), file);
+		trap->FS_Close(file);
+		return qtrue;
+	}
+	length = trap->FS_Open(path, &file, FS_READ);
+	if (!file)
+		return qtrue;
+	if (length <= 0 || length >= BOT_SFJ_ROUTE_FILE_MAX)
+	{
+		trap->FS_Close(file);
+		trap->Print(S_COLOR_YELLOW "deleteroute: invalid outcome file size: %s\n", path);
+		return qfalse;
+	}
+	buffer = (char *)malloc(length + 1);
+	output = (char *)malloc(length + 1);
+	if (!buffer || !output)
+	{
+		trap->FS_Close(file);
+		free(buffer);
+		free(output);
+		trap->Print(S_COLOR_YELLOW "deleteroute: cannot allocate outcome cleanup: %s\n", path);
+		return qfalse;
+	}
+	trap->FS_Read(buffer, length, file);
+	trap->FS_Close(file);
+	buffer[length] = '\0';
+	parse = buffer;
+	if (Q_stricmp(COM_Parse(&parse), chains ? "botroute_chains" : "botroute_stats") ||
+		COM_ParseInt(&parse, &version) || version < 1 ||
+		(chains ? version != 1 : version > 12))
+		valid = qfalse;
+	/* Versions before stable recording IDs cannot refer to a deleted recording. */
+	idField = 17 + BOT_SFJ_TRACK_MAX_NODES * 4;
+	line = buffer;
+	while (valid && *line)
+	{
+		char *next = strchr(line, '\n');
+		const int bytes = next ? (int)(next - line) + 1 : (int)strlen(line);
+		qboolean remove = qfalse;
+
+		if (line != buffer)
+		{
+			int field;
+
+			remove = all;
+			parse = line;
+			if (!all && (chains || version >= 6))
+			{
+				for (field = 0; field <= (chains ? 2 : idField); field++)
+				{
+					const char *token = COM_ParseExt(&parse, qfalse);
+
+					if (!token[0])
+						break;
+					if (field == (chains ? 0 : idField) || (chains && field == 2))
+					{
+						char *end;
+						const long id = strtol(token, &end, 10);
+
+						if (*end || id < 0 || id > INT_MAX)
+							valid = qfalse;
+						else if (BotSFJ_DeletedId((int)id, ids, count, qfalse))
+							remove = qtrue;
+					}
+				}
+			}
+		}
+		if (!remove)
+		{
+			memcpy(output + used, line, bytes);
+			used += bytes;
+		}
+		line += bytes;
+	}
+	if (valid)
+	{
+		trap->FS_Open(path, &file, FS_WRITE);
+		if (!file)
+			valid = qfalse;
+		else
+		{
+			trap->FS_Write(output, used, file);
+			trap->FS_Close(file);
+		}
+	}
+	if (!valid)
+		trap->Print(S_COLOR_YELLOW "deleteroute: could not refresh route outcomes: %s\n", path);
+	free(buffer);
+	free(output);
+	return valid;
+}
+
+qboolean BotSFJ_ForgetRouteOutcomes(const char *lowerMap, const int *routeIds, int count, qboolean all)
+{
+	char path[MAX_QPATH];
+	int i, kept;
+	qboolean ok;
+	const qboolean current = !Q_stricmp(lowerMap, g_botSfjRouteStatsMap);
+
+	if (current)
+		BotSFJ_SaveRouteStats();
+	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute_stats", lowerMap);
+	ok = BotSFJ_FilterOutcomeFile(path, qfalse, routeIds, count, all);
+	Com_sprintf(path, sizeof(path), "botroutes/%s.botroute_chains", lowerMap);
+	if (!BotSFJ_FilterOutcomeFile(path, qtrue, routeIds, count, all))
+		ok = qfalse;
+	if (!current)
+		return ok;
+	for (i = 0; i < g_botSfjRouteStatCount; i++)
+	{
+		bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[i];
+
+		if (BotSFJ_DeletedId(stat->routeId, routeIds, count, all))
+		{
+			const bot_sfj_route_stat_t old = *stat;
+
+			memset(stat, 0, sizeof(*stat));
+			VectorCopy(old.start, stat->start);
+			VectorCopy(old.end, stat->end);
+			stat->routeId = old.routeId;
+			stat->recordedAt = old.recordedAt;
+			stat->speedContext = old.speedContext;
+		}
+	}
+	for (i = kept = 0; i < g_botSfjChainStatCount; i++)
+	{
+		const bot_sfj_chain_stat_t *chain = &g_botSfjChainStats[i];
+
+		if (!BotSFJ_DeletedId(chain->fromId, routeIds, count, all) &&
+			!BotSFJ_DeletedId(chain->toId, routeIds, count, all))
+			g_botSfjChainStats[kept++] = *chain;
+	}
+	g_botSfjChainStatCount = kept;
+	g_botSfjChainStatsDirty = g_botSfjRouteStatsDirty = qtrue;
+	return ok;
+}
+
 static void BotSFJ_LoadRouteHints(void)
 {
 	char mapname[MAX_QPATH];
@@ -6403,6 +6607,32 @@ static void BotSFJ_NoteRouteResult(bot_state_t *bs, int routeIndex)
 
 static void BotSFJ_NoteHopFailure(bot_state_t *bs, qboolean lethal, qboolean unsafe);
 
+void BotSFJ_Interference(int clientNum)
+{
+	bot_state_t *bs;
+
+	if (clientNum < 0 || clientNum >= MAX_CLIENTS || !(bs = botstates[clientNum]))
+		return;
+	if (bs->sfjRouteAttemptActive)
+	{
+		bs->sfjRouteInterfered = qtrue;
+		bs->sfjHopInterfered = qtrue;
+	}
+	if (bs->sfjPendingHopTime)
+		bs->sfjPendingHopInterfered = qtrue;
+}
+
+static void BotSFJ_CheckInterference(bot_state_t *bs)
+{
+	const gclient_t *client = g_entities[bs->client].client;
+
+	if (client && ((bs->lastHurtTime > 0 && bs->lastHurtTime >= bs->sfjRouteStarted) ||
+		(client->pushEffectTime > 0 && client->pushEffectTime >= bs->sfjRouteStarted) ||
+		client->ps.fd.forceGripBeingGripped > level.time ||
+		(client->ps.pm_flags & PMF_TIME_KNOCKBACK) || BG_InKnockDown(client->ps.legsAnim)))
+		BotSFJ_Interference(bs->client);
+}
+
 static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 {
 	const bot_sfj_track_route_t *route;
@@ -6414,6 +6644,9 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 		bs->sfjRoute > g_botSfjTrackRouteCount || !g_entities[bs->client].client)
 		return;
 	ps = &g_entities[bs->client].client->ps;
+	BotSFJ_CheckInterference(bs);
+	if (bs->sfjRouteInterfered)
+		return;
 	route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
 	elapsed = level.time - bs->sfjRouteSampleTime;
 	if (elapsed <= 0)
@@ -6440,8 +6673,9 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 		bs->sfjRouteCollisions = BOT_SFJ_TRUSTED_COLLISIONS;
 		if (bs->sfjRouteStat >= 0)
 			g_botSfjRouteStats[bs->sfjRouteStat].hopRetryUntil[launched] =
-				level.time + BotSFJ_HopRetryDelayForSpeed(
-					g_botSfjRouteStats[bs->sfjRouteStat].hopRecentFailures[launched], 0,
+				level.time + BotSFJ_HopEvidenceRetryDelay(
+					g_botSfjRouteStats[bs->sfjRouteStat].hopRecentFailures[launched],
+					g_botSfjRouteStats[bs->sfjRouteStat].hopRecentPasses[launched], 0,
 					g_botSfjRouteStats[bs->sfjRouteStat].speedContext > 0);
 		BotSFJ_DebugEvent(bs, BOT_SFJ_DEBUG_ROUTE, BOT_SFJ_TONE_FAIL, BOT_SFJ_DEBUG_KIND_TRUST, 250,
 			"reject", "route %d hop %d: drifted into a %s wallrun, rejecting the takeoff",
@@ -6498,13 +6732,15 @@ static void BotSFJ_SampleTrackAttempt(bot_state_t *bs)
 				bs->sfjRouteCollision = qtrue;
 				if (!combatInterrupted && bs->sfjRouteStat >= 0)
 					g_botSfjRouteStats[bs->sfjRouteStat].hopRetryUntil[launched] =
-						level.time + BotSFJ_HopRetryDelayForSpeed(
-							g_botSfjRouteStats[bs->sfjRouteStat].hopRecentFailures[launched], 0,
+						level.time + BotSFJ_HopEvidenceRetryDelay(
+							g_botSfjRouteStats[bs->sfjRouteStat].hopRecentFailures[launched],
+							g_botSfjRouteStats[bs->sfjRouteStat].hopRecentPasses[launched], 0,
 							g_botSfjRouteStats[bs->sfjRouteStat].speedContext > 0);
 			}
 		}
 	}
-	if (!bs->sfjRouteMomentumLost && bs->sfjRouteLaunchTime > 0)
+	if (!bs->sfjRouteMomentumLost && bs->sfjRouteLaunchTime > 0 &&
+		BotSFJ_RouteEntryKind(bs) == STRAFE_ROUTE_ENTRY_NORMAL)
 	{
 		const int launched = bs->sfjRouteLaunchedNode >= 0 &&
 			bs->sfjRouteLaunchedNode < route->nodeCount ? bs->sfjRouteLaunchedNode : 0;
@@ -6553,6 +6789,9 @@ static void BotSFJ_NoteHopFailure(bot_state_t *bs, qboolean lethal, qboolean uns
 		bs->sfjRoute <= 0 || bs->sfjRoute > g_botSfjTrackRouteCount ||
 		(!bs->sfjRouteHopLaunched && !unsafe && !lethal))
 		return;
+	BotSFJ_CheckInterference(bs);
+	if (bs->sfjHopInterfered || bs->sfjRouteInterfered)
+		return;
 	node = bs->sfjRouteHopLaunched ? bs->sfjRouteLaunchedNode : bs->sfjRouteNode;
 	if (node < 0 || node >= g_botSfjTrackRoutes[bs->sfjRoute - 1].nodeCount)
 		return;
@@ -6571,7 +6810,8 @@ static void BotSFJ_NoteHopFailure(bot_state_t *bs, qboolean lethal, qboolean uns
 		BotSFJ_HopEvidenceNote(&stat->hopRecentFailures[node], &stat->hopRecentPasses[node], 0);
 	}
 	stat->hopRetryUntil[node] = level.time +
-		BotSFJ_HopRetryDelayForSpeed(stat->hopRecentFailures[node], lethal, stat->speedContext > 0);
+		BotSFJ_HopEvidenceRetryDelay(stat->hopRecentFailures[node], stat->hopRecentPasses[node],
+			lethal, stat->speedContext > 0);
 	if (lethal)
 	{
 		stat->deaths++;
@@ -6594,7 +6834,10 @@ static void BotSFJ_NoteHopPass(bot_state_t *bs)
 {
 	const int node = bs->sfjRouteLaunchedNode;
 
-	if (bs->sfjRouteHopLaunched && !bs->sfjRouteFailureNoted && bs->sfjRouteStat >= 0 &&
+	BotSFJ_CheckInterference(bs);
+	if (bs->sfjRouteHopLaunched &&
+		BotSFJ_RouteEvidenceAllows(bs->sfjHopInterfered || bs->sfjRouteInterfered,
+			bs->sfjRouteFailureNoted) && bs->sfjRouteStat >= 0 &&
 		node >= 0 && node < BOT_SFJ_TRACK_MAX_NODES)
 	{
 		bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[bs->sfjRouteStat];
@@ -6609,6 +6852,7 @@ static void BotSFJ_NoteHopPass(bot_state_t *bs)
 	bs->sfjRouteHopLaunched = qfalse;
 	bs->sfjRouteLaunchTrusted = qfalse;
 	bs->sfjRouteFailureNoted = qfalse;
+	bs->sfjHopInterfered = qfalse;
 	bs->sfjPendingHopTime = 0;
 	bs->sfjTrialForceNode = 0;
 	bs->sfjHopYawOffset = 0.0f;
@@ -6630,6 +6874,7 @@ void BotSFJ_ResolvedMotion(int clientNum, int previousGround, int upmove)
 		!g_entities[clientNum].client)
 		return;
 	bs = botstates[clientNum];
+	BotSFJ_CheckInterference(bs);
 	if (!bs->inuse || !bs->sfjRouteAttemptActive || bs->sfjRouteApproach ||
 		bs->sfjRoute <= 0 || bs->sfjRoute > g_botSfjTrackRouteCount)
 		return;
@@ -6638,13 +6883,20 @@ void BotSFJ_ResolvedMotion(int clientNum, int previousGround, int upmove)
 	if (node < 0 || node >= route->nodeCount)
 		return;
 	ps = &g_entities[clientNum].client->ps;
-	if (previousGround != ENTITYNUM_NONE && ps->groundEntityNum == ENTITYNUM_NONE &&
-		upmove > 0 && ps->velocity[2] > 0.0f && !bs->sfjRouteHopLaunched)
+	if (!bs->sfjRouteHopLaunched && BotSFJ_RecordedEntryLaunch(route->entryKind, node,
+		previousGround != ENTITYNUM_NONE, ps->groundEntityNum != ENTITYNUM_NONE,
+		upmove, ps->velocity[2], BG_InRoll((playerState_t *)ps, ps->legsAnim)))
 	{
 		bs->sfjRouteHopLaunched = qtrue;
 		bs->sfjRouteLaunchedNode = node;
 		bs->sfjRouteLaunchTime = level.time;
 		bs->sfjPendingHopTime = 0;
+		if (!node && route->entryKind != STRAFE_ROUTE_ENTRY_NORMAL)
+		{
+			bs->sfjPhase = BOT_SFJ_PHASE_AIR;
+			bs->sfjPhaseTime = bs->sfjAirSince = level.time;
+			g_botSfjStats.takeoffs++;
+		}
 	}
 	if (previousGround != ENTITYNUM_NONE || ps->groundEntityNum == ENTITYNUM_NONE ||
 		!bs->sfjRouteHopLaunched)
@@ -6676,9 +6928,10 @@ void BotSFJ_ClientDied(int clientNum, int meansOfDeath)
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS || !botstates[clientNum])
 		return;
 	bs = botstates[clientNum];
+	BotSFJ_CheckInterference(bs);
 	lethal = meansOfDeath == MOD_FALLING || meansOfDeath == MOD_TRIGGER_HURT ||
 		meansOfDeath == MOD_LAVA || meansOfDeath == MOD_SLIME;
-	if (lethal && bs->sfjRouteAttemptActive && !bs->sfjRouteAcquiring &&
+	if (lethal && !bs->sfjRouteInterfered && bs->sfjRouteAttemptActive && !bs->sfjRouteAcquiring &&
 		!bs->sfjRouteApproach)
 	{
 		BotSFJ_NoteHopFailure(bs, qtrue, qfalse);
@@ -6687,7 +6940,8 @@ void BotSFJ_ClientDied(int clientNum, int meansOfDeath)
 	else
 	{
 		/* Preserve attribution briefly when flight safety already released input. */
-		if (lethal && BotSFJ_PendingDeathAllows(bs->sfjPendingHopTime, level.time,
+		if (lethal && !bs->sfjRouteInterfered && !bs->sfjPendingHopInterfered &&
+			BotSFJ_PendingDeathAllows(bs->sfjPendingHopTime, level.time,
 			bs->sfjPendingHopStat, g_botSfjRouteStatCount, bs->sfjPendingHopCompleted))
 		{
 			bot_sfj_route_stat_t *stat = &g_botSfjRouteStats[bs->sfjPendingHopStat];
@@ -6705,7 +6959,8 @@ void BotSFJ_ClientDied(int clientNum, int meansOfDeath)
 				stat->lastOutcome = -1;
 				g_botSfjStats.routeDeaths++;
 				stat->hopRetryUntil[node] = level.time +
-					BotSFJ_HopRetryDelayForSpeed(stat->hopRecentFailures[node], 1, stat->speedContext > 0);
+					BotSFJ_HopEvidenceRetryDelay(stat->hopRecentFailures[node], stat->hopRecentPasses[node],
+						1, stat->speedContext > 0);
 				g_botSfjRouteStatsDirty = qtrue;
 			}
 		}
@@ -6761,6 +7016,9 @@ static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qbool
 
 	if (!bs || !bs->sfjRouteAttemptActive)
 		return;
+	BotSFJ_CheckInterference(bs);
+	if (bs->sfjRouteInterfered)
+		completed = stalled = qfalse;
 	interrupted = !completed && !stalled;
 	routeFailed = BotSFJ_RouteFailureCounts(interrupted, stalled,
 		bs->sfjRouteAttemptFlawed, bs->sfjRouteFailureNoted);
@@ -6784,17 +7042,21 @@ static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qbool
 			stat->stalls++;
 		else
 			stat->interrupted++;
-		stat->collisions += bs->sfjRouteAttemptCollisions;
+		if (!bs->sfjRouteInterfered)
+			stat->collisions += bs->sfjRouteAttemptCollisions;
 		/* Combat and strategic interruptions do not count as route failures. */
 		if (routeFailed)
 			stat->lastOutcome = -1;
 		else if (completed)
 			stat->lastOutcome = 1;
-		stat->distance += bs->sfjRouteDistance;
-		stat->durationMs += (float)BotSFJ_TrackMeasuredDuration(bs->sfjRouteAcquiring,
-			bs->sfjRouteStarted, level.time);
-		stat->speedIntegral += bs->sfjRouteSpeedIntegral;
-		stat->referenceIntegral += bs->sfjRouteReferenceIntegral;
+		if (!bs->sfjRouteInterfered)
+		{
+			stat->distance += bs->sfjRouteDistance;
+			stat->durationMs += (float)BotSFJ_TrackMeasuredDuration(bs->sfjRouteAcquiring,
+				bs->sfjRouteStarted, level.time);
+			stat->speedIntegral += bs->sfjRouteSpeedIntegral;
+			stat->referenceIntegral += bs->sfjRouteReferenceIntegral;
+		}
 		g_botSfjRouteStatsDirty = qtrue;
 	}
 	if (!completed)
@@ -6809,6 +7071,7 @@ static void BotSFJ_FinishTrackAttempt(bot_state_t *bs, qboolean completed, qbool
 		bs->sfjPendingHopTime = level.time;
 		bs->sfjPendingHopFailed = bs->sfjRouteFailureNoted;
 		bs->sfjPendingHopCompleted = completed;
+		bs->sfjPendingHopInterfered = bs->sfjRouteInterfered;
 	}
 	if (bs->sfjChainFrom > 0 && index >= 0 && index < g_botSfjTrackRouteCount)
 	{
@@ -7047,10 +7310,7 @@ static qboolean BotSFJ_HopAvailable(bot_state_t *bs, const playerState_t *ps,
 		ps->fd.forcePower <= 0 ||
 		style->forceHeight > forceJumpHeight[ps->fd.forcePowerLevel[FP_LEVITATION]]))
 		return qfalse;
-	if (index >= 0 && (BotSFJ_HopBlocked(g_botSfjRouteStats[index].hopDeaths[node],
-		g_botSfjRouteStats[index].hopRecentFailures[node], g_botSfjRouteStats[index].hopRecentPasses[node]) ||
-		(g_botSfjRouteStats[index].terminalMarker > 0 &&
-			node >= g_botSfjRouteStats[index].terminalMarker - 1)))
+	if (index >= 0 && g_botSfjRouteStats[index].hopDeaths[node] > 0)
 		return qfalse;
 	return index < 0 || level.time >= g_botSfjRouteStats[index].hopRetryUntil[node];
 }
@@ -7072,12 +7332,17 @@ static int BotSFJ_RouteEffectiveEnd(const bot_sfj_track_route_t *route)
 		if (index < 0 || index >= g_botSfjRouteStatCount)
 			continue;
 		stat = &g_botSfjRouteStats[index];
-		node = BotSFJ_LearnedEnd(route->nodeCount, stat->terminalMarker,
-			stat->hopDeaths, stat->hopRecentFailures, stat->hopRecentPasses);
-		if (node < route->nodeCount && stat->terminalMarker != node + 1)
+		/* A different Speed level must not truncate this recording's network edges. */
+		node = route->nodeCount;
+		if (route->speedActive >= 0 && context ==
+			BotSFJ_TrackStatContext(route->speedActive, route->speedLevel))
+			node = BotSFJ_LearnedEnd(route->nodeCount, 0,
+				stat->hopDeaths, stat->hopRecentFailures, stat->hopRecentPasses);
+		if (stat->terminalMarker != (node < route->nodeCount ? node + 1 : 0))
 		{
-			stat->terminalMarker = node + 1;
-			VectorCopy(node ? route->node[node - 1] : route->start, stat->terminal);
+			stat->terminalMarker = node < route->nodeCount ? node + 1 : 0;
+			if (stat->terminalMarker)
+				VectorCopy(node ? route->node[node - 1] : route->start, stat->terminal);
 			g_botSfjRouteStatsDirty = changed = qtrue;
 		}
 		if (node < end)
@@ -7627,9 +7892,7 @@ static void BotSFJ_SimilarRouteEvidence(const bot_sfj_track_route_t *route, int 
 		recentFailures += stat->hopRecentFailures[node];
 		*deaths += stat->hopDeaths[node];
 	}
-	*failed = entry == 0 && end == route->nodeCount ?
-		BotSFJ_RouteOutcomeFailed(stat->lastOutcome, *deaths, recentFailures) :
-		(*deaths > 0 || recentFailures > 0);
+	*failed = BotSFJ_HopBlocked(*deaths, recentFailures, *hops);
 	*rate = BotSFJ_TrackRouteSuccess(*hops + recentFailures, *hops);
 	if (stat->durationMs > 0.0f)
 		*speed = stat->speedIntegral / stat->durationMs;
@@ -8030,7 +8293,9 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 						500.0f, 0.5f, 2.0f);
 			}
 			edges[i * count + j] = usable && connection >= 0.0f ?
-				(connection + length * 0.25f / (quality[j] * speedFactor)) *
+				(connection + BotSFJ_RouteTransferCost(connection,
+					entry < route->nodeCount ? route->nodeSpeed[entry] : 250.0f) +
+					length * 0.25f / (quality[j] * speedFactor)) *
 					BotSFJ_CaptureEdgeFactor(capture[j]) : -1.0f;
 			if (edges[i * count + j] >= 0.0f &&
 				g_botSfjTrackRoutes[i].objectiveNextIndex == j)
@@ -8171,9 +8436,16 @@ static int BotSFJ_PickTrackRoute(bot_state_t *bs, const playerState_t *ps,
 			}
 			if (!fleeFrom)
 			{
+				if (i == first[i] && BotSFJ_Highway(ends[i] - entries[i],
+					sqrtf(BotSFJ_Dist2DSq(BotSFJ_TrackEntryPosition(route, entries[i]), end)),
+					route->averageSpeed, route->maxSpeed))
+					score += BotSFJ_HighwayTrialBonus(score, bot_strafetrial.integer,
+						carrying, trialClass[i]);
 				score = BotSFJ_SelectionScore(score, bot_strafetrial.integer ? 1 : 0, carrying,
 					trialClass[first[i]], successRate[first[i]], resolvedRuns[first[i]],
 					seedDistance[first[i]]);
+				score = BotSFJ_PriorityScore(score, g_botSfjTrackRoutes[first[i]].priority,
+					bot_strafetrial.integer, resolvedRuns[first[i]]);
 				if (trialClass[first[i]] != BOT_SFJ_TRIAL_FAILING)
 					score = BotSFJ_DiversityScore(score, bot_strafetrial.integer, carrying,
 						familyUses[first[i]], nearbyUses[first[i]]);
@@ -8992,6 +9264,7 @@ static void BotSFJ_StartTrackRoute(bot_state_t *bs, const playerState_t *ps,
 	bs->sfjRouteCollisions = 0;
 	bs->sfjRouteAttemptCollisions = 0;
 	bs->sfjRouteAttemptFlawed = qfalse;
+	bs->sfjRouteInterfered = bs->sfjHopInterfered = qfalse;
 	bs->sfjRouteCollisionTime = 0;
 	bs->sfjApproachBlockedSince = 0;
 	bs->sfjRouteGroundNode = entry + 1;
@@ -9428,6 +9701,7 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 		bs->sfjRouteAttemptActive = qtrue;
 		bs->sfjRouteAttemptCollisions = 0;
 		bs->sfjRouteAttemptFlawed = qfalse;
+		bs->sfjRouteInterfered = bs->sfjHopInterfered = qfalse;
 		bs->sfjRouteApproach = approaching;
 		bs->sfjRouteAcquiring = acquiring;
 		bs->sfjRouteStarted = bs->sfjRouteSampleTime = level.time;
@@ -10679,8 +10953,31 @@ static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client)
 		client->ps.powerups[PW_BLUEFLAG] || client->ps.powerups[PW_NEUTRALFLAG]);
 }
 
+static qboolean BotSFJ_CombatTravel(const bot_state_t *bs, const playerState_t *ps)
+{
+	const gentity_t *enemy = bs->currentEnemy;
+	vec3_t direction;
+	float distance, outward, speed;
+
+	if (bs->combatAction == BOT_COMBAT_ACTION_RETREAT_DEFENSE ||
+		bs->runningLikeASissy || bs->runningToEscapeThreat)
+		return qtrue;
+	if (!enemy || !enemy->client || !bs->frame_Enemy_Vis)
+		return qfalse;
+	VectorSubtract(enemy->client->ps.origin, ps->origin, direction);
+	direction[2] = 0.0f;
+	distance = VectorNormalize(direction);
+	outward = DotProduct(enemy->client->ps.velocity, direction);
+	speed = sqrtf(enemy->client->ps.velocity[0] * enemy->client->ps.velocity[0] +
+		enemy->client->ps.velocity[1] * enemy->client->ps.velocity[1]);
+	if ((bs->sfjRoute || bs->sfjWalking) && DotProduct(direction, bs->sfjIntentDirection) <= 0.5f)
+		return qfalse;
+	return BotSFJ_OpponentEscaping(distance, BotSFJ_MinStrafeDistance(), speed, outward) ?
+		qtrue : qfalse;
+}
+
 /*
- * A selected route owns movement until its usable endpoint. Outside routes,
+ * A selected route owns movement until its usable endpoint or FFA landing handoff. Outside routes,
  * carriers fight after a hard hit and attackers after damage or meeting a carrier.
  */
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
@@ -10697,6 +10994,13 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 		return qfalse;
 	ps = &client->ps;
 	if (ps->duelInProgress)
+		return qfalse;
+	if (level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps))
+		return qfalse;
+	if (bs->currentEnemy && bs->currentEnemy->client &&
+		BotSFJ_FFACombatPriority(level.gametype == GT_FFA, ps->groundEntityNum != ENTITYNUM_NONE,
+			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
+			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
 		return qfalse;
 	carrying = BotSFJ_ClientCarriesFlag(client);
 	attackingFlag = (bs->sfjTravelGoalValid && bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK &&
@@ -11069,10 +11373,19 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	}
 	airborneJump = BotSFJ_PhaseInProgress(bs->sfjPhase) &&
 		ps->groundEntityNum == ENTITYNUM_NONE;
+	BotSFJ_UpdatePursuit(bs);
+	if (bs->currentEnemy && bs->currentEnemy->client &&
+		BotSFJ_FFACombatPriority(level.gametype == GT_FFA, ps->groundEntityNum != ENTITYNUM_NONE,
+			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
+			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
+	{
+		BotSFJ_DebugReject(bs, "FFA opponent nearby: landing handoff to combat");
+		BotSFJ_Clear(bs);
+		return;
+	}
 	holdCombat = BotNav_ShouldHoldCombat(bs);
 	routeCommitted = BotSFJ_RouteInputCommitted(bs->sfjRoute,
 		ps->groundEntityNum != ENTITYNUM_NONE, bs->sfjPhase) ? qtrue : qfalse;
-	BotSFJ_UpdatePursuit(bs);
 	BotSFJ_DebugGoal(bs, ps);
 	trap->EA_GetInput(bs->client, (float)level.time / 1000.0f, &queued);
 	/*
@@ -11090,7 +11403,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		BotSFJ_Reject(bs, va("input/state conflict: %s", conflictReason));
 		return;
 	}
-	if (BG_InRoll(ps, ps->legsAnim))
+	if (BG_InRoll(ps, ps->legsAnim) && BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL)
 	{
 		if (BotSFJ_RollPauseAllows(bot_strafe_loosen.integer, 1,
 			BotSFJ_PhaseInProgress(bs->sfjPhase), 0,
@@ -11155,10 +11468,10 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	if (BotSFJ_DefensiveRouteEscape(aggression, enemyClient != NULL, carryingFlag,
 		enemyDistance, BotSFJ_EscapeStartDistance(minStrafe)))
 		retreating = qtrue;
-	if (enemyClient && !retreating && aggression >= 0.0f &&
-		enemyDistance >= minStrafe && enemyDistance > BotSFJ_StopDistanceFor(minStrafe))
+	if (enemyClient && !retreating && BotSFJ_CombatTravel(bs, ps))
 		bs->sfjPursuitLatched = qtrue;
-	if (!routeCommitted || carryingFlag != bs->sfjWasCarrying)
+	if (!routeCommitted || carryingFlag != bs->sfjWasCarrying ||
+		(level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps)))
 		BotSFJ_SetTravelGoal(bs, ps, retreating);
 	flagPickupPriority = bs->sfjTravelGoalValid &&
 		BotSFJ_FlagPickupPriority(bs->sfjTravelGoalType, carryingFlag,
@@ -11286,8 +11599,9 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	}
 
 	if (bs->sfjRoute)
-		purpose = routeCommitted && bs->sfjIntent != BOT_SFJ_INTENT_NONE ?
-			bs->sfjIntent : routeRetreat ? BOT_SFJ_INTENT_RETREAT : BOT_SFJ_INTENT_NAVIGATION;
+		purpose = routeRetreat ? BOT_SFJ_INTENT_RETREAT :
+			enemyClient && bs->sfjPursuitLatched && DotProduct(routeDirection, toEnemy) > 0.5f ?
+				BOT_SFJ_INTENT_PURSUIT : BOT_SFJ_INTENT_NAVIGATION;
 	else if (enemyClient)
 	{
 		const float alignment = DotProduct(routeDirection, toEnemy);
@@ -11418,9 +11732,23 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 				bs->sfjStartFrequency != bot_strafejumpfrequency.integer ||
 				bs->sfjNextStartTime - level.time > 100000)
 			{
+				int prior = 0, learned = 0;
+
+				if (enemyClient &&
+					(purpose == BOT_SFJ_INTENT_PURSUIT || purpose == BOT_SFJ_INTENT_RETREAT))
+				{
+					const int stimulus = NewBotAI_GetEnemyStimulusToken(bs);
+
+					if (bot_learningbaseline.value > 0.0f)
+						prior = BotLearn_StrafeJumpPrior(NewBotAI_IsSaberOnlyDuel(bs) ? 0 : 1,
+							stimulus, bot_learningbaseline.value, bs->settings.skill);
+					if (bot_learning.integer)
+						learned = G_BotLearnBonus(&g_entities[bs->client], bs->currentEnemy, stimulus,
+							BOTLEARN_TOK_HOP, BOTLEARN_TOK_NONE, bs->settings.skill);
+				}
 				bs->sfjStartFrequency = bot_strafejumpfrequency.integer;
 				bs->sfjNextStartTime = level.time +
-					BotSFJ_StartIntervalMs(bot_strafejumpfrequency.integer);
+					BotSFJ_CombatStartInterval(bot_strafejumpfrequency.integer, prior, learned);
 			}
 			if (bs->sfjNextStartTime > level.time)
 			{
@@ -11544,7 +11872,8 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		masked.dir[2] = 0.0f;
 	}
 	conflict = BotSFJ_GetInputConflict(bs, ps, &masked, qfalse, &conflictReason);
-	if (BotSFJ_RollPauseAllows(bot_strafe_loosen.integer,
+	if (BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL &&
+		BotSFJ_RollPauseAllows(bot_strafe_loosen.integer,
 		BG_InRoll(ps, ps->legsAnim), BotSFJ_PhaseInProgress(bs->sfjPhase),
 		conflict == BOT_SFJ_CONFLICT_HARD,
 		bs->sfjRollPauseTime ? time - bs->sfjRollPauseTime : 0))
@@ -11734,6 +12063,51 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 			(int)BotSFJ_ClampSetting(bot_strafe_nodetimeout.value, 1000.0f, 15000.0f),
 			bs->sfjRouteNode < route->nodeCount ? route->nodeAirMs[bs->sfjRouteNode] : 0,
 			bot_strafe_loosen.integer);
+	}
+	if (BotSFJ_RouteEntryKind(bs) == STRAFE_ROUTE_ENTRY_ROLL ||
+		(BotSFJ_RouteEntryKind(bs) == STRAFE_ROUTE_ENTRY_WALLRUN && grounded &&
+		 !bs->sfjRouteHopLaunched))
+	{
+		const bot_sfj_track_route_t *route = &g_botSfjTrackRoutes[bs->sfjRoute - 1];
+		const bot_sfj_replay_sample_t *samples = BotSFJ_RouteSamples(bs->sfjRoute - 1);
+		const bot_sfj_replay_sample_t *sample = samples && bs->sfjReplayActive &&
+			bs->sfjReplaySample >= 0 && bs->sfjReplaySample < route->sampleCount ?
+			&samples[bs->sfjReplaySample] : NULL;
+		const int forward = sample ? BotSFJ_ReplaySign(sample->forward) : 1;
+		const int right = sample ? BotSFJ_ReplaySign(sample->right) : 0;
+		const float speed = sqrtf(ps->velocity[0] * ps->velocity[0] +
+			ps->velocity[1] * ps->velocity[1]);
+		const qboolean rollEntry = route->entryKind == STRAFE_ROUTE_ENTRY_ROLL;
+
+		if (grounded && !bs->sfjRouteHopLaunched)
+			bs->sfjRouteLaunchTrusted = BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination);
+		candidate = *bi;
+		candidate.actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+			ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_WALK);
+		VectorClear(candidate.dir);
+		candidate.speed = 400.0f;
+		candidate.viewangles[YAW] = sample ? sample->yaw : vectoyaw(bs->sfjIntentDirection);
+		if (forward > 0)
+			candidate.actionflags |= ACTION_MOVEFORWARD;
+		else if (forward < 0)
+			candidate.actionflags |= ACTION_MOVEBACK;
+		if (right > 0)
+			candidate.actionflags |= ACTION_MOVERIGHT;
+		else if (right < 0)
+			candidate.actionflags |= ACTION_MOVELEFT;
+		if (rollEntry && (BG_InRoll(ps, ps->legsAnim) ||
+			((!grounded || speed >= 200.0f) &&
+			 (!sample || (sample->flags & (BOT_SFJ_REPLAY_FLAG_CROUCH | BOT_SFJ_REPLAY_FLAG_ROLL))))))
+			candidate.actionflags |= ACTION_CROUCH;
+		if (!rollEntry && sample && (sample->flags & BOT_SFJ_REPLAY_FLAG_JUMP))
+			candidate.actionflags |= ACTION_JUMP;
+		if (bs->sfjPhase != (grounded ? BOT_SFJ_PHASE_PREPARE : BOT_SFJ_PHASE_AIR))
+			bs->sfjPhaseTime = time;
+		bs->sfjPhase = grounded ? BOT_SFJ_PHASE_PREPARE : BOT_SFJ_PHASE_AIR;
+		*bi = candidate;
+		bs->sfjOwnsInput = qtrue;
+		bs->viewangles[YAW] = bs->ideal_viewangles[YAW] = candidate.viewangles[YAW];
+		return;
 	}
 	if (((bs->sfjPhase == BOT_SFJ_PHASE_PREPARE ||
 		bs->sfjPhase == BOT_SFJ_PHASE_TAKEOFF ||
@@ -12577,6 +12951,8 @@ void BotDamageNotification(gclient_t *bot, gentity_t *attacker, int mod)
 	{
 		return;
 	}
+	if (bot->ps.clientNum != attacker->s.number)
+		BotSFJ_Interference(bot->ps.clientNum);
 
 	if (bot->ps.clientNum >= MAX_CLIENTS)
 	{ //an NPC.. do nothing for them.
@@ -31505,8 +31881,24 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 	}
 	bs->wasDuelInProgress = bs->cur_ps.duelInProgress;
 
-	if (!someonesHere && targetMode == NEWBOTAI_TARGET_HUMANS_ONLY)
+	if (!BotSFJ_NavigationAwake(someonesHere, targetMode == NEWBOTAI_TARGET_HUMANS_ONLY,
+		bot_soakmode.integer))
 		return;
+
+	if (level.gametype == GT_FFA && targetMode < 0 && (bs->sfjRoute || bs->sfjWalking))
+	{
+		closestID = NewBotAI_ScanForEnemies(bs);
+		if (closestID >= 0 && OrgVisible(bs->eye, g_entities[closestID].client->ps.origin, bs->client))
+		{
+			bs->currentEnemy = &g_entities[closestID];
+		}
+		bs->frame_Enemy_Vis = 0;
+		if (NewBotAI_HasValidCurrentEnemy(bs) && PassStandardEnemyChecks(bs, bs->currentEnemy))
+		{
+			bs->frame_Enemy_Vis = OrgVisible(bs->eye, bs->currentEnemy->client->ps.origin, bs->client);
+			bs->frame_Enemy_Len = Distance(bs->cur_ps.origin, bs->currentEnemy->client->ps.origin);
+		}
+	}
 
 	//Route runners (airborne on a route, flag carriers, enemy-flag runs) navigate instead of fighting.
 	if (BotNav_ShouldHoldCombat(bs) && (NewBotAI_HasWaypointNavigation() || bs->sfjRoute))

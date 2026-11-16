@@ -750,6 +750,38 @@ typedef struct
 	float netDamage;	/* source-weighted */
 } botlearn_baseline_t;
 
+/* Human-only jump responses from the Dueltracks learned export.
+ * Pooled outcomes bias timing only: they do not label a jump as chase or escape. */
+static inline int BotLearn_StrafeJumpPrior(int mode, int stimulus, float strength, float skill)
+{
+	static const botlearn_baseline_t movement[] = {
+		{0, BOTLEARN_TOK_IDLE, 0, 0, 306.0f, -30.92f, 731.0f},
+		{0, BOTLEARN_TOK_SWING, 0, 0, 156.0f, -35.41f, -741.0f},
+		{1, BOTLEARN_TOK_DRAIN, 0, 0, 1213.0f, -46.49f, 3859.0f},
+		{1, BOTLEARN_TOK_GRIP, 0, 0, 29.0f, -1.23f, -93.0f},
+		{1, BOTLEARN_TOK_IDLE, 0, 0, 3092.0f, -19.88f, 11692.0f},
+		{1, BOTLEARN_TOK_JUMP, 0, 0, 506.0f, 47.11f, 2313.0f},
+		{1, BOTLEARN_TOK_KICK, 0, 0, 96.0f, 4.20f, 642.0f},
+		{1, BOTLEARN_TOK_KNOCKDOWN, 0, 0, 90.0f, 3.93f, 897.0f},
+		{1, BOTLEARN_TOK_PULL, 0, 0, 581.0f, 1.89f, 3310.0f},
+		{1, BOTLEARN_TOK_PUSH, 0, 0, 33.0f, 0.94f, -69.0f},
+		{1, BOTLEARN_TOK_SWING, 0, 0, 689.0f, -16.39f, 751.0f},
+		{1, BOTLEARN_TOK_THROW, 0, 0, 425.0f, -33.93f, -1655.0f}
+	};
+	int i;
+
+	for (i = 0; i < (int)(sizeof(movement) / sizeof(movement[0])); i++)
+	{
+		const botlearn_baseline_t *row = &movement[i];
+
+		if (row->mode == mode && row->stimulus == stimulus)
+			return BotLearn_WeightBonus(BotLearn_ScoreRelative(row->samples,
+				row->excessWins, row->netDamage), row->samples,
+				BOTLEARN_DEFAULT_MIN_SAMPLES, strength, skill);
+	}
+	return 0;
+}
+
 static inline const botlearn_baseline_t *BotLearn_FindBaseline(int mode, int stimulus, int response, int followKey)
 {
 	static const botlearn_baseline_t baseline[] = {

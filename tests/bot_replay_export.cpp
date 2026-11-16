@@ -4,6 +4,7 @@
 
 #include "ai_strafejump.h"
 #include "g_account.h"
+#include "g_strafe_route.h"
 
 #include <boost/test/unit_test.hpp>
 
@@ -390,6 +391,91 @@ BOOST_AUTO_TEST_CASE(lookahead_is_time_bounded_and_stops_before_transitions)
 	BOOST_CHECK_EQUAL(BotSFJ_ReplayLookAhead(samples.data(), samples.size(), 8, 50), 10);
 	BOOST_CHECK_EQUAL(BotSFJ_ReplayLookAhead(samples.data(), samples.size(), 19, 50), 19);
 	BOOST_CHECK_EQUAL(BotSFJ_ReplayLookAhead(samples.data(), samples.size(), 20, 50), -1);
+}
+
+BOOST_AUTO_TEST_CASE(roll_and_vertical_wallrun_start_without_a_circle_jump_but_not_from_airborne_rolls)
+{
+	BOOST_CHECK_EQUAL(G_StrafeRouteEntryKind(1, 0, 1, 0, 0), STRAFE_ROUTE_ENTRY_ROLL);
+	/* An airborne or landing roll did not begin on the ground before the ledge. */
+	BOOST_CHECK_EQUAL(G_StrafeRouteEntryKind(0, 0, 1, 0, 0), STRAFE_ROUTE_ENTRY_NORMAL);
+	BOOST_CHECK_EQUAL(G_StrafeRouteEntryKind(1, 1, 1, 0, 0), STRAFE_ROUTE_ENTRY_NORMAL);
+	BOOST_CHECK_EQUAL(G_StrafeRouteEntryKind(0, 0, 0, 0, 1), STRAFE_ROUTE_ENTRY_WALLRUN);
+	BOOST_CHECK_EQUAL(G_StrafeRouteEntryKind(0, 0, 0, 1, 1), STRAFE_ROUTE_ENTRY_NORMAL);
+}
+
+BOOST_AUTO_TEST_CASE(entry_anchors_keep_grounded_roll_runup_and_wallrun_takeoff_not_airborne_contact)
+{
+	const int ages[] = {8, 24, 120, 240, 280, 1008};
+	int rollAge = -1, wallAge = -1;
+	for (int age : ages)
+	{
+		const int grounded = age >= 24;
+		if (!G_StrafeRouteEntryAnchor(grounded, 2000 - age, 2000))
+			continue;
+		if (G_StrafeRouteEntryAnchorPreferred(STRAFE_ROUTE_ENTRY_ROLL, age, rollAge))
+			rollAge = age;
+		if (G_StrafeRouteEntryAnchorPreferred(STRAFE_ROUTE_ENTRY_WALLRUN, age, wallAge))
+			wallAge = age;
+	}
+	BOOST_CHECK_EQUAL(rollAge, 240);
+	BOOST_CHECK_EQUAL(wallAge, 24);
+	BOOST_CHECK(!G_StrafeRouteEntryAnchor(0, 1900, 2000));
+	BOOST_CHECK(!G_StrafeRouteEntryAnchor(1, 2001, 2000));
+	BOOST_CHECK(!G_StrafeRouteEntryAnchor(1, 999, 2000));
+}
+
+BOOST_AUTO_TEST_CASE(special_entries_keep_one_proven_landing_but_never_ground_rolls_or_hazards)
+{
+	for (int kind : {STRAFE_ROUTE_ENTRY_ROLL, STRAFE_ROUTE_ENTRY_WALLRUN})
+	{
+		BOOST_CHECK(G_StrafeRouteSpecialKeep(kind, 1, 40, 0, 0));
+		BOOST_CHECK(G_StrafeRouteSpecialKeep(kind, 1, 0, -64, 0));
+		BOOST_CHECK(G_StrafeRouteSpecialKeep(kind, 1, 0, 64, 0));
+		BOOST_CHECK(!G_StrafeRouteSpecialKeep(kind, 0, 400, -400, 0));
+		BOOST_CHECK(!G_StrafeRouteSpecialKeep(kind, 1, 400, -400, 1));
+		BOOST_CHECK(!G_StrafeRouteSpecialKeep(kind, 1, 0, 0, 0));
+	}
+	BOOST_CHECK(!G_StrafeRouteSpecialKeep(STRAFE_ROUTE_ENTRY_NORMAL, 1, 40, -64, 0));
+	BOOST_CHECK_EQUAL(G_StrafeRouteTravelDistance(STRAFE_ROUTE_ENTRY_WALLRUN, 0, 0, 160), 160);
+	BOOST_CHECK_EQUAL(G_StrafeRouteTravelDistance(STRAFE_ROUTE_ENTRY_NORMAL, 0, 0, 160), 0);
+}
+
+BOOST_AUTO_TEST_CASE(replay_preserves_roll_crouch_takeoff_and_landing_intervals)
+{
+	auto samples = replay(8);
+	for (auto& sample : samples)
+		sample.flags = BOT_SFJ_REPLAY_FLAG_GROUNDED;
+	for (int i = 2; i <= 5; i++)
+	{
+		samples[i].up = i == 5 ? 0 : -127;
+		samples[i].flags = G_StrafeRouteReplayEntryFlags(samples[i].up, 1);
+		if (i == 2 || i == 5)
+			samples[i].flags |= BOT_SFJ_REPLAY_FLAG_GROUNDED;
+	}
+	std::vector<bot_sfj_replay_sample_t> kept(samples.size());
+	const int count = BotSFJ_ReplayDecimate(samples.data(), samples.size(), kept.data(), kept.size());
+	bool sawRunup = false, sawAirborneRoll = false, sawRollLanding = false, sawRollEnd = false;
+	for (int i = 0; i < count; i++)
+	{
+		const auto& sample = kept[i];
+		if (sample.timeMs == samples[1].timeMs)
+			sawRunup = sample.flags == BOT_SFJ_REPLAY_FLAG_GROUNDED;
+		if (sample.timeMs == samples[3].timeMs)
+			sawAirborneRoll = (sample.flags & STRAFE_ROUTE_REPLAY_FLAG_CROUCH) &&
+				(sample.flags & STRAFE_ROUTE_REPLAY_FLAG_ROLL) &&
+				!(sample.flags & BOT_SFJ_REPLAY_FLAG_GROUNDED);
+		if (sample.timeMs == samples[5].timeMs)
+			sawRollLanding = (sample.flags & STRAFE_ROUTE_REPLAY_FLAG_ROLL) &&
+				(sample.flags & BOT_SFJ_REPLAY_FLAG_GROUNDED) &&
+				!(sample.flags & STRAFE_ROUTE_REPLAY_FLAG_CROUCH);
+		if (sample.timeMs == samples[6].timeMs)
+			sawRollEnd = !(sample.flags & STRAFE_ROUTE_REPLAY_FLAG_ROLL);
+	}
+	BOOST_CHECK(sawRunup);
+	BOOST_CHECK(sawAirborneRoll);
+	BOOST_CHECK(sawRollLanding);
+	BOOST_CHECK(sawRollEnd);
+	BOOST_CHECK(!BotSFJ_ReplayRisingJump(kept.data(), 3));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

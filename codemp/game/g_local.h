@@ -1024,8 +1024,13 @@ struct gclient_s {
 									// we can't just use pers.lastCommand.time, because
 									// of the g_sycronousclients case
 	vec3_t		forceGripCheckViewAngles;
+	vec3_t		forceGripCheckOrigin;
+	int			forceGripCheckDeltaAngles[3];
 	int			forceGripCheckTime;
+	int			forceGripCheckServerTime;
+	int			forceGripCheckTeleportBit;
 	qboolean	forceGripCheckValid;
+	int			forceInputDebugTime;
 	int			buttons;
 	int			oldbuttons;
 	int			latched_buttons;
@@ -1881,6 +1886,8 @@ qboolean G_StrafeTrackExportCurrentMap( qboolean reload );
 void G_StrafeTrackCommand( gentity_t *ent );
 void G_StrafeTrackFlushAll( void );
 void Svcmd_ResetStrafeTrack_f( void );
+void Svcmd_DeleteRoute_f( void );
+void Svcmd_RoutePriority_f( void );
 void G_CTFTrackEvent( gentity_t *player, int event, int flagTeam, const vec3_t origin );
 float BotSFJ_RouteExportFactor( const char *lowerMap, const float *start, const float *end,
 	int routeId, int recordedAt, int speedActive, int speedLevel );
@@ -1888,6 +1895,8 @@ qboolean BotSFJ_ClientIsStrafeJumping( int clientNum );
 void BotSFJ_ClientDied( int clientNum, int meansOfDeath );
 void BotSFJ_NoteCapture( int clientNum, int captureMs );
 void BotSFJ_ResolvedMotion( int clientNum, int previousGround, int upmove );
+void BotSFJ_Interference( int clientNum );
+qboolean BotSFJ_ForgetRouteOutcomes( const char *lowerMap, const int *routeIds, int count, qboolean all );
 void G_WriteClientSessionData( gclient_t *client );
 void player_die (gentity_t *self, gentity_t *inflictor, gentity_t *attacker, int damage, int mod);
 void AddScore( gentity_t *ent, vec3_t origin, int score );
@@ -2093,6 +2102,7 @@ void WP_SaberInitBladeData( gentity_t *ent );
 void WP_InitForcePowers( gentity_t *ent );
 void WP_SpawnInitForcePowers( gentity_t *ent );
 void WP_ForcePowersUpdate( gentity_t *self, usercmd_t *ucmd );
+void WP_ForceInputUpdate( gentity_t *self, usercmd_t *ucmd );
 int ForcePowerUsableOn(gentity_t *attacker, gentity_t *other, forcePowers_t forcePower);
 void ForceHeal( gentity_t *self );
 void ForceSpeed( gentity_t *self, int forceDuration );

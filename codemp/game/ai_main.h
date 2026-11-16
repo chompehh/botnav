@@ -630,6 +630,8 @@ typedef struct bot_state_s
 	qboolean			sfjRouteApproach;
 	qboolean			sfjRouteAcquiring;
 	qboolean			sfjRouteAttemptActive;
+	qboolean			sfjRouteInterfered;
+	qboolean			sfjHopInterfered;
 	int					sfjRouteStarted;
 	int					sfjApproachStarted;
 	int					sfjRouteStat;
@@ -654,6 +656,7 @@ typedef struct bot_state_s
 	int					sfjPendingHopTime;
 	qboolean			sfjPendingHopFailed;
 	qboolean			sfjPendingHopCompleted;
+	qboolean			sfjPendingHopInterfered;
 	vec3_t				sfjTravelGoal;
 	qboolean			sfjTravelGoalValid;
 	int					sfjTravelGoalKind;
