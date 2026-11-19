@@ -38,6 +38,24 @@ static inline int BotSFJ_RecordedEntryLaunch(int entryKind, int node,
 #define BOT_SFJ_WALK_LINK_DISTANCE 1024.0f
 #define BOT_SFJ_RECENT_ROUTES 16
 
+static inline float BotSFJ_EditStartScore(const float *origin, const float *start,
+	const float *landing, const float *forward)
+{
+	const float dx = origin[0] - start[0];
+	const float dy = origin[1] - start[1];
+	const float distanceSq = dx * dx + dy * dy;
+	const float hx = landing[0] - start[0];
+	const float hy = landing[1] - start[1];
+	const float length = sqrtf(hx * hx + hy * hy);
+	const float alignment = length > 0.0f ?
+		(hx * forward[0] + hy * forward[1]) / length : 0.0f;
+
+	if (distanceSq > 96.0f * 96.0f || fabsf(origin[2] - start[2]) > 64.0f)
+		return -1.0f;
+	/* Facing separates overlapping starts without preferring distant routes. */
+	return distanceSq + (1.0f - alignment) * 64.0f;
+}
+
 typedef enum
 {
 	BOT_SFJ_GOAL_NONE,
@@ -47,7 +65,8 @@ typedef enum
 	BOT_SFJ_GOAL_FLAG_RECOVER,
 	BOT_SFJ_GOAL_FLAG_SCORE,
 	BOT_SFJ_GOAL_ESCORT,
-	BOT_SFJ_GOAL_OBJECTIVE
+	BOT_SFJ_GOAL_OBJECTIVE,
+	BOT_SFJ_GOAL_FLAG_DEFEND
 } bot_sfj_goal_t;
 
 static inline const char *BotSFJ_GoalName(int goal)
@@ -61,6 +80,7 @@ static inline const char *BotSFJ_GoalName(int goal)
 	case BOT_SFJ_GOAL_FLAG_SCORE: return "score-flag";
 	case BOT_SFJ_GOAL_ESCORT: return "escort";
 	case BOT_SFJ_GOAL_OBJECTIVE: return "map-objective";
+	case BOT_SFJ_GOAL_FLAG_DEFEND: return "defend-base";
 	default: return "free-run";
 	}
 }
@@ -89,6 +109,34 @@ static inline int BotSFJ_DefenderGoal(int ownUnsafe, float ownCost, float teamma
 	if (ownUnsafe && ownCost >= 0.0f && (teammateCost < 0.0f || ownCost <= teammateCost))
 		return BOT_SFJ_GOAL_FLAG_RECOVER;
 	return teammateCost >= 0.0f ? BOT_SFJ_GOAL_ESCORT : BOT_SFJ_GOAL_FLAG_ATTACK;
+}
+
+static inline int BotSFJ_DefensiveFlagGoal(float aggression, int carrying,
+	int ownUnsafe, float ownCost, float teammateCost)
+{
+	int goal;
+
+	if (aggression >= 0.0f || carrying)
+		return BOT_SFJ_GOAL_NONE;
+	goal = BotSFJ_DefenderGoal(ownUnsafe, ownCost, teammateCost);
+	return goal == BOT_SFJ_GOAL_FLAG_ATTACK ? BOT_SFJ_GOAL_FLAG_DEFEND : goal;
+}
+
+static inline int BotNav_DefensiveFlagCombatHold(float aggression, int goal,
+	int enemyVisible, float enemyDistance, float enemyGoalDistance,
+	int enemyCarriesFlag, int hardHitRecent)
+{
+	if (aggression >= 0.0f || hardHitRecent)
+		return 0;
+	/* Leash defense to the base, not to the bot as it chases an opponent away. */
+	if (goal == BOT_SFJ_GOAL_FLAG_DEFEND)
+		return !enemyVisible || enemyDistance > 512.0f || enemyGoalDistance > 768.0f;
+	if (goal != BOT_SFJ_GOAL_FLAG_SCORE && goal != BOT_SFJ_GOAL_FLAG_RECOVER &&
+		goal != BOT_SFJ_GOAL_ESCORT)
+		return 0;
+	if (goal == BOT_SFJ_GOAL_FLAG_RECOVER && enemyCarriesFlag)
+		return 0;
+	return !enemyVisible || enemyDistance > 256.0f;
 }
 
 static inline int BotSFJ_WallRunAllows(int navigation, int grounded, int nearbyEnemy,

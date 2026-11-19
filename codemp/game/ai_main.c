@@ -6584,6 +6584,209 @@ static void BotSFJ_LoadRouteHints(void)
 	memset(g_botSfjConnectionProbe, 0, sizeof(g_botSfjConnectionProbe));
 }
 
+static void BotSFJ_EditLine(int clientNum, const float *from, const float *to, int color)
+{
+	gentity_t *event;
+	vec3_t origin;
+
+	VectorCopy(from, origin);
+	event = G_TempEntity(origin, EV_TESTLINE);
+	VectorCopy(from, event->s.origin);
+	VectorCopy(to, event->s.origin2);
+	event->s.weapon = color;
+	event->s.time2 = 4500;
+	event->r.svFlags |= SVF_BROADCAST | SVF_SINGLECLIENT;
+	event->r.singleClient = clientNum;
+}
+
+static void BotSFJ_EditMarker(int clientNum, const float *point, int number, int color)
+{
+	gentity_t *event;
+	vec3_t bottom, top;
+
+	VectorCopy(point, bottom);
+	VectorCopy(point, top);
+	bottom[2] -= 16.0f;
+	top[2] += 32.0f;
+	BotSFJ_EditLine(clientNum, bottom, top, color);
+	event = G_TempEntity(top, EV_SCOREPLUM);
+	event->s.time = number;
+	event->s.otherEntityNum = g_entities[clientNum].client->ps.clientNum;
+	event->r.svFlags |= SVF_BROADCAST | SVF_SINGLECLIENT;
+	event->r.singleClient = clientNum;
+}
+
+static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *route, qboolean print)
+{
+	int context, node, successes = 0, failures = 0, interrupted = 0, worst = -1, missing = 0;
+	int hopFailures[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopPasses[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopDeaths[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	char summary[512], problem[96];
+
+	for (context = 0; context < 4; context++)
+	{
+		const int index = route->stat[context];
+		const bot_sfj_route_stat_t *stat;
+
+		if (index < 0 || index >= g_botSfjRouteStatCount)
+		{
+			missing++;
+			continue;
+		}
+		stat = &g_botSfjRouteStats[index];
+		successes += stat->completions;
+		failures += stat->stalls;
+		interrupted += stat->interrupted;
+		for (node = 0; node < route->nodeCount; node++)
+		{
+			hopFailures[node] += stat->hopFailures[node];
+			hopPasses[node] += stat->hopPasses[node];
+			hopDeaths[node] += stat->hopDeaths[node];
+		}
+	}
+	for (node = 0; node < route->nodeCount; node++)
+		if (hopFailures[node] && (worst < 0 || hopFailures[node] > hopFailures[worst]))
+			worst = node;
+	if (worst >= 0)
+		Com_sprintf(problem, sizeof(problem), "Most failures: hop %d (%d failures, %d deaths)",
+			worst + 1, hopFailures[worst], hopDeaths[worst]);
+	else
+		Q_strncpyz(problem, "No recorded hop failures", sizeof(problem));
+	Com_sprintf(summary, sizeof(summary),
+		"^5Route ID %d^7: %d landings | recorded max %.0f ups\n"
+		"Bot results (%d/4 speed contexts)\n%d successes / %d failed or stalled / %d interrupted\n"
+		"%s\nLanding numbers = hop numbers; per-hop results in console",
+		route->routeId, route->nodeCount, route->maxSpeed, 4 - missing, successes, failures, interrupted, problem);
+	trap->SendServerCommand(clientNum, va("cp \"%s\"", summary));
+	if (!print)
+		return;
+	trap->SendServerCommand(clientNum, va("print \"[bot_editmode] %s\n\"", summary));
+	for (node = 0; node < route->nodeCount; node++)
+		trap->SendServerCommand(clientNum,
+			va("print \"  Hop %d: %d passes / %d failures / %d deaths\n\"",
+				node + 1, hopPasses[node], hopFailures[node], hopDeaths[node]));
+}
+
+static void BotSFJ_EditFrame(void)
+{
+	static struct
+	{
+		int startCursor, hopCursor;
+		int route, routeId, recordedAt;
+		int nextInfo;
+		qboolean notified;
+	} viewers[MAX_CLIENTS];
+	static int nextDraw;
+	static qboolean active;
+	int clientNum;
+
+	if (!bot_editmode.integer)
+	{
+		if (!active)
+			return;
+		for (clientNum = 0; clientNum < level.maxclients; clientNum++)
+			if (viewers[clientNum].route && g_entities[clientNum].client &&
+				g_entities[clientNum].client->pers.connected == CON_CONNECTED)
+				trap->SendServerCommand(clientNum, "cp \"\"");
+		memset(viewers, 0, sizeof(viewers));
+		nextDraw = 0;
+		active = qfalse;
+		return;
+	}
+	active = qtrue;
+	if (level.time < nextDraw)
+		return;
+	nextDraw = level.time + 250;
+	BotSFJ_LoadRouteHints();
+	for (clientNum = 0; clientNum < level.maxclients; clientNum++)
+	{
+		gentity_t *viewer = &g_entities[clientNum];
+		const bot_sfj_track_route_t *route;
+		vec3_t forward;
+		float bestScore = -1.0f;
+		int i, best = -1, drawn = 0;
+		qboolean changed;
+
+		if (!viewer->inuse || !viewer->client || (viewer->r.svFlags & SVF_BOT) ||
+			viewer->client->pers.connected != CON_CONNECTED)
+		{
+			memset(&viewers[clientNum], 0, sizeof(viewers[clientNum]));
+			continue;
+		}
+		if (!viewers[clientNum].notified)
+		{
+			trap->SendServerCommand(clientNum,
+				va("print \"[bot_editmode] %d loaded routes. Green markers = route starts/IDs; cyan = landings/hop numbers. Stand near a start to inspect it; face its direction to separate overlapping starts.\n\"",
+					g_botSfjTrackRouteCount));
+			if (!g_botSfjTrackRouteCount)
+				trap->SendServerCommand(clientNum,
+					"print \"[bot_editmode] No recorded routes loaded. Record with bot_strafetrack 1; exportStrafeTrack refreshes the route file when autoexport is off.\n\"");
+			viewers[clientNum].notified = qtrue;
+		}
+		AngleVectors(viewer->client->ps.viewangles, forward, NULL, NULL);
+		/* Ignore pitch when choosing between starts at the same location. */
+		forward[2] = 0.0f;
+		VectorNormalize(forward);
+		for (i = 0; i < g_botSfjTrackRouteCount; i++)
+		{
+			float score;
+
+			route = &g_botSfjTrackRoutes[i];
+			score = BotSFJ_EditStartScore(viewer->client->ps.origin,
+				route->start, route->node[0], forward);
+			if (score >= 0.0f && (best < 0 || score < bestScore))
+			{
+				best = i;
+				bestScore = score;
+			}
+		}
+		/* Cycle nearby starts, as vanilla wp_edit does, rather than flooding a snapshot. */
+		for (i = 0; i < g_botSfjTrackRouteCount && drawn < 4; i++)
+		{
+			viewers[clientNum].startCursor %= g_botSfjTrackRouteCount;
+			route = &g_botSfjTrackRoutes[viewers[clientNum].startCursor++];
+			if (DistanceSquared(viewer->client->ps.origin, route->start) > 2048.0f * 2048.0f)
+				continue;
+			BotSFJ_EditMarker(clientNum, route->start, route->routeId, 0x0000ff00);
+			drawn++;
+		}
+		if (best < 0)
+		{
+			if (viewers[clientNum].route)
+				trap->SendServerCommand(clientNum, "cp \"\"");
+			viewers[clientNum].route = 0;
+			continue;
+		}
+		route = &g_botSfjTrackRoutes[best];
+		changed = viewers[clientNum].route != best + 1 ||
+			viewers[clientNum].routeId != route->routeId ||
+			viewers[clientNum].recordedAt != route->recordedAt;
+		if (changed)
+			viewers[clientNum].hopCursor = 0;
+		viewers[clientNum].route = best + 1;
+		viewers[clientNum].routeId = route->routeId;
+		viewers[clientNum].recordedAt = route->recordedAt;
+		if (changed || level.time >= viewers[clientNum].nextInfo)
+		{
+			BotSFJ_EditRouteInfo(clientNum, route, changed);
+			viewers[clientNum].nextInfo = level.time + 1000;
+		}
+		for (i = 0; i < route->nodeCount && i < 2; i++)
+		{
+			const int node = viewers[clientNum].hopCursor++ % route->nodeCount;
+			vec3_t from, to;
+
+			VectorCopy(node ? route->node[node - 1] : route->start, from);
+			VectorCopy(route->node[node], to);
+			from[2] += 16.0f;
+			to[2] += 16.0f;
+			BotSFJ_EditLine(clientNum, from, to, 0x00ffff00);
+			BotSFJ_EditMarker(clientNum, route->node[node], node + 1, 0x00ffff00);
+		}
+	}
+}
+
 static int BotSFJ_RouteNodeContext(const bot_sfj_track_route_t *route,
 	const playerState_t *ps, int node);
 
@@ -7659,7 +7862,16 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 			type = BotSFJ_DefenderGoal(ownUnsafe,
 				ownGoal ? Distance(ps->origin, ownGoal) : -1.0f,
 				enemyCarrier >= 0 ? Distance(ps->origin, enemyGoal) : -1.0f);
-		if (type == BOT_SFJ_GOAL_FLAG_SCORE)
+		if (!bs->state_Forced || bs->state_Forced == CTFSTATE_DEFENDER)
+		{
+			const int defensiveGoal = BotSFJ_DefensiveFlagGoal(BotGetAggressionBias(bs),
+				carryingFlag, ownUnsafe, ownCost,
+				enemyCarrier >= 0 ? Distance(ps->origin, enemyGoal) : -1.0f);
+
+			if (defensiveGoal != BOT_SFJ_GOAL_NONE)
+				type = defensiveGoal;
+		}
+		if (type == BOT_SFJ_GOAL_FLAG_SCORE || type == BOT_SFJ_GOAL_FLAG_DEFEND)
 			goal = base && base->inuse ? base->origin : own && own->inuse ?
 				own->r.currentOrigin : NULL;
 		else if (type == BOT_SFJ_GOAL_FLAG_RECOVER)
@@ -9607,7 +9819,8 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 	if (grounded && !bs->sfjRouteHopLaunched && !fleeFrom && bs->sfjTravelGoalValid &&
 		(bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK ||
 			bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_SCORE ||
-			bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_RECOVER) &&
+			bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_RECOVER ||
+			bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_DEFEND) &&
 		Distance(ps->origin, bs->sfjTravelGoal) <= directRadius &&
 		fabsf(ps->origin[2] - bs->sfjTravelGoal[2]) <= 32.0f &&
 		BotSFJ_CorridorSegmentIsClear(bs, ps->origin, bs->sfjTravelGoal) &&
@@ -11010,6 +11223,18 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 		ps->fd.forceGripBeingGripped > level.time ||
 		BG_InKnockDown(ps->legsAnim)) ? qtrue : qfalse;
 	anyHurt = (bs->lastHurtTime && level.time - bs->lastHurtTime < BOT_ROUTE_HARD_HIT_MS) ? qtrue : qfalse;
+	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && bs->sfjTravelGoalValid)
+	{
+		const gentity_t *enemy = bs->currentEnemy;
+		const qboolean hasEnemy = enemy && enemy->client && enemy->health > 0;
+
+		if (BotNav_DefensiveFlagCombatHold(BotGetAggressionBias(bs), bs->sfjTravelGoalType,
+			hasEnemy && bs->frame_Enemy_Vis,
+			hasEnemy ? Distance(ps->origin, enemy->client->ps.origin) : 0.0f,
+			hasEnemy ? Distance(bs->sfjTravelGoal, enemy->client->ps.origin) : 0.0f,
+			hasEnemy && BotSFJ_ClientCarriesFlag(enemy->client), hardHit))
+			return qtrue;
+	}
 	return BotNav_RouteCombatHold(bot_route_combathold.integer,
 		bs->sfjRoute > 0,
 		carrying, attackingFlag, hardHit, anyHurt) ? qtrue : qfalse;
@@ -14055,6 +14280,38 @@ int CTFTakesPriority(bot_state_t *bs)
 		bs->ctfState = bs->state_Forced;
 	}
 
+	if (!bs->state_Forced || bs->state_Forced == CTFSTATE_DEFENDER)
+	{
+		const gentity_t *drop = myFlag == PW_REDFLAG ? droppedRedFlag : droppedBlueFlag;
+		const qboolean dropped = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM);
+		const float ownCost = ownCarrier >= 0 ?
+			Distance(bs->origin, g_entities[ownCarrier].client->ps.origin) :
+			dropped ? Distance(bs->origin, drop->r.currentOrigin) : -1.0f;
+		const float teammateCost = teammateCarrier >= 0 ?
+			Distance(bs->origin, g_entities[teammateCarrier].client->ps.origin) : -1.0f;
+		const int goal = BotSFJ_DefensiveFlagGoal(BotGetAggressionBias(bs), 0,
+			ownCarrier >= 0 || dropped, ownCost, teammateCost);
+
+		if (goal != BOT_SFJ_GOAL_NONE)
+		{
+			dosw = 0;
+			bs->isCamping = 0;
+			bs->wpCamping = NULL;
+			if (goal == BOT_SFJ_GOAL_FLAG_RECOVER)
+			{
+				if ((ownCarrier >= 0 && BotGetFlagBack(bs)) || (dropped && BotDefendFlag(bs)))
+					goto success;
+			}
+			else if (goal == BOT_SFJ_GOAL_ESCORT)
+			{
+				if (BotGuardFlagCarrier(bs))
+					goto success;
+			}
+			else if (BotGetFlagHome(bs))
+				goto success;
+		}
+	}
+
 	/* No assigned role: never idle around our own safe flag. Recover it when it is
 	 * away, back up a teammate carrier, otherwise go for the enemy flag. */
 	if (!bs->ctfState)
@@ -15012,10 +15269,11 @@ void GetIdealDestination(bot_state_t *bs)
 		bs->dangerousObject = NULL;
 	}
 
-	if (!badthing && BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) &&
+	if (!badthing && (BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) ||
+		((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)) &&
 		CTFTakesPriority(bs))
 	{
-		bs->runningToEscapeThreat = 1;
+		bs->runningToEscapeThreat = BotSFJ_ClientCarriesFlag(g_entities[bs->client].client);
 		return;
 	}
 
@@ -24629,24 +24887,15 @@ static int BotGetHealthBiasThreshold(void)
 
 static float BotGetAggressionBias(bot_state_t *bs)
 {
-	float aggressionBias = bot_aggressionbias.value;
 	float healthBias;
 	float forceBias;
 	float healthComponent;
 	float forceComponent;
 
-	if (aggressionBias < -1.0f)
-	{
-		aggressionBias = -1.0f;
-	}
-	else if (aggressionBias > 1.0f)
-	{
-		aggressionBias = 1.0f;
-	}
-
 	if (!bs)
 	{
-		return aggressionBias;
+		return NewBotAI_AggressionBias(bot_aggressionbias.value,
+			bot_flagaggressionbias.value, 0, 0.0f, 0.0f, 0.0f);
 	}
 
 	healthBias = BotGetBiasWeight(bot_healthbias.value);
@@ -24680,24 +24929,9 @@ static float BotGetAggressionBias(bot_state_t *bs)
 		forceComponent = 1.0f;
 	}
 
-	aggressionBias += (healthComponent * healthBias);
-	aggressionBias += (forceComponent * forceBias);
-
-	//Per-bot personality nudge derived from the .jkb "hatelevel" value (see
-	//B_LoadPersonality in ai_util.c). This is additive on top of the server-wide
-	//bot_aggressionbias cvar so individual bots can have distinct personalities.
-	aggressionBias += bs->hateLevelAggressionBias;
-
-	if (aggressionBias < -1.0f)
-	{
-		aggressionBias = -1.0f;
-	}
-	else if (aggressionBias > 1.0f)
-	{
-		aggressionBias = 1.0f;
-	}
-
-	return aggressionBias;
+	return NewBotAI_AggressionBias(bot_aggressionbias.value, bot_flagaggressionbias.value,
+		BotSFJ_ClientCarriesFlag(g_entities[bs->client].client),
+		healthComponent * healthBias, forceComponent * forceBias, bs->hateLevelAggressionBias);
 }
 
 static int NewBotAI_GetAntiDrainWeight(bot_state_t *bs)
@@ -31900,8 +32134,12 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		}
 	}
 
-	//Route runners (airborne on a route, flag carriers, enemy-flag runs) navigate instead of fighting.
-	if (BotNav_ShouldHoldCombat(bs) && (NewBotAI_HasWaypointNavigation() || bs->sfjRoute))
+	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
+		BotSFJ_SetTravelGoal(bs, &bs->cur_ps, BotSFJ_ClientCarriesFlag(g_entities[bs->client].client));
+
+	// Route runners and defensive flag objectives navigate instead of hunting opponents.
+	if (BotNav_ShouldHoldCombat(bs) && (NewBotAI_HasWaypointNavigation() || bs->sfjRoute ||
+		(bot_navigation.integer && bs->sfjTravelGoalValid)))
 	{
 		bs->doAttack = 0;
 		bs->doAltAttack = 0;
@@ -34149,6 +34387,7 @@ int BotAIStartFrame(int time) {
 	}
 
 	G_CheckBotSpawn();
+	BotSFJ_EditFrame();
 
 	{
 		static int lastSfjDebug = -1, lastCombatDebug = -1;

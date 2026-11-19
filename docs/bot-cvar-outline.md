@@ -27,12 +27,14 @@ This document describes all cvars added for the NewBotAI system and how they rel
 The aggression bias is the central personality axis. It flows through `BotGetAggressionBias()` which combines:
 
 ```
-BotGetAggressionBias = clamp(bot_aggressionbias + healthComponent*bot_healthbias + forceComponent*bot_forcebias + hateLevelAggressionBias, -1, 1)
+base = carrying any flag ? bot_flagaggressionbias : bot_aggressionbias
+BotGetAggressionBias = clamp(clamp(base, -1, 1) + healthComponent*bot_healthbias + forceComponent*bot_forcebias + hateLevelAggressionBias, -1, 1)
 ```
 
 | Cvar | Default | Range | Description |
 |------|---------|-------|-------------|
 | `bot_aggressionbias` | `0` | `[-1, 1]` | Base aggression. Positive = aggressive, negative = defensive. Feeds into nearly every combat decision. |
+| `bot_flagaggressionbias` | `-0.5` | `[-1, 1]` | Replaces the base aggression while carrying a red, blue or neutral flag; normal base aggression resumes immediately after losing/capturing it. Health, Force and `.jkb` personality adjustments still apply. Set below `bot_aggressionbias` for more defensive carriers, or equal to it to preserve the same base. In CTF/CTY, negative effective aggression prioritizes capturing, recovering the team's flag, escorting its carrier and guarding a safe home base instead of discretionary opponent hunting. Forced non-defender role orders remain authoritative; nearby threats, flag thieves and hard hits still permit combat. |
 | `bot_healthbias` | `0` | `[-1, 1]` | How much current health shifts aggression. At 1: full HP = +1 aggression, 0 HP = -1. |
 | `bot_forcebias` | `0` | `[-1, 1]` | How much force-point advantage shifts aggression. At 1: full FP advantage = +1 aggression. |
 | **Per-bot `.jkb` `hatelevel`** | `3` | `1-5` | Not a cvar, but feeds into aggression as `hateLevelAggressionBias`. Higher hatelevel = more aggressive personality. |
@@ -196,6 +198,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_strafefrequency` | `0` | Base percentage chance (0-100) per think tick for the random strafe overlay; combat context can adjust it. In grounded saber-only idle footwork it also partly adjusts lateral-direction timing, so `0` does not disable that controller behavior. It does not choose attacks or change air inputs. |
 | `bot_strafeduration` | `50` | Scale (0-100) for sampled random-strafe duration: bounds are 80–300ms at 0, 290–1400ms at 50, and 500–2500ms at 100. In grounded saber-only idle footwork, the sampled value (capped at 900ms) partly adjusts lateral-direction timing; it does not choose attacks or change air inputs. |
 | `bot_strafeOffset` | `0` | Legacy strafe offset. |
+| `bot_editmode` | `0` | Server-side recorded strafe-route inspection; enable with `bot_editmode 1` (or `rcon bot_editmode 1` remotely). No cheats or client update required. Cycles green numbered start markers within 2,048 units for every human client, including spectators. Within 96 horizontal / 64 vertical units of a start, shows its connected cyan landing markers numbered from hop 1; face the route direction to distinguish overlapping starts. On-screen details refresh once per second: recording ID, landing count, recorded maximum speed (ups), bot completions, failed/stalled attempts, interruptions and the hop with most failures. Entering a start also prints all per-hop passes/failures/deaths to that client's console; leave and re-enter to print again. Results sum all four Force Speed contexts; interruptions are not failures and hop failures can include retries on completed routes. Number labels use vanilla score plums (`cg_scorePlums 1`); lines remain visible without them. Visuals cycle in batches and expire within 4.5 seconds after disabling. This only inspects loaded routes; it does not change recordings, bot movement, recording controls or `bot_wp_edit`. |
 | `bot_strafejumps` | `1` | Enables human-shaped strafe jumping with circle-jump starts and landing chains. The strafe key matches the turn side (left turn: W+A or A, right turn: W+D or D), so the view stays within about 25° of the velocity like a human's. Each hop keeps turning toward the route (the side survives landings unless the route bends the other way), uses full beat below 400 u/s and half beat / side-only above, and may switch side mid-air at the recorded point. Aim is rate-limited by skill: a flick on the ground, a fast settle for 150 ms after takeoff (200 + 20 x skill °/s, unlimited at skill 10), then a slow tracking turn (60 + 6 x skill °/s), raised to the recorded human rates. While the view catches up, the keys whose direction is closest to the wanted wish (including W only) are pressed. Validated waypoint lookahead allows gentle curves; direct enemy corridors remain straight. In CTF, carrying a flag counts as escape and chasing an enemy flag carrier counts as chase. |
 | `bot_strafejumpfrequency` | `100` | Initiation frequency scale, clamped to 1–1000 when enabled: `100` waits 1000 ms before starting a new eligible sequence, `200` waits 500 ms, `50` waits 2000 ms. `0` or negative disables strafe jumping. No per-frame random rolls; established safe chains are not delayed. |
 | `bot_strafejumpwaypoints` | `128` | Strafe corridor waypoint budget, clamped to 1–512, independent of ordinary `bot_waypointskip`. Dense trails need enough points to reach the minimum corridor length; look-ahead remains distance-bounded to about 1024 units and stops at required interactions, destinations, disconnected links, excessive bends or height changes. |
@@ -246,8 +249,14 @@ travel cost is no greater than the enemy flag's. A safe own flag selects enemy
 flag attack; an allied carrier selects escort. Nearby visible combat still takes
 input priority for non-carriers. Defenders pursue a stolen own flag (or recover
 its dropped location), unless a teammate carrying the enemy flag is closer to
-the bot; then they escort that teammate. When their own flag is safe, defenders
-attack or escort instead of guarding an idle base. Carriers prioritize returning
+the bot; then they escort that teammate. Neutral/aggressive assigned defenders
+attack or escort when their own flag is safe. Bots with negative effective
+aggression instead escort a teammate carrier or guard their home base, unless
+given an explicit non-defender role order. Base guards engage visible enemies
+within 512 units only while those enemies remain within 768 units of the base;
+hard hits still permit immediate self-defense. Defensive recovery/escort/capture
+runs ignore discretionary enemies beyond 256 units, but recovery may engage the
+flag thief. Carriers prioritize returning
 to the original home base over equipment gathering, forced roles or chasing the
 stolen own flag, including within 512 units of scoring. Other modes pursue the current visible/recently seen enemy, or
 use a map objective/free-run goal; defensive routes must increase separation.
@@ -447,6 +456,21 @@ A bot uses a route when it is within 96 units of `start_pos`, or alongside the r
 - **Wall scrapes:** a chain is only released for being slowed below ground speed after it has stayed slowed for 200 ms (`BOT_SFJ_WALL_SCRAPE_GRACE_MS`), so a brief scrape no longer ends it.
 - **No ground crouch at strafe speed:** the combat hop and the navigation duck do not crouch on the ground while the bot moves faster than ground speed, because in JKA that starts a roll and drops the chain. Deliberate dodge and wall-escape rolls are unchanged.
 - **Escapes:** a retreating bot may start an escape strafe once the enemy is 128 units away (`BOT_SFJ_ESCAPE_MIN_DISTANCE`), or at `bot_minstrafe` if that is lower. The escape is cancelled below 75% of that distance. Chase strafes still use `bot_minstrafe`.
+
+### Adding spawn points
+
+`setspawnpoint [team]` adds a spawn at your current position and facing, using
+the same spectator-follow position adjustment as `amtelemark`. Omit the team
+(or use `0`/`free`) for a neutral deathmatch spawn; `1`/`red` and `2`/`blue`
+add team spawns. Team names are case-insensitive and require a team gametype.
+CTF/CTY creates both initial-spawn and respawn points; Team DM/JVM and Siege
+use their respective team spawn types. Spawns are immediately available to
+normal human/bot spawn selection, alongside existing map spawns.
+
+This client-console command requires the `ammap`/change-map admin permission,
+not cheats or race teleport access. It does not require `bot_editmode`.
+Placement inside solid geometry is rejected. Added points last only for the
+current map session; they are not saved and disappear on restart/map change.
 
 ### Recorded strafe routes (`bot_strafetrack`, `exportStrafeTrack`)
 
@@ -1656,6 +1680,7 @@ g_newBotAI (master switch)
   |
   +-- Aggression Core
   |     +-- bot_aggressionbias (base)
+  |     +-- bot_flagaggressionbias (base override while carrying a flag)
   |     +-- bot_healthbias (health modifier)
   |     +-- bot_forcebias (force modifier)
   |     +-- .jkb hatelevel (personality modifier)

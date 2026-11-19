@@ -4,6 +4,21 @@
 #include <math.h>
 #include "g_bot_learning.h"
 
+static inline float NewBotAI_AggressionBias(float base, float flagBase, int carrying,
+	float healthAdjustment, float forceAdjustment, float personality)
+{
+	float bias = carrying ? flagBase : base;
+
+	if (bias < -1.0f) bias = -1.0f;
+	if (bias > 1.0f) bias = 1.0f;
+	bias += healthAdjustment;
+	bias += forceAdjustment;
+	bias += personality;
+	if (bias < -1.0f) bias = -1.0f;
+	if (bias > 1.0f) bias = 1.0f;
+	return bias;
+}
+
 /*
  * Preference never supplies permission: callers first compute a legal base score.
  * The category bias is the operator's word: it amplifies the prior and positive

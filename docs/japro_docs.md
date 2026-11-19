@@ -394,6 +394,7 @@ and aim without sending chat messages. Disable it after investigation.
 	amrename
 	amtele	
 	amtelemark	
+	setspawnpoint [0/free|1/red|2/blue]
 	ampsay	
 	amvstr	
 	amban	
