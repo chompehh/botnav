@@ -8,6 +8,7 @@
 
 #include "ai_combat_tuning.h"
 #include "g_hit_detection.h"
+#include "g_spawnpoint.h"
 #include "ai_strafejump.h"
 #include "ai_traversal.h"
 
@@ -16,6 +17,115 @@
 BOOST_AUTO_TEST_SUITE( bot_ai )
 
 BOOST_AUTO_TEST_SUITE( tuning )
+
+BOOST_AUTO_TEST_CASE( carrying_a_flag_replaces_aggression_base_but_preserves_modifiers )
+{
+	const float normal = NewBotAI_AggressionBias(0.4f, -0.6f, 0, 0.2f, -0.1f, 0.05f);
+	const float carrier = NewBotAI_AggressionBias(0.4f, -0.6f, 1, 0.2f, -0.1f, 0.05f);
+
+	BOOST_CHECK_CLOSE(normal, 0.55f, 0.001f);
+	BOOST_CHECK_CLOSE(carrier, -0.45f, 0.001f);
+	BOOST_CHECK_CLOSE(NewBotAI_AggressionBias(2.0f, -2.0f, 0, -0.25f, 0.0f, 0.0f),
+		0.75f, 0.001f);
+	BOOST_CHECK_CLOSE(NewBotAI_AggressionBias(2.0f, -2.0f, 1, 0.25f, 0.0f, 0.0f),
+		-0.75f, 0.001f);
+	BOOST_CHECK_EQUAL(NewBotAI_AggressionBias(0.8f, -0.8f, 0, 0.4f, 0.3f, 0.2f), 1.0f);
+	BOOST_CHECK_EQUAL(NewBotAI_AggressionBias(0.8f, -0.8f, 1, -0.4f, -0.3f, -0.2f), -1.0f);
+}
+
+BOOST_AUTO_TEST_CASE( defensive_flag_personalities_guard_recover_and_escort_instead_of_hunting )
+{
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(-0.5f, 0, 0, -1.0f, -1.0f),
+		BOT_SFJ_GOAL_FLAG_DEFEND);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(-0.5f, 0, 1, 200.0f, 1000.0f),
+		BOT_SFJ_GOAL_FLAG_RECOVER);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(-0.5f, 0, 1, 1000.0f, 200.0f),
+		BOT_SFJ_GOAL_ESCORT);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(-0.5f, 0, 0, -1.0f, 200.0f),
+		BOT_SFJ_GOAL_ESCORT);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(-0.5f, 1, 1, 200.0f, -1.0f),
+		BOT_SFJ_GOAL_NONE);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(0.0f, 0, 0, -1.0f, -1.0f),
+		BOT_SFJ_GOAL_NONE);
+	BOOST_CHECK_EQUAL(BotSFJ_DefensiveFlagGoal(0.5f, 0, 1, 200.0f, -1.0f),
+		BOT_SFJ_GOAL_NONE);
+}
+
+BOOST_AUTO_TEST_CASE( defensive_flag_focus_allows_threats_without_leaving_the_base_to_chase )
+{
+	BOOST_CHECK(BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_SCORE,
+		1, 600.0f, 600.0f, 0, 0));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_SCORE,
+		1, 256.0f, 600.0f, 0, 0));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_SCORE,
+		1, 600.0f, 600.0f, 0, 1));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_RECOVER,
+		1, 600.0f, 600.0f, 1, 0));
+	BOOST_CHECK(BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_ESCORT,
+		0, 100.0f, 100.0f, 0, 0));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_DEFEND,
+		1, 512.0f, 768.0f, 0, 0));
+	BOOST_CHECK(BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_DEFEND,
+		1, 512.0f, 769.0f, 0, 0));
+	BOOST_CHECK(BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_FLAG_DEFEND,
+		1, 513.0f, 768.0f, 0, 0));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(0.0f, BOT_SFJ_GOAL_FLAG_DEFEND,
+		1, 1000.0f, 1000.0f, 0, 0));
+	BOOST_CHECK(!BotNav_DefensiveFlagCombatHold(-0.5f, BOT_SFJ_GOAL_ENEMY,
+		1, 1000.0f, 1000.0f, 0, 0));
+}
+
+BOOST_AUTO_TEST_CASE( spawnpoint_team_arguments_reject_partial_numbers_and_unknown_teams )
+{
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam(""), 0);
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam("free"), G_SpawnPointTeam("0"));
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam("red"), G_SpawnPointTeam("1"));
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam("blue"), G_SpawnPointTeam("2"));
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam("red"), 1);
+	BOOST_CHECK_EQUAL(G_SpawnPointTeam("blue"), 2);
+	const char *invalid[] = { "3", "-1", "1red", "redteam", "spectator", "01", " 1" };
+	for (const char *arg : invalid)
+		BOOST_CHECK_LT(G_SpawnPointTeam(arg), 0);
+}
+
+BOOST_AUTO_TEST_CASE( spawnpoint_pose_matches_telemark_after_spawn_height_adjustment )
+{
+	const float origin[] = { 12.5f, -72.0f, 24.0f };
+	const float viewangles[] = { 20.0f, 135.0f, 15.0f };
+	float spawnOrigin[3], spawnAngles[3];
+
+	G_SpawnPointPose(origin, viewangles, 0, spawnOrigin, spawnAngles);
+	BOOST_CHECK_EQUAL(spawnOrigin[0], origin[0]);
+	BOOST_CHECK_EQUAL(spawnOrigin[1], origin[1]);
+	BOOST_CHECK_EQUAL(spawnOrigin[2] + 9.0f, origin[2]);
+	BOOST_CHECK_EQUAL(spawnAngles[0], viewangles[0]);
+	BOOST_CHECK_EQUAL(spawnAngles[1], viewangles[1]);
+	BOOST_CHECK_EQUAL(spawnAngles[2], 0.0f);
+
+	G_SpawnPointPose(origin, viewangles, 1, spawnOrigin, spawnAngles);
+	BOOST_CHECK_EQUAL(spawnOrigin[2] + 9.0f, origin[2] + 58.0f);
+}
+
+BOOST_AUTO_TEST_CASE( route_edit_selection_separates_overlapping_starts_and_floors )
+{
+	const float origin[] = { 0.0f, 0.0f, 0.0f };
+	const float forward[] = { 1.0f, 0.0f, 0.0f };
+	const float east[] = { 400.0f, 0.0f, 0.0f };
+	const float west[] = { -400.0f, 0.0f, 0.0f };
+	const float upstairs[] = { 0.0f, 0.0f, 65.0f };
+	const float distant[] = { 97.0f, 0.0f, 0.0f };
+	const float nearby[] = { 20.0f, 0.0f, 0.0f };
+	const float boundary[] = { 96.0f, 0.0f, -64.0f };
+
+	BOOST_CHECK_LT(BotSFJ_EditStartScore(origin, origin, east, forward),
+		BotSFJ_EditStartScore(origin, origin, west, forward));
+	BOOST_CHECK_LT(BotSFJ_EditStartScore(origin, origin, west, forward),
+		BotSFJ_EditStartScore(origin, nearby, east, forward));
+	BOOST_CHECK_LT(BotSFJ_EditStartScore(origin, upstairs, east, forward), 0.0f);
+	BOOST_CHECK_LT(BotSFJ_EditStartScore(origin, distant, east, forward), 0.0f);
+	BOOST_CHECK_GE(BotSFJ_EditStartScore(origin, boundary, east, forward), 0.0f);
+	BOOST_CHECK(std::isfinite(BotSFJ_EditStartScore(origin, origin, origin, forward)));
+}
 
 BOOST_AUTO_TEST_CASE( hit_detection_substeps_are_bounded_and_interpolate_short_angles )
 {

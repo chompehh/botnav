@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 
 #include "g_local.h"
 #include "g_duel_capture.h"
+#include "g_spawnpoint.h"
 #include "bg_saga.h"
 
 #include "ui/menudef.h"			// for the voice chats
@@ -7520,6 +7521,100 @@ void Cmd_Amtelemark_f(gentity_t *ent)
 }
 //[JAPRO - Serverside - All - Amtelemark Function - End]
 
+static void Cmd_SetSpawnPoint_f(gentity_t *ent)
+{
+	char arg[16] = { 0 };
+	char *classnames[2];
+	int team, count = 1, i, available;
+	vec3_t origin, angles, destination;
+	vec3_t mins = { -15, -15, DEFAULT_MINS_2 };
+	vec3_t maxs = { 15, 15, DEFAULT_MAXS_2 };
+	trace_t trace;
+	const char *label;
+
+	if (!ent->client)
+		return;
+	if (!G_AdminAllowed(ent, JAPRO_ACCOUNTFLAG_A_CHANGEMAP, qfalse, qfalse, "setspawnpoint"))
+		return;
+	if (trap->Argc() > 2)
+	{
+		trap->SendServerCommand(ent - g_entities,
+			"print \"Usage: setspawnpoint [0|free|1|red|2|blue]\n\"");
+		return;
+	}
+	if (trap->Argc() == 2)
+		trap->Argv(1, arg, sizeof(arg));
+	Q_strlwr(arg);
+	team = G_SpawnPointTeam(arg);
+	if (team < 0)
+	{
+		trap->SendServerCommand(ent - g_entities,
+			"print \"Invalid team. Use 0/free, 1/red or 2/blue.\n\"");
+		return;
+	}
+	if (team != TEAM_FREE && !BG_IsTeamGame(level.gametype))
+	{
+		trap->SendServerCommand(ent - g_entities,
+			"print \"Team spawn points require a team gametype.\n\"");
+		return;
+	}
+	classnames[0] = "info_player_deathmatch";
+	label = team == TEAM_RED ? "red" : team == TEAM_BLUE ? "blue" : "neutral";
+	if (team != TEAM_FREE)
+	{
+		if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+		{
+			classnames[0] = team == TEAM_RED ? "team_CTF_redplayer" : "team_CTF_blueplayer";
+			classnames[1] = team == TEAM_RED ? "team_CTF_redspawn" : "team_CTF_bluespawn";
+			count = 2;
+		}
+		else if (level.gametype == GT_SIEGE)
+			classnames[0] = team == TEAM_RED ? "info_player_siegeteam1" : "info_player_siegeteam2";
+		else
+			classnames[0] = team == TEAM_RED ? "info_player_start_red" : "info_player_start_blue";
+	}
+	G_SpawnPointPose(ent->client->ps.origin, ent->client->ps.viewangles,
+		ent->client->sess.sessionTeam == TEAM_SPECTATOR && (ent->client->ps.pm_flags & PMF_FOLLOW),
+		origin, angles);
+	VectorCopy(origin, destination);
+	destination[2] += 9.0f;
+	trap->Trace(&trace, destination, mins, maxs, destination, ent->s.number,
+		MASK_PLAYERSOLID & ~CONTENTS_BODY, qfalse, 0, 0);
+	if (trace.startsolid || trace.allsolid)
+	{
+		trap->SendServerCommand(ent - g_entities,
+			"print \"Cannot create a spawn point here: a standing player would be inside solid geometry.\n\"");
+		return;
+	}
+	/* Reserve the whole CTF pair before allocating either logical entity. */
+	available = MAX_LOGICENTITIES - 1 - level.num_logicalents;
+	for (i = 0; i < level.num_logicalents; i++)
+		if (!g_logicalents[i].inuse &&
+			(g_logicalents[i].freetime <= level.startTime + 2000 ||
+				level.time - g_logicalents[i].freetime >= 1000))
+			available++;
+	if (available < count)
+	{
+		trap->SendServerCommand(ent - g_entities,
+			"print \"Cannot create a spawn point: not enough logical entity slots.\n\"");
+		return;
+	}
+	for (i = 0; i < count; i++)
+	{
+		gentity_t *spawn = G_SpawnLogical();
+
+		spawn->classname = classnames[i];
+		VectorCopy(origin, spawn->s.origin);
+		G_SetOrigin(spawn, origin);
+		G_SetAngles(spawn, angles);
+		/* Runtime spawns have no map spawnvars; Siege points start enabled. */
+		spawn->genericValue1 = 1;
+	}
+	trap->SendServerCommand(ent - g_entities,
+		va("print \"Created %s spawn point at <%.1f, %.1f, %.1f>, yaw %.1f (current map session only).\n\"",
+			label, destination[0], destination[1], destination[2], angles[YAW]));
+}
+
 void Cmd_RaceTele_f(gentity_t *ent, qboolean useForce)
 {
 	if (useForce || trap->Argc() == 1) {//Amtele to telemark
@@ -9265,6 +9360,7 @@ command_t commands[] = {
 	{ "say_team_mod",		Cmd_SayTeamMod_f,			0 },
 	{ "score",				Cmd_Score_f,				0 },
 	{ "serverconfig",		Cmd_ServerConfig_f,			0 },
+	{ "setspawnpoint",		Cmd_SetSpawnPoint_f,			CMD_NOINTERMISSION },
 	{ "setviewpos",			Cmd_SetViewpos_f,			CMD_NOINTERMISSION|CMD_CHEAT }, //wow really??
 
 	{ "showNet",			Cmd_ShowNet_f,				0 },
