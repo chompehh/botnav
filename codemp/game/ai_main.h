@@ -768,6 +768,8 @@ typedef struct bot_state_s
 	int					sfjChainFrom;		// route index + 1 this attempt was chained from (0 = none)
 	int					sfjRouteGoalType;	// travel goal type when the current route started
 	int					sfjRouteLaunchTime;	// level.time of the current route hop's takeoff
+	int					sfjRouteLaunchCmdTime;
+	int					sfjRouteJumpReleaseMs;
 	qboolean			sfjRouteMomentumLost;	// speed fell under the walking floor after a takeoff
 	qboolean			sfjWasCarrying;		// carried a flag last frame (pickup edge detection)
 	int					sfjRecentRoutes[BOT_SFJ_RECENT_ROUTES];

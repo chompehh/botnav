@@ -56,6 +56,16 @@ static inline float BotSFJ_EditStartScore(const float *origin, const float *star
 	return distanceSq + (1.0f - alignment) * 64.0f;
 }
 
+static inline int BotSFJ_EditFlagDirection(float redProgress, float blueProgress)
+{
+	/* Leave cross-map routes with little or ambiguous progress uncolored. */
+	if (redProgress >= 64.0f && redProgress - blueProgress >= 64.0f)
+		return -1;
+	if (blueProgress >= 64.0f && blueProgress - redProgress >= 64.0f)
+		return 1;
+	return 0;
+}
+
 typedef enum
 {
 	BOT_SFJ_GOAL_NONE,
@@ -2564,6 +2574,32 @@ typedef struct
 	int flags;
 } bot_sfj_replay_sample_t;
 
+/* Samples describe the command that produced each post-move position. */
+static inline int BotSFJ_ReplayJumpReleaseMs(const bot_sfj_replay_sample_t *samples,
+	int count, int node)
+{
+	int i, takeoff = -1;
+
+	for (i = 0; samples && i < count && samples[i].node <= node; i++)
+	{
+		if (samples[i].node < node)
+			continue;
+		if (takeoff < 0)
+		{
+			if (samples[i].flags & BOT_SFJ_REPLAY_FLAG_GROUNDED)
+				continue;
+			if (samples[i].up < 10 || (samples[i].flags & BOT_SFJ_REPLAY_FLAG_WALLRUN))
+				return -1;
+			takeoff = samples[i].timeMs;
+		}
+		else if (samples[i].flags & BOT_SFJ_REPLAY_FLAG_WALLRUN)
+			return -1;
+		else if (samples[i].up < 10 || (samples[i].flags & BOT_SFJ_REPLAY_FLAG_GROUNDED))
+			return samples[i].timeMs > takeoff ? samples[i].timeMs - takeoff : -1;
+	}
+	return -1;
+}
+
 typedef struct
 {
 	float origin[3];	/* where the human first touched the wall */
@@ -2862,21 +2898,13 @@ static inline int BotSFJ_ReplayAbandon(float deviation, int deviatingMs, int hav
 }
 
 /*
- * A trusted human hop keeps the route through 1.5x the drift for twice as long:
- * a poor scan or lookahead is not evidence that the human line is wrong.
+ * Drift alone is not a failed landing. Keep steering trusted hops until
+ * resolved movement or the progress watchdog can decide the outcome.
  */
 static inline int BotSFJ_ReplayAbandonTrusted(float deviation, int deviatingMs, int haveSamples,
 	int trusted)
 {
-	if (!trusted)
-		return BotSFJ_ReplayAbandon(deviation, deviatingMs, haveSamples);
-	return BotSFJ_ReplayAbandon(deviation / 1.5f, deviatingMs / 2, haveSamples);
-}
-
-static inline float BotSFJ_ReplayAbandonDeviation(int haveSamples, int trusted)
-{
-	return (haveSamples ? BOT_SFJ_REPLAY_ABANDON_DEVIATION :
-		BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION) * (trusted ? 1.5f : 1.0f);
+	return !trusted && BotSFJ_ReplayAbandon(deviation, deviatingMs, haveSamples);
 }
 
 /*
