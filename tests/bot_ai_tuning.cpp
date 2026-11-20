@@ -3588,8 +3588,15 @@ BOOST_AUTO_TEST_CASE( route_failures_are_contextual_and_retries_are_bounded )
 	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 1, 1 ), BotSFJ_HopRetryDelay( 1, 0 ) );
 	BOOST_CHECK_GT( BotSFJ_HopRetryDelay( 3, 0 ), BotSFJ_HopRetryDelay( 1, 0 ) );
 	BOOST_CHECK_EQUAL( BotSFJ_HopRetryDelay( 100, 1 ), 300000 );
-	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 0), 15000 );
-	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 1), 30000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 0), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 0, 1), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(5, 4, 0, 0), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(6, 4, 0, 0), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(6, 4, 0, 1), 30000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(7, 5, 0, 0), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 5, 0, 0), 15000 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(2, 0, 0, 0), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(3, 0, 0, 0), 15000 );
 	BOOST_CHECK_GT( BotSFJ_HopEvidenceRetryDelay(8, 0, 0, 0), 15000 );
 	BOOST_CHECK_EQUAL( BotSFJ_HopEvidenceRetryDelay(8, 12, 1, 0),
 		BotSFJ_HopRetryDelay(8, 1) );
@@ -4811,7 +4818,8 @@ BOOST_AUTO_TEST_CASE( human_route_hops_stay_trusted_until_repeated_failures_or_d
 	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, BOT_SFJ_TRACK_TRUST_FAILURES - 1, 0 ) );
 	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 0, BOT_SFJ_TRACK_TRUST_FAILURES, 0 ) );
 	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, 5, 5 ) );
-	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 0, 6, 5 ) );
+	BOOST_CHECK( BotSFJ_TrackHopTrusted( 0, 7, 5 ) );
+	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 0, 8, 5 ) );
 	BOOST_CHECK( !BotSFJ_TrackHopTrusted( 1, 0, 10 ) );
 }
 
@@ -5606,6 +5614,8 @@ BOOST_AUTO_TEST_CASE( lethal_or_recently_failing_hops_trim_despite_old_passes )
 	BOOST_CHECK( BotSFJ_HopBlocked(0, BOT_SFJ_HOP_BLOCK_FAILURES, 0) );
 	BOOST_CHECK( BotSFJ_HopBlocked(0, 10, 2) );
 	BOOST_CHECK( !BotSFJ_HopBlocked(0, 3, 5) );
+	BOOST_CHECK( !BotSFJ_HopBlocked(0, 5, 4) );
+	BOOST_CHECK( BotSFJ_HopBlocked(0, 6, 4) );
 }
 
 BOOST_AUTO_TEST_CASE( nonlethal_terminals_recover_but_observed_deaths_still_trim )
@@ -5622,21 +5632,29 @@ BOOST_AUTO_TEST_CASE( nonlethal_terminals_recover_but_observed_deaths_still_trim
 	BOOST_CHECK_EQUAL(BotSFJ_LearnedEnd(4, 1, deaths, failures, passes), 1);
 }
 
-BOOST_AUTO_TEST_CASE( mostly_successful_routes_repair_old_recent_rejections )
+BOOST_AUTO_TEST_CASE( old_route_blocks_expire_once_on_upgrade )
 {
-	int failures = 7, passes = 2;
-	BotSFJ_RepairHopEvidence(8, 40, 0, &failures, &passes);
-	BOOST_CHECK_GT(passes, failures);
+	int deaths = 1, failures = 12, passes = 2;
+	BotSFJ_MigrateHopEvidence(12, &deaths, &failures, &passes);
+	BOOST_CHECK_EQUAL(deaths, 0);
+	BOOST_CHECK_EQUAL(failures, 0);
+	BOOST_CHECK_EQUAL(passes, 2);
 	BOOST_CHECK(BotSFJ_TrackHopTrustedForSpeed(0, failures, passes, 1));
-	BOOST_CHECK_GT(BotSFJ_HopReliability(failures, passes), 0.8f);
-	failures = 7;
-	passes = 2;
-	BotSFJ_RepairHopEvidence(8, 40, 1, &failures, &passes);
-	BOOST_CHECK_EQUAL(failures, 7);
+	deaths = 1;
+	failures = 12;
+	BotSFJ_MigrateHopEvidence(BOT_SFJ_ROUTE_STATS_VERSION, &deaths, &failures, &passes);
+	BOOST_CHECK_EQUAL(deaths, 1);
+	BOOST_CHECK_EQUAL(failures, 12);
 	BOOST_CHECK_EQUAL(passes, 2);
-	BotSFJ_RepairHopEvidence(40, 8, 0, &failures, &passes);
-	BOOST_CHECK_EQUAL(failures, 7);
-	BOOST_CHECK_EQUAL(passes, 2);
+}
+
+BOOST_AUTO_TEST_CASE( lethal_unproven_routes_lose_to_clean_and_proven_alternatives )
+{
+	const float clean = 600 * BotSFJ_RouteDeathPreference(0, 0);
+	const float proven = 900 * BotSFJ_RouteDeathPreference(1, 1);
+	const float unproven = 1000 * BotSFJ_RouteDeathPreference(1, 0);
+	BOOST_CHECK_GT(clean, unproven);
+	BOOST_CHECK_GT(proven, unproven);
 }
 
 BOOST_AUTO_TEST_CASE( continuous_highway_beats_a_comparable_transfer_plan )
@@ -5649,6 +5667,11 @@ BOOST_AUTO_TEST_CASE( continuous_highway_beats_a_comparable_transfer_plan )
 	BotSFJ_RoutePaths(3, edges, seeds, cost, first);
 	BOOST_CHECK_GT(cost[2], cost[0]);
 	BOOST_CHECK_EQUAL(first[2], 1);
+	const float highwayScore = 950 + BotSFJ_ContinuousRouteBonus(950, 6, 2400, 550, 0.9f);
+	const float shortChainScore = 1100 + BotSFJ_ContinuousRouteBonus(1100, 2, 800, 550, 1.0f);
+	BOOST_CHECK_GT(highwayScore, shortChainScore);
+	BOOST_CHECK_LT(950 + BotSFJ_ContinuousRouteBonus(950, 6, 2400, 360, 0.9f), shortChainScore);
+	BOOST_CHECK_EQUAL(BotSFJ_ContinuousRouteBonus(950, 6, -100, 550, 1.0f), 0.0f);
 	BOOST_CHECK_CLOSE(BotSFJ_FlagLandingBonus(8, 0, 64, 4000, 1, 1),
 		BotSFJ_FlagLandingBonus(2, 0, 64, 4000, 1, 1), 0.001f);
 	BOOST_CHECK_GT(BotSFJ_RouteTransferCost(500, 500), transfer);

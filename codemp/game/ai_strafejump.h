@@ -421,22 +421,28 @@ static inline int BotSFJ_TrackSpeedToggled(int startActive, int active)
 /*
  * Human routes are trusted over the bot's own arc prediction (walls, ledges,
  * off-corridor landings). Trust is lost only after a death on the route, or
- * after repeated real failures to carry speed through the hop that outnumber
- * its successful passes. Recorded evidence decides: see
+ * after repeated real failures at least 1.5 times its successful passes.
+ * Recorded evidence decides: see
  * BotSFJ_TrustOverridesPrediction for predicted hazards.
  */
 #define BOT_SFJ_TRACK_TRUST_FAILURES 5
+#define BOT_SFJ_HOP_BLOCK_FAILURES 3
+
+static inline int BotSFJ_HopFailuresDominate(int failures, int passes, int minimum)
+{
+	/* failures >= ceil(1.5 * passes), without multiplying the counters. */
+	return failures >= minimum && failures - passes >= passes / 2 + passes % 2;
+}
 
 static inline int BotSFJ_TrackHopTrusted(int deaths, int failures, int passes)
 {
-	return deaths <= 0 &&
-		(failures < BOT_SFJ_TRACK_TRUST_FAILURES || failures <= passes);
+	return deaths <= 0 && !BotSFJ_HopFailuresDominate(failures, passes, BOT_SFJ_TRACK_TRUST_FAILURES);
 }
 
 static inline int BotSFJ_TrackHopTrustedForSpeed(int deaths, int failures, int passes, int speed)
 {
 	if (speed)
-		return deaths <= 0 && (failures < 2 || failures <= passes);
+		return deaths <= 0 && !BotSFJ_HopFailuresDominate(failures, passes, 2);
 	return BotSFJ_TrackHopTrusted(deaths, failures, passes);
 }
 
@@ -563,15 +569,23 @@ static inline int BotSFJ_HopRetryDelayForSpeed(int failures, int lethal, int spe
 
 static inline int BotSFJ_HopEvidenceRetryDelay(int failures, int passes, int lethal, int speed)
 {
-	const int excessFailures = !lethal && passes > 0 ? failures - passes : failures;
+	int threshold;
 
-	return BotSFJ_HopRetryDelayForSpeed(excessFailures > 0 ? excessFailures : 1, lethal, speed);
+	if (lethal)
+		return BotSFJ_HopRetryDelayForSpeed(failures, 1, speed);
+	if (!BotSFJ_HopFailuresDominate(failures, passes, BOT_SFJ_HOP_BLOCK_FAILURES))
+		return 0;
+	threshold = passes + passes / 2 + passes % 2;
+	if (threshold < BOT_SFJ_HOP_BLOCK_FAILURES)
+		threshold = BOT_SFJ_HOP_BLOCK_FAILURES;
+	return BotSFJ_HopRetryDelayForSpeed(failures - threshold + 1, 0, speed);
 }
 
 static inline float BotSFJ_HopReliability(int failures, int passes)
 {
-	return 0.25f + 0.75f *
-		((float)passes + 1.0f) / ((float)passes + 1.0f + (float)failures);
+	const float credit = 1.5f * passes + 1.0f;
+
+	return 0.25f + 0.75f * credit / (credit + failures);
 }
 
 static inline void BotSFJ_HopEvidenceBound(int *failures, int *passes)
@@ -592,15 +606,17 @@ static inline void BotSFJ_HopEvidenceNote(int *failures, int *passes, int succes
 		++*failures;
 }
 
-static inline void BotSFJ_RepairHopEvidence(int failures, int passes, int deaths,
-	int *recentFailures, int *recentPasses)
+#define BOT_SFJ_ROUTE_STATS_VERSION 13
+
+static inline void BotSFJ_MigrateHopEvidence(int version, int *deaths, int *recentFailures,
+	int *recentPasses)
 {
-	if (!deaths && passes > 0 && passes >= failures && *recentFailures > *recentPasses)
+	if (version < BOT_SFJ_ROUTE_STATS_VERSION)
 	{
-		*recentFailures = failures;
-		*recentPasses = passes;
-		BotSFJ_HopEvidenceBound(recentFailures, recentPasses);
+		*deaths = 0;
+		*recentFailures = 0;
 	}
+	BotSFJ_HopEvidenceBound(recentFailures, recentPasses);
 }
 
 /* A failed suffix must not erase the value of the hops before it. */
@@ -3348,11 +3364,9 @@ static inline int BotSFJ_BacktrackAllowed(int backtrack, int goalVisible, float 
  * Recent passes can outweigh ordinary failures, but never a recorded lethal
  * traversal. Old successes must not immunize a failing suffix forever.
  */
-#define BOT_SFJ_HOP_BLOCK_FAILURES 3
-
 static inline int BotSFJ_HopBlocked(int deaths, int failures, int passes)
 {
-	return deaths > 0 || (failures >= BOT_SFJ_HOP_BLOCK_FAILURES && failures > passes);
+	return deaths > 0 || BotSFJ_HopFailuresDominate(failures, passes, BOT_SFJ_HOP_BLOCK_FAILURES);
 }
 
 /* Marker 0 means untrimmed; marker n+1 saves an exclusive usable hop count n. */
@@ -3468,6 +3482,11 @@ static inline float BotSFJ_RouteSuccessRate(int attempts, int interrupted, int c
 	return ((float)completions + 1.0f) / ((float)resolved + (float)deaths + 2.0f);
 }
 
+static inline float BotSFJ_RouteDeathPreference(int deaths, int cleanFinishes)
+{
+	return deaths <= 0 ? 1.0f : cleanFinishes > 0 ? 0.5f : 0.2f;
+}
+
 /*
  * Route selection bias from the bots' own tally. A flag carrier, or
  * bot_strafetrial 0, exploits: proven routes win by their success rate and a
@@ -3544,6 +3563,17 @@ static inline int BotSFJ_ChainGainEnough(float goalGain, int goalLink)
 static inline int BotSFJ_Highway(int hops, float displacement, float average, float peak)
 {
 	return hops >= 4 && displacement >= 3000.0f && average >= 450.0f && peak >= 600.0f;
+}
+
+/* Favor progress made in the first uninterrupted recording, not the length of the chain. */
+static inline float BotSFJ_ContinuousRouteBonus(float score, int hops, float progress,
+	float speed, float reliability)
+{
+	if (!(score > 0.0f) || hops < 4 || !(progress > 0.0f) || !(speed > 350.0f))
+		return 0.0f;
+	return 0.30f * BotSFJ_ClampSetting(progress, 0.0f, 2400.0f) *
+		BotSFJ_ClampSetting((speed - 350.0f) / 250.0f, 0.0f, 1.0f) *
+		BotSFJ_ClampSetting(reliability, 0.0f, 1.0f);
 }
 
 static inline float BotSFJ_HighwayTrialBonus(float score, int trial, int carrying,

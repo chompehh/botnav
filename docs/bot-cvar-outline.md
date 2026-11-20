@@ -703,9 +703,9 @@ Only observed traversal deaths, repeated corroborated collisions and sustained f
 
 **Route end markers.** Only an observed traversal death (falling, trigger_hurt,
 lava or slime) permanently shortens a route to the preceding landing.
-Nonlethal failures cause a retry cooldown and reduce preference, not permanent
-truncation. Passes offset failures equally in reliability and nonlethal cooldown
-escalation. Markers use only the recording's matching Speed context; normal and
+Nonlethal failures reduce preference but only pause a hop after at least three
+recent failures and at least 1.5 failures per recent pass. Passes count 1.5×
+in reliability. Markers use only the recording's matching Speed context; normal and
 Speed results cannot shorten one another. Connections and goal scoring use the
 usable prefix, and reaching it counts as a completion. Stale nonlethal markers
 are cleared automatically, restoring the original suffix and rebuilding links.
@@ -714,12 +714,12 @@ for recordings outside the current export.
 
 **Similar-route rejection.** Starts within 160 units and ends within 256 units
 are compared within the available range. A death, or repeated recent failures
-that outweigh passes, permits preferring a demonstrably better available
+at least 1.5× as numerous as passes, permits preferring a demonstrably better available
 alternative. One failed last attempt no longer discredits a mostly successful
 route. Level 2 debug prints the skip as `[SFJ reject]`.
 
-Normal hops lose trust after five recent failures that outnumber passes. Force
-Speed hops lose trust after two recent failures that outnumber passes. Speed
+Normal hops lose trust after five recent failures; Force Speed hops after two.
+In both cases, failures must be at least 1.5× as numerous as passes. Speed
 retry delays remain doubled (capped at five minutes), and reliability penalties
 are squared. Successful retries restore nonlethal trust/preference; recorded
 deaths retain strict prediction checks. Speed and normal evidence stay separate.
@@ -895,6 +895,10 @@ Route choice and chaining:
 - Every inter-route transfer adds a bounded setup/momentum cost (96-288
   walking-equivalent units, depending on gap and entry speed). A continuous
   highway therefore wins close choices over a chain of tiny recordings.
+  Beyond trials, a fast first recording of at least four usable hops earns a
+  bounded bonus based on how far that recording moves the bot toward the goal
+  (or forward with no goal), scaled by speed and reliability. Later handoffs
+  do not inflate that bonus.
   Short feeders, goal links and safe recovery connections remain available;
   direct highways receive the same exploration credit as feeder plans.
 - One-/two-hop connectors that reduce distance to the current objective receive
@@ -938,7 +942,7 @@ Route choice and chaining:
 - Bot outcomes are kept in `botroutes/<map>.botroute_stats`, matched by recording
   ID, creation time, start and last landing, and execution speed context so
   re-exports retain history without contaminating different recordings.
-  The versioned format begins with `botroute_stats 12`; each route stores start x/y/z, last landing x/y/z,
+  The versioned format begins with `botroute_stats 13`; each route stores start x/y/z, last landing x/y/z,
   attempts, completions, stalls, interruptions, measured distance, duration in
   milliseconds, speed integral and reference-speed integral, speed context,
   traversal deaths, unsafe-arc rejections, and 32 groups of hop failures, passes,
@@ -953,13 +957,16 @@ Route choice and chaining:
   capture time in milliseconds.
   Version 12 keeps the same fields and migrates older positive-evidence recent
   counters; only death evidence now retains a permanent terminal marker.
+  Version 13 clears old hop deaths, recent failures, end markers, and
+  whole-route failure/loop penalties once so the original recordings can be
+  retried. It keeps passes, successful run counts and movement calibration,
+  and lifetime hop failure counts for diagnosis.
   Context 0 is normal movement; 1-3 are active Force Speed levels; -1 preserves
   unknown legacy history. Legacy eight-field and versions 2-10
   remain readable. Version 3 files are migrated once: hop failures, stalls
   and unsafe-arc counts (inflated by the earlier arc-prediction rejections) are
-  cleared, while deaths, passes and completions are kept. Older formats cannot
-  identify which hop caused a death, so those deaths are conservatively retained
-  for every hop; new deaths are localized to the launched hop. Lifetime counters
+  cleared, while passes and completions are kept. New deaths are localized to
+  the launched hop. Lifetime hop counters
   remain available for diagnosis, while bounded recent evidence drives preferences.
   Joining mid-route or chaining in counts as an attempt.
   Interrupted attempts are excluded from the completion-rate denominator.
@@ -979,14 +986,13 @@ Route choice and chaining:
   collisions (the bot copies the human's yaw after the second if it is losing speed) and ends on the
   third after landing, retaining airborne steering; replay on a trusted hop is abandoned only at 1.5x the drift for twice
   as long. A hop loses that trust after a death on it (falling, `trigger_hurt`,
-  lava, slime), or after five or more real
-  failures (stalls, corroborated collisions, hazards) that outnumber its recent
-  passes; untrusted hops and improvised jumps keep every hazard check. Drifting off
-  the human line or a wall-only arc prediction is not a failure. All observed
-  failures receive a shared cooldown, even while the hop remains trusted:
-  initially 15 seconds for a failed traversal or 60 seconds for lethal traversal,
-  doubling with excess nonlethal failures over passes (raw failures for lethal
-  outcomes), up to five minutes. Recent evidence
+  lava, slime), or after five or more real failures (two with Force Speed)
+  at least 1.5× as numerous as recent passes; untrusted hops and improvised jumps
+  keep every hazard check. Drifting off the human line or a wall-only arc
+  prediction is not a failure. Nonlethal cooldowns start at 15 seconds (30 with
+  Force Speed) once the hop reaches both three recent failures and the 1.5×
+  threshold, and double per excess failure up to five minutes. These temporary
+  timers are not restored on map load. Recent evidence
   persists across maps/restarts but recovers as successful passes accumulate;
   lifetime stall and repeated whole-route noncompletion penalties are not stacked.
   Acquisition failures and interruptions do not count as launched-hop failures.
@@ -995,8 +1001,10 @@ Route choice and chaining:
   Death markers survive reload and the network reconnects from that endpoint.
   Reaching this learned endpoint
   is a completion of the usable prefix, not another failed hop. Temporary
-  cooldown handoffs remain interruptions. Existing death evidence is retained;
-  older formats cannot distinguish historical false momentum deaths.
+  cooldown handoffs remain interruptions. After a new traversal death, routes
+  without evidence of a clean full-length finish keep only 20% of their
+  selection score; routes with such evidence keep 50%. The death also makes
+  chaining into that recording more expensive.
   Similar-route comparisons
   use the available entry/end and evidence within that range, in the intended
   post-toggle Speed context. Takeoff waits for the engine to confirm the recorded
