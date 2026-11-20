@@ -5273,7 +5273,7 @@ BOOST_AUTO_TEST_CASE( routes_can_make_progress_inside_flag_capture_approaches )
 	BOOST_CHECK_GT( BotSFJ_GoalRouteScore(1000.0f, 200.0f, 100.0f), 0.0f );
 }
 
-BOOST_AUTO_TEST_CASE( trusted_replay_tolerates_more_drift )
+BOOST_AUTO_TEST_CASE( trusted_replay_never_abandons_for_drift_alone )
 {
 	const float dev = BOT_SFJ_REPLAY_ABANDON_DEVIATION * 1.2f;
 
@@ -5281,10 +5281,42 @@ BOOST_AUTO_TEST_CASE( trusted_replay_tolerates_more_drift )
 	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(dev, BOT_SFJ_REPLAY_ABANDON_MS, 1, 1) );
 	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(BOT_SFJ_REPLAY_ABANDON_DEVIATION * 2.0f,
 		BOT_SFJ_REPLAY_ABANDON_MS, 1, 1) );
-	BOOST_CHECK( BotSFJ_ReplayAbandonTrusted(BOT_SFJ_REPLAY_ABANDON_DEVIATION * 2.0f,
+	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(BOT_SFJ_REPLAY_ABANDON_DEVIATION * 2.0f,
 		BOT_SFJ_REPLAY_ABANDON_MS * 2, 1, 1) );
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayAbandonDeviation(1, 1), BOT_SFJ_REPLAY_ABANDON_DEVIATION * 1.5f, 0.01 );
-	BOOST_CHECK_CLOSE( BotSFJ_ReplayAbandonDeviation(0, 0), BOT_SFJ_REPLAY_LOOSE_ABANDON_DEVIATION, 0.01 );
+	BOOST_CHECK( !BotSFJ_ReplayAbandonTrusted(2000.0f, 4000, 0, 1) );
+	BOOST_CHECK( BotSFJ_ReplayAbandonTrusted(2000.0f, 4000, 0, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( replay_jump_release_uses_raw_input_and_each_hops_own_takeoff )
+{
+	bot_sfj_replay_sample_t samples[8] = {};
+	const int times[] = {100, 110, 120, 450, 480, 500, 510, 520};
+
+	for (int i = 0; i < 8; ++i)
+	{
+		samples[i].timeMs = times[i];
+		samples[i].node = i >= 5;
+		samples[i].up = 127;
+		samples[i].flags = BOT_SFJ_REPLAY_FLAG_JUMP;
+	}
+	samples[0].flags |= BOT_SFJ_REPLAY_FLAG_GROUNDED;
+	samples[4].up = 0; // Raw release wins even if pmove still reports jump held.
+	samples[5].flags |= BOT_SFJ_REPLAY_FLAG_GROUNDED;
+	samples[7].up = 0;
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayJumpReleaseMs(samples, 8, 0), 370 );
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayJumpReleaseMs(samples, 8, 1), 10 );
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayJumpReleaseMs(samples, 7, 1), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayJumpReleaseMs(nullptr, 0, 0), -1 );
+	samples[3].flags |= BOT_SFJ_REPLAY_FLAG_WALLRUN;
+	BOOST_CHECK_EQUAL( BotSFJ_ReplayJumpReleaseMs(samples, 8, 0), -1 );
+}
+
+BOOST_AUTO_TEST_CASE( edit_route_direction_requires_clear_progress_toward_one_base )
+{
+	BOOST_CHECK_EQUAL( BotSFJ_EditFlagDirection(140.0f, -70.0f), -1 );
+	BOOST_CHECK_EQUAL( BotSFJ_EditFlagDirection(-70.0f, 140.0f), 1 );
+	BOOST_CHECK_EQUAL( BotSFJ_EditFlagDirection(140.0f, 100.0f), 0 );
+	BOOST_CHECK_EQUAL( BotSFJ_EditFlagDirection(20.0f, -100.0f), 0 );
 }
 
 BOOST_AUTO_TEST_CASE( human_yaw_is_copied_only_for_turns_or_trouble )

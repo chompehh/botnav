@@ -6618,7 +6618,27 @@ static void BotSFJ_EditMarker(int clientNum, const float *point, int number, int
 	event->r.singleClient = clientNum;
 }
 
-static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *route, qboolean print)
+static int BotSFJ_EditRouteDirection(const bot_sfj_track_route_t *route)
+{
+	const float *end;
+
+	if ((level.gametype != GT_CTF && level.gametype != GT_CTY) || route->nodeCount <= 0 ||
+		!eFlagRed || !eFlagRed->inuse || (eFlagRed->flags & FL_DROPPED_ITEM) ||
+		!eFlagBlue || !eFlagBlue->inuse || (eFlagBlue->flags & FL_DROPPED_ITEM))
+		return 0;
+	end = route->node[route->nodeCount - 1];
+	return BotSFJ_EditFlagDirection(
+		Distance(route->start, eFlagRed->s.pos.trBase) - Distance(end, eFlagRed->s.pos.trBase),
+		Distance(route->start, eFlagBlue->s.pos.trBase) - Distance(end, eFlagBlue->s.pos.trBase));
+}
+
+static int BotSFJ_EditRouteColor(int direction, int neutral)
+{
+	return direction < 0 ? 0x000000ff : direction > 0 ? 0x00ff8000 : neutral;
+}
+
+static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *route,
+	int direction, qboolean print)
 {
 	int context, node, successes = 0, failures = 0, interrupted = 0, worst = -1, missing = 0;
 	int hopFailures[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
@@ -6656,10 +6676,12 @@ static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *rou
 	else
 		Q_strncpyz(problem, "No recorded hop failures", sizeof(problem));
 	Com_sprintf(summary, sizeof(summary),
-		"^5Route ID %d^7: %d landings | recorded max %.0f ups\n"
+		"^5Route ID %d^7: %d landings | recorded max %.0f ups%s\n"
 		"Bot results (%d/4 speed contexts)\n%d successes / %d failed or stalled / %d interrupted\n"
 		"%s\nLanding numbers = hop numbers; per-hop results in console",
-		route->routeId, route->nodeCount, route->maxSpeed, 4 - missing, successes, failures, interrupted, problem);
+		route->routeId, route->nodeCount, route->maxSpeed,
+		direction < 0 ? " | ^1toward red flag^7" : direction > 0 ? " | ^4toward blue flag^7" : "",
+		4 - missing, successes, failures, interrupted, problem);
 	trap->SendServerCommand(clientNum, va("cp \"%s\"", summary));
 	if (!print)
 		return;
@@ -6719,7 +6741,7 @@ static void BotSFJ_EditFrame(void)
 		if (!viewers[clientNum].notified)
 		{
 			trap->SendServerCommand(clientNum,
-				va("print \"[bot_editmode] %d loaded routes. Green markers = route starts/IDs; cyan = landings/hop numbers. Stand near a start to inspect it; face its direction to separate overlapping starts.\n\"",
+				va("print \"[bot_editmode] %d loaded routes. Red/blue = toward that flag base; neutral routes have green starts and cyan landings. Stand near a numbered start to inspect it; face its direction to separate overlapping starts.\n\"",
 					g_botSfjTrackRouteCount));
 			if (!g_botSfjTrackRouteCount)
 				trap->SendServerCommand(clientNum,
@@ -6750,7 +6772,8 @@ static void BotSFJ_EditFrame(void)
 			route = &g_botSfjTrackRoutes[viewers[clientNum].startCursor++];
 			if (DistanceSquared(viewer->client->ps.origin, route->start) > 2048.0f * 2048.0f)
 				continue;
-			BotSFJ_EditMarker(clientNum, route->start, route->routeId, 0x0000ff00);
+			BotSFJ_EditMarker(clientNum, route->start, route->routeId,
+				BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x0000ff00));
 			drawn++;
 		}
 		if (best < 0)
@@ -6771,20 +6794,21 @@ static void BotSFJ_EditFrame(void)
 		viewers[clientNum].recordedAt = route->recordedAt;
 		if (changed || level.time >= viewers[clientNum].nextInfo)
 		{
-			BotSFJ_EditRouteInfo(clientNum, route, changed);
+			BotSFJ_EditRouteInfo(clientNum, route, BotSFJ_EditRouteDirection(route), changed);
 			viewers[clientNum].nextInfo = level.time + 1000;
 		}
 		for (i = 0; i < route->nodeCount && i < 2; i++)
 		{
 			const int node = viewers[clientNum].hopCursor++ % route->nodeCount;
+			const int color = BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x00ffff00);
 			vec3_t from, to;
 
 			VectorCopy(node ? route->node[node - 1] : route->start, from);
 			VectorCopy(route->node[node], to);
 			from[2] += 16.0f;
 			to[2] += 16.0f;
-			BotSFJ_EditLine(clientNum, from, to, 0x00ffff00);
-			BotSFJ_EditMarker(clientNum, route->node[node], node + 1, 0x00ffff00);
+			BotSFJ_EditLine(clientNum, from, to, color);
+			BotSFJ_EditMarker(clientNum, route->node[node], node + 1, color);
 		}
 	}
 }
@@ -7085,6 +7109,9 @@ void BotSFJ_ResolvedMotion(int clientNum, int previousGround, int upmove)
 		bs->sfjRouteHopLaunched = qtrue;
 		bs->sfjRouteLaunchedNode = node;
 		bs->sfjRouteLaunchTime = level.time;
+		bs->sfjRouteLaunchCmdTime = ps->commandTime;
+		bs->sfjRouteJumpReleaseMs = BotSFJ_ReplayJumpReleaseMs(
+			BotSFJ_RouteSamples(bs->sfjRoute - 1), route->sampleCount, node);
 		bs->sfjPendingHopTime = 0;
 		if (!node && route->entryKind != STRAFE_ROUTE_ENTRY_NORMAL)
 		{
@@ -7491,6 +7518,7 @@ static qboolean BotSFJ_RouteSpeedFits(const bot_state_t *bs, const playerState_t
 static qboolean BotSFJ_HopAvailable(bot_state_t *bs, const playerState_t *ps,
 	const bot_sfj_track_route_t *route, int node)
 {
+	extern float forceJumpHeightMax[];
 	const int context = BotSFJ_RouteNodeContext(route, ps, node);
 	const int index = route->stat[context];
 	const bot_sfj_hop_style_t *style = &route->nodeStyle[node];
@@ -7503,7 +7531,8 @@ static qboolean BotSFJ_HopAvailable(bot_state_t *bs, const playerState_t *ps,
 		ps->fd.forcePowerLevel[FP_LEVITATION] <= FORCE_LEVEL_0 ||
 		ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_3 ||
 		ps->fd.forcePower <= 0 ||
-		style->forceHeight > forceJumpHeight[ps->fd.forcePowerLevel[FP_LEVITATION]]))
+		/* Recorded height is the apex, not the height at which boost stops. */
+		style->forceHeight > forceJumpHeightMax[ps->fd.forcePowerLevel[FP_LEVITATION]]))
 		return qfalse;
 	if (index >= 0 && g_botSfjRouteStats[index].hopDeaths[node] > 0)
 		return qfalse;
@@ -9643,8 +9672,8 @@ static void BotSFJ_ResetReplay(bot_state_t *bs, int routeIndex, int entry)
 /*
  * Trust bounds: a bot that drifts off the human's line, or loses the momentum
  * the human kept here, keeps the route and steers the hop with the corner
- * controller until it is back on the line. Only a sustained, very large drift
- * gives the route up, and drift never counts against the human's hop. Ground
+ * controller until it is back on the line. Only untrusted hops can be
+ * abandoned for drift alone, and drift never counts against the hop. Ground
  * repositioning for a new circle jump, approaches and recorded wallruns are exempt.
  */
 static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *ps,
@@ -9684,7 +9713,8 @@ static qboolean BotSFJ_ReplayWithinBounds(bot_state_t *bs, const playerState_t *
 		trusted = !stat || BotSFJ_TrackHopTrustedForSpeed(stat->hopDeaths[hop],
 			stat->hopRecentFailures[hop], stat->hopRecentPasses[hop], stat->speedContext > 0);
 	}
-	if (BotSFJ_ReplayAbandonTrusted(bs->sfjReplayDeviation, offMs, haveSamples, trusted))
+	if (BotSFJ_ReplayAbandonTrusted(bs->sfjReplayDeviation, offMs, haveSamples,
+		bot_strafe_trusthuman.integer && trusted))
 	{
 		BotSFJ_DebugInfo(bs, va("far off the human line on route %i node %i: %.0f units for %i ms; "
 			"giving the route up (not counted against the hop)",
@@ -10147,7 +10177,9 @@ static qboolean BotSFJ_GetTrackRouteCorridor(bot_state_t *bs, const playerState_
 				finished, fleeFrom, &entry);
 		if (next < 0)
 		{
-			BotSFJ_EndTrackRoute(bs, "recorded route complete, back to waypoints");
+			BotSFJ_EndTrackRoute(bs, end >= route->nodeCount ?
+				"recorded route complete, back to waypoints" :
+				"recorded route stopped at last usable landing, back to waypoints");
 			if (BotSFJ_SeekRouteStart(bs, ps, heading, fleeFrom, qfalse, direction, destination))
 				return qtrue;
 			return qfalse;
@@ -10871,10 +10903,6 @@ static qboolean BotSFJ_RouteHopTrusted(const bot_state_t *bs, const vec3_t route
 	if (bs->sfjRouteHopLaunched && bs->sfjRouteLaunchTrusted &&
 		g_entities[bs->client].client->ps.groundEntityNum == ENTITYNUM_NONE)
 		return qtrue;
-	/*
-	 * Drifting off the human's line does not cost trust: the hop still vouches
-	 * for its arc until the bot is so far off that the route is given up.
-	 */
 	if (bs->sfjRouteStat >= 0 && bs->sfjRouteStat < g_botSfjRouteStatCount)
 	{
 		stat = &g_botSfjRouteStats[bs->sfjRouteStat];
@@ -10883,8 +10911,12 @@ static qboolean BotSFJ_RouteHopTrusted(const bot_state_t *bs, const vec3_t route
 			stat->speedContext > 0))
 			return qfalse;
 	}
-	/* Sustained deviation is handled by ReplayWithinBounds, not a second trust veto. */
 	return qtrue;
+}
+
+static qboolean BotSFJ_SkipHopPrediction(const bot_state_t *bs, const vec3_t destination)
+{
+	return bot_strafe_trusthuman.integer && BotSFJ_RouteHopTrusted(bs, destination);
 }
 
 static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs)
@@ -10920,7 +10952,7 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	int initialTrial;
 	float initialHeight, initialYaw;
 
-	if (!forceRefresh && bs->sfjArcCheckedTime > 0 &&
+	if (!trustInput && !forceRefresh && bs->sfjArcCheckedTime > 0 &&
 		time >= bs->sfjArcCheckedTime &&
 		time - bs->sfjArcCheckedTime < BOT_SFJ_ARC_CACHE_MS &&
 		VectorCompare(bs->sfjArcDirection, routeDirection) &&
@@ -10928,7 +10960,7 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		bs->sfjArcSide == bs->sfjStrafeSide &&
 		bs->sfjArcStrafeOnly == bs->sfjStrafeOnly)
 	{
-		if (bs->sfjArcSpeedContext == BotSFJ_PlayerSpeedContext(ps))
+		if (!bs->sfjArcTrusted && bs->sfjArcSpeedContext == BotSFJ_PlayerSpeedContext(ps))
 			return bs->sfjArcSafe;
 	}
 	if (bs->sfjRoute && ps->groundEntityNum != ENTITYNUM_NONE && !bs->sfjRouteHopLaunched)
@@ -10954,6 +10986,14 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 				g_botSfjRouteStats[bs->sfjRouteStat].hopHoldHeight[bs->sfjRouteNode],
 				0.0f, forceJumpHeight[forceLevel]);
 	}
+	if (trustInput)
+	{
+		bs->sfjArcSafe = bs->sfjArcTrusted = qtrue;
+		bs->sfjArcHazard = bs->sfjArcBlocked = qfalse;
+		/* Do not leave a simulated-safe result behind when trust ends. */
+		bs->sfjArcCheckedTime = 0;
+		return qtrue;
+	}
 	bs->sfjArcSafe = BotSFJ_ArcIsSafe(bs, ps, routeDirection, routeDestination,
 		commandMsec, sliceMsec);
 	hazard = bs->sfjArcHazard;
@@ -10962,7 +11002,7 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 	initialTrial = bs->sfjTrialForceNode;
 	initialHeight = bs->sfjForceJumpTargetHeight;
 	initialYaw = bs->sfjHopYawOffset;
-	if (!bs->sfjArcSafe && !trustInput && bs->sfjRoute && ps->groundEntityNum != ENTITYNUM_NONE &&
+	if (!bs->sfjArcSafe && bs->sfjRoute && ps->groundEntityNum != ENTITYNUM_NONE &&
 		!bs->sfjRouteHopLaunched)
 	{
 		static const float offsets[] = {8.0f, -8.0f, 16.0f, -16.0f};
@@ -10999,7 +11039,7 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 				hazard = hazard || bs->sfjArcHazard;
 		}
 	}
-	if (!bs->sfjArcSafe && !trustInput && bs->sfjRoute && bs->sfjForceJumpHop &&
+	if (!bs->sfjArcSafe && bs->sfjRoute && bs->sfjForceJumpHop &&
 		(ps->groundEntityNum != ENTITYNUM_NONE ||
 		 ((ps->pm_flags & PMF_JUMP_HELD) && ps->velocity[2] > 0.0f)) &&
 		ps->fd.forcePowerLevel[FP_LEVITATION] > 0 &&
@@ -11032,7 +11072,7 @@ static qboolean BotSFJ_CachedArcIsSafe(bot_state_t *bs, const playerState_t *ps,
 		bs->sfjHopYawOffset = initialYaw;
 		hazard = initialHazard;
 	}
-	if (!bs->sfjArcSafe && !trustInput && !bs->sfjOwnsInput &&
+	if (!bs->sfjArcSafe && !bs->sfjOwnsInput &&
 		(bs->sfjPhase == BOT_SFJ_PHASE_OFF || bs->sfjPhase == BOT_SFJ_PHASE_ABORT ||
 		 bs->sfjPhase == BOT_SFJ_PHASE_PREPARE))
 	{
@@ -11098,9 +11138,8 @@ static qboolean BotSFJ_CirclePreparationIsSafe(bot_state_t *bs,
 		bs->sfjHopYawOffset, bs->sfjStrafeSide, time - bs->sfjPhaseTime,
 		bs->sfjBackward && bs->sfjIntent == BOT_SFJ_INTENT_RETREAT);
 
-	return !BotSFJ_GroundPredictionVetoes(
-		!BotSFJ_GroundWishIsSafe(bs, ps, wishYaw, commandMsec),
-		BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination), bot_strafe_trusthuman.integer);
+	return BotSFJ_SkipHopPrediction(bs, bs->sfjIntentDestination) ||
+		BotSFJ_GroundWishIsSafe(bs, ps, wishYaw, commandMsec);
 }
 
 /*
@@ -11941,8 +11980,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	airborneJump = (bs->sfjPhase == BOT_SFJ_PHASE_TAKEOFF ||
 		bs->sfjPhase == BOT_SFJ_PHASE_REJUMP ||
 		bs->sfjPhase == BOT_SFJ_PHASE_AIR) && ps->groundEntityNum == ENTITYNUM_NONE;
-	if (airborneJump ? (BotSFJ_FlightHazardVetoes(BotSFJ_HazardAhead(bs, ps),
-			BotSFJ_RouteHopTrusted(bs, routeDestination), bot_strafe_trusthuman.integer) ||
+	if (airborneJump ? (!BotSFJ_SkipHopPrediction(bs, routeDestination) &&
+		(BotSFJ_HazardAhead(bs, ps) ||
 		((fabsf(BotSFJ_AngleDelta(vectoyaw(routeDirection),
 			vectoyaw(bs->sfjArcDirection))) > 5.0f ||
 		 bs->sfjArcSpeedContext != BotSFJ_PlayerSpeedContext(ps) ||
@@ -11950,7 +11989,7 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 		 (bs->sfjArcDestination[0] - routeDestination[0]) * routeDirection[0] +
 		 (bs->sfjArcDestination[1] - routeDestination[1]) * routeDirection[1] > 16.0f) &&
 		 !BotSFJ_CachedArcIsSafe(bs, ps, routeDirection, routeDestination,
-			commandMsec, sliceMsec, level.time, qtrue))) :
+			commandMsec, sliceMsec, level.time, qtrue)))) :
 		((bs->sfjPhase != BOT_SFJ_PHASE_AIR && bs->sfjPhase != BOT_SFJ_PHASE_LANDING) &&
 		 !BotSFJ_CachedArcIsSafe(bs, ps, routeDirection, routeDestination,
 			commandMsec, sliceMsec, level.time, qfalse)))
@@ -12474,8 +12513,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		}
 	}
 	else if (nextPhase == BOT_SFJ_PHASE_AIR && !grounded &&
-		BotSFJ_FlightHazardVetoes(BotSFJ_HazardAhead(bs, ps),
-			BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination), bot_strafe_trusthuman.integer))
+		!BotSFJ_SkipHopPrediction(bs, bs->sfjIntentDestination) && BotSFJ_HazardAhead(bs, ps))
 	{
 		BotSFJ_DebugReject(bs, "hazard ahead in flight, releasing");
 		BotSFJ_NoteHopFailure(bs, qfalse, qtrue);
@@ -12556,6 +12594,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		return;
 	}
 	if (grounded && BotSFJ_JumpPressed(bs->sfjPhase, grounded) &&
+		!BotSFJ_SkipHopPrediction(bs, bs->sfjIntentDestination) &&
 		forwardMove > 0 && rightMove != 0 &&
 		ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_1)
 	{
@@ -12703,12 +12742,20 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	}
 	if (BotSFJ_JumpPressed(bs->sfjPhase, grounded))
 		candidate.actionflags |= ACTION_JUMP;
-	else if (bs->sfjRoute > 0 && !bs->sfjRouteApproach && (ps->pm_flags & PMF_JUMP_HELD) &&
-		BotSFJ_ForceJumpHold(hopStyle.forceJump, bs->sfjForceJumpTargetHeight,
-			bot_forcepowers.integer && !(g_forcePowerDisable.integer & (1 << FP_LEVITATION)) &&
-			ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 && ps->fd.forcePower > 0,
-			grounded, ps->origin[2] - ps->fd.forceJumpZStart, ps->velocity[2]))
-		candidate.actionflags |= ACTION_JUMP;	/* copy the human's force jump on this hop */
+	else if (!grounded && bs->sfjRoute > 0 && !bs->sfjRouteApproach && (ps->pm_flags & PMF_JUMP_HELD) &&
+		hopStyle.forceJump && bot_forcepowers.integer && !(g_forcePowerDisable.integer & (1 << FP_LEVITATION)) &&
+		ps->fd.forcePowerLevel[FP_LEVITATION] > FORCE_LEVEL_0 && ps->fd.forcePower > 0)
+	{
+		const int releaseMs = bs->sfjRouteHopLaunched && !bs->sfjTrialForceNode &&
+			BotSFJ_SkipHopPrediction(bs, bs->sfjIntentDestination) ?
+			bs->sfjRouteJumpReleaseMs : -1;
+
+		if (releaseMs >= 0 ?
+			ps->commandTime - bs->sfjRouteLaunchCmdTime + commandMsec < releaseMs :
+			BotSFJ_ForceJumpHold(1, bs->sfjForceJumpTargetHeight, 1, 0,
+				ps->origin[2] - ps->fd.forceJumpZStart, ps->velocity[2]))
+			candidate.actionflags |= ACTION_JUMP;
+	}
 	if (replaying ? (BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) &&
 			DotProduct(effectiveDirection, bs->sfjIntentDirection) < -0.1f) :
 		(!BotSFJ_EffectiveInputDirection(&candidate, effectiveDirection) ||
@@ -12721,8 +12768,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 	bs->sfjReplayForward = forwardMove > 0 ? 1 : (forwardMove < 0 ? -1 : 0);
 	bs->sfjReplayRight = rightMove > 0 ? 1 : (rightMove < 0 ? -1 : 0);
 	if (grounded && !circleJump && !BotSFJ_JumpPressed(bs->sfjPhase, grounded) &&
-		!BotSFJ_TrustOverridesPrediction(BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination),
-			qtrue, bot_strafe_trusthuman.integer) &&
+		!BotSFJ_SkipHopPrediction(bs, bs->sfjIntentDestination) &&
 		(BotSFJ_RouteHopTrusted(bs, bs->sfjIntentDestination) ?
 			BotSFJ_GroundWishHazard(bs, ps, commandYaw, commandMsec) :
 			!BotSFJ_GroundWishIsSafe(bs, ps, commandYaw, commandMsec)))
