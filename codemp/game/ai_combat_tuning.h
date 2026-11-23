@@ -2568,16 +2568,28 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 #define BOTNAV_CRUSHER_LETHAL_DAMAGE 20
 #define BOTNAV_CRUSHER_MAX_GAP 768.0f
 
+static inline int BotNav_VerticalElevator(int platform, int doorOrTrain,
+	float travelZ, float nextTravelZ)
+{
+	return platform || (doorOrTrain &&
+		(travelZ >= 1.0f || travelZ <= -1.0f || nextTravelZ >= 1.0f || nextTravelZ <= -1.0f));
+}
+
+static inline int BotNav_BeneathElevator(const float point[3], float halfWidth,
+	float height, const float moverMins[3], const float moverMaxs[3])
+{
+	const float top = point[2] + height;
+	return point[0] + halfWidth > moverMins[0] && point[0] - halfWidth < moverMaxs[0] &&
+		point[1] + halfWidth > moverMins[1] && point[1] - halfWidth < moverMaxs[1] &&
+		moverMins[2] >= top - 8.0f && moverMins[2] - top <= BOTNAV_CRUSHER_MAX_GAP;
+}
+
 static inline int BotNav_CrusherThreatensPoint(const float point[3], float halfWidth,
 	float height, const float moverMins[3], const float moverMaxs[3], float travelDown)
 {
 	const float top = point[2] + height;
 
-	if (travelDown <= 0.0f || point[0] + halfWidth <= moverMins[0] ||
-		point[0] - halfWidth >= moverMaxs[0] || point[1] + halfWidth <= moverMins[1] ||
-		point[1] - halfWidth >= moverMaxs[1])
-		return 0;
-	if (moverMins[2] < top - 8.0f || moverMins[2] - top > BOTNAV_CRUSHER_MAX_GAP)
+	if (travelDown <= 0.0f || !BotNav_BeneathElevator(point, halfWidth, height, moverMins, moverMaxs))
 		return 0;
 	return moverMins[2] - travelDown < top;
 }
@@ -2628,6 +2640,14 @@ static inline int BotCombat_SnipeWanted(float sniperange, int holdingDisruptor, 
 {
 	return sniperange > 0.0f && holdingDisruptor && hasAltAmmo && enemyVisible && grounded &&
 		!movementOwned && enemyDistance >= sniperange;
+}
+
+static inline int BotCombat_AirSnipeAllowed(int grounded, float verticalSpeed,
+	int alreadyStarted, int targetInView, int safeLanding, int movementOwned)
+{
+	return !movementOwned && (grounded || (safeLanding &&
+		(alreadyStarted ? verticalSpeed <= 40.0f :
+		(targetInView && verticalSpeed >= -80.0f && verticalSpeed <= 40.0f))));
 }
 
 static inline int BotCombat_DisruptorFullChargeMs(int tribes, int damageTweak)

@@ -361,6 +361,7 @@ typedef struct bot_state_s
 	int					jumpSwingNextTime; // next time a jump-swing may be rolled
 	int					snipeStage; // botcombat_snipe_stage_t
 	int					snipeStageTime;
+	qboolean			snipeAirborne;
 	int					saberThrowPhase;
 	int					saberThrowPhaseTime;
 	int					saberThrowSteerTime;

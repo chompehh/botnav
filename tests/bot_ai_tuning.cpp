@@ -2896,6 +2896,37 @@ BOOST_AUTO_TEST_CASE( descending_movers_threaten_only_players_beneath_them )
 	BOOST_CHECK( BotNav_CrusherLethal( 50, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( stationary_elevator_avoidance_does_not_change_crush_targeting )
+{
+	const float mins[3] = { 0.0f, 0.0f, 200.0f };
+	const float maxs[3] = { 128.0f, 128.0f, 216.0f };
+	const float under[3] = { 64.0f, 64.0f, 0.0f };
+	const float beside[3] = { 150.0f, 64.0f, 0.0f };
+	const float onTop[3] = { 64.0f, 64.0f, 216.0f };
+	BOOST_CHECK( BotNav_VerticalElevator( 1, 0, 0.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, -128.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, 0.0f, 128.0f ) );
+	BOOST_CHECK( !BotNav_VerticalElevator( 0, 1, 0.0f, 0.0f ) );
+	BOOST_CHECK( !BotNav_VerticalElevator( 0, 0, 128.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_BeneathElevator( under, 15.0f, 40.0f, mins, maxs ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 0.0f ) );
+	BOOST_CHECK( !BotNav_BeneathElevator( beside, 15.0f, 40.0f, mins, maxs ) );
+	BOOST_CHECK( !BotNav_BeneathElevator( onTop, 15.0f, 40.0f, mins, maxs ) );
+}
+
+BOOST_AUTO_TEST_CASE( airborne_sniping_starts_at_apex_and_preserves_safety )
+{
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 0, 20.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 0, -200.0f, 1, 1, 1, 0 ) );
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 1, 0.0f, 1, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 100.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, -100.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 0, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 1, 0, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, -200.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 1, 1, 1 ) );
+}
+
 BOOST_AUTO_TEST_CASE( gun_bots_fire_on_the_move_and_kite_melee_threats )
 {
 	BOOST_CHECK( BotCombat_GunMoveFireAllowed( 1, 1, 1, 1, 1, 900.0f ) );

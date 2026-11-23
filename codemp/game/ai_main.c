@@ -336,7 +336,8 @@ static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
 static qboolean BotCombat_GunMoveFire(bot_state_t *bs);
 static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly);
-static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time);
+static gentity_t *BotNav_ElevatorAbove(const vec3_t point);
+static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotCombat_ShouldKite(bot_state_t *bs);
 static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
@@ -1268,6 +1269,7 @@ BotUpdateInput
 void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bot_input_t bi;
 	int j;
+	qboolean elevatorEscape;
 	const qboolean holdCombat = BotNav_ShouldHoldCombat(bs);
 
 	//add the delta angles to the bot's current view angles
@@ -1359,7 +1361,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	BotCombat_FilterRangedInput(bs, &bi);
 	BotNav_FilterGapInput(bs, &bi, time);
 	BotNav_FilterCombatHazardInput(bs, &bi, time);
-	BotNav_ApplyCrusherEscape(bs, &bi, time);
+	elevatorEscape = BotNav_ApplyCrusherEscape(bs, &bi, time);
 	//respawn hack
 	if (bi.actionflags & ACTION_RESPAWN) {
 		if (bs->lastucmd.buttons & BUTTON_ATTACK) bi.actionflags &= ~(ACTION_RESPAWN|ACTION_ATTACK);
@@ -1368,15 +1370,18 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bs->sfjLastRandomUse = BotInputToUserCommand(&bi, &bs->lastucmd,
 		bs->cur_ps.delta_angles, time,
 		bs->noUseTime, bs->sfjOwnsInput || bs->navWallJumpUntil > time ? qfalse : qtrue);
-	BotFooting_Apply(bs, &bs->lastucmd, time);
-	if (!holdCombat && g_newBotAI.integer && !bs->sfjOwnsInput &&
+	if (!elevatorEscape)
+		BotFooting_Apply(bs, &bs->lastucmd, time);
+	if (!elevatorEscape && !holdCombat && g_newBotAI.integer && !bs->sfjOwnsInput &&
 		bs->navWallJumpUntil <= time)
 		NewBotAI_ApplyPostKickEscape(bs, &bs->lastucmd, time);
 	if (!holdCombat)
 		NewBotAI_FilterWeakVerticalAttack(bs, &bs->lastucmd, time);
-	if (!holdCombat)
+	if (!elevatorEscape && !holdCombat)
 		NewBotAI_ApplyJumpSwing(bs, &bs->lastucmd, time);
-	BotCombat_ApplyDisruptorSnipe(bs, &bs->lastucmd, time, holdCombat);
+	BotCombat_ApplyDisruptorSnipe(bs, &bs->lastucmd, time,
+		holdCombat || elevatorEscape || (bs->cur_ps.weapon == WP_DISRUPTOR &&
+		BotNav_ElevatorAbove(bs->cur_ps.origin) != NULL));
 	if (bs->sfjOwnsInput)
 	{
 		if (bs->lastucmd.upmove >= 10)
@@ -3649,11 +3654,39 @@ static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly
 	return NULL;
 }
 
-/*
- * A bot standing under a descending mover steps out of its footprint before it arrives.
- * Grounded only; picks the shortest clear, hazard-free exit.
- */
-static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time)
+/* Include resting and rising vertical lifts, independently of offensive crusher detection. */
+static gentity_t *BotNav_ElevatorAbove(const vec3_t point)
+{
+	int i;
+	gentity_t *active = BotNav_ActiveCrusherAt(point, qfalse);
+
+	if (active)
+		return active;
+	for (i = MAX_CLIENTS; i < level.num_entities; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+		qboolean platform, door, train;
+		float nextTravelZ = 0.0f;
+
+		if (!ent->inuse || !ent->r.linked || ent->s.eType != ET_MOVER ||
+			!(ent->r.contents & CONTENTS_SOLID) || !ent->classname)
+			continue;
+		platform = !Q_stricmp(ent->classname, "func_plat");
+		door = !Q_stricmp(ent->classname, "func_door");
+		train = !Q_stricmp(ent->classname, "func_train");
+		if (train && ent->nextTrain && ent->nextTrain->nextTrain)
+			nextTravelZ = ent->nextTrain->nextTrain->s.origin[2] - ent->nextTrain->s.origin[2];
+		if (!BotNav_VerticalElevator(platform, door || train,
+			ent->pos2[2] - ent->pos1[2], nextTravelZ))
+			continue;
+		if (BotNav_BeneathElevator(point, 15.0f, 40.0f, ent->r.absmin, ent->r.absmax))
+			return ent;
+	}
+	return NULL;
+}
+
+/* Grounded bots leave the nearest safe exit from an overhead elevator. */
+static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time)
 {
 	gentity_t *mover;
 	vec3_t dir, best, angles, point;
@@ -3661,13 +3694,48 @@ static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time
 	int i;
 
 	if (!bs || g_entities[bs->client].health <= 0 || bs->cur_ps.pm_type != PM_NORMAL ||
-		bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
-		!(mover = BotNav_ActiveCrusherAt(bs->cur_ps.origin, qfalse)))
-		return;
+		bs->cur_ps.groundEntityNum == ENTITYNUM_NONE)
+		return qfalse;
+	mover = BotNav_ElevatorAbove(bs->cur_ps.origin);
+	if (!mover)
+	{
+		vec3_t intended;
+		float bestAlignment = -2.0f;
+
+		if (bs->sfjOwnsInput || bs->navWallJumpUntil > time ||
+			(bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) ||
+			!BotSFJ_EffectiveInputDirection(bi, intended))
+			return qfalse;
+		VectorMA(bs->cur_ps.origin, 64.0f, intended, point);
+		if (!BotNav_ElevatorAbove(point))
+			return qfalse;
+		VectorClear(best);
+		for (i = 0; i < 8; i++)
+		{
+			float alignment;
+
+			VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
+			AngleVectors(angles, dir, NULL, NULL);
+			VectorMA(bs->cur_ps.origin, 64.0f, dir, point);
+			alignment = DotProduct(dir, intended);
+			if (alignment > bestAlignment && !BotNav_ElevatorAbove(point) &&
+				BotNav_CombatCandidateClear(bs, dir))
+			{
+				bestAlignment = alignment;
+				VectorCopy(dir, best);
+			}
+		}
+		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+			ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK);
+		VectorCopy(best, bi->dir);
+		bi->speed = bestAlignment > -2.0f ? 400.0f : 0.0f;
+		return qtrue;
+	}
 	VectorClear(best);
 	for (i = 0; i < 8; i++)
 	{
 		float step;
+		trace_t tr;
 
 		VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
 		AngleVectors(angles, dir, NULL, NULL);
@@ -3676,26 +3744,35 @@ static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time
 		for (step = 32.0f; step <= 512.0f; step += 32.0f)
 		{
 			VectorMA(bs->cur_ps.origin, step, dir, point);
-			if (!BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f, mover->r.absmin,
-				mover->r.absmax, 1.0e6f))
+			JP_Trace(&tr, bs->cur_ps.origin, g_entities[bs->client].r.mins,
+				g_entities[bs->client].r.maxs, point, bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
+			if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f ||
+				BotNav_PointLeadsToDeath(bs, bs->cur_ps.origin, dir, step, 1024.0f) ||
+				BotNav_CombatLandingUnsafe(bs, dir, step))
 				break;
-		}
-		if (step < bestDist)
-		{
-			bestDist = step;
-			VectorCopy(dir, best);
+			if (!BotNav_BeneathElevator(point, 15.0f, 40.0f, mover->r.absmin,
+				mover->r.absmax))
+			{
+				if (step < bestDist)
+				{
+					bestDist = step;
+					VectorCopy(dir, best);
+				}
+				break;
+			}
 		}
 	}
 	if (VectorLengthSquared(best) <= 0.0f)
-		return;
+		return qfalse;
 	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
-		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK);
+		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK | ACTION_JUMP | ACTION_DELAYEDJUMP);
 	VectorCopy(best, bi->dir);
 	bi->speed = 400.0f;
 	NewBotAI_CombatDecision(bs, "EDGE: crusher escape", 1000,
-		"under a descending mover (%s); leaving its footprint %.0fu away",
+		"under an elevator (%s); leaving its footprint %.0fu away",
 		mover->classname ? mover->classname : "mover", bestDist);
 	(void)time;
+	return qtrue;
 }
 
 static void BotNav_SelectHazardForce(bot_state_t *bs, bot_input_t *bi,
@@ -15327,14 +15404,51 @@ static void BotCombat_SetSnipeStage(bot_state_t *bs, int stage, int time)
 {
 	bs->snipeStage = stage;
 	bs->snipeStageTime = time;
+	if (stage == BOTCOMBAT_SNIPE_OFF)
+		bs->snipeAirborne = qfalse;
+}
+
+/* Check the ballistic path before surrendering air steering to the scope. */
+static qboolean BotCombat_AirSnipeLandingSafe(bot_state_t *bs)
+{
+	const playerState_t *ps = &bs->cur_ps;
+	vec3_t end, dir;
+	trace_t tr;
+	float gravity, drop, duration, distance, step, speed;
+
+	VectorCopy(ps->origin, end);
+	end[2] -= 2048.0f;
+	JP_Trace(&tr, ps->origin, g_entities[bs->client].r.mins,
+		g_entities[bs->client].r.maxs, end, bs->client,
+		MASK_PLAYERSOLID | CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP, qfalse, 0, 0);
+	if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f ||
+		(tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)))
+		return qfalse;
+	gravity = (float)ps->gravity;
+	if (gravity <= 0.0f)
+		return qfalse;
+	drop = ps->origin[2] - tr.endpos[2];
+	duration = (ps->velocity[2] + sqrtf(ps->velocity[2] * ps->velocity[2] +
+		2.0f * gravity * drop)) / gravity;
+	if (duration < 0.0f || duration > 2.0f)
+		return qfalse;
+	VectorSet(dir, ps->velocity[0], ps->velocity[1], 0.0f);
+	speed = VectorNormalize(dir);
+	distance = speed * duration;
+	for (step = 0.0f; step < distance; step += 64.0f)
+		if (BotNav_PointLeadsToDeath(bs, ps->origin, dir, step, 2048.0f) ||
+			BotNav_CombatLandingUnsafe(bs, dir, step))
+			return qfalse;
+	return !BotNav_PointLeadsToDeath(bs, ps->origin, dir, distance, 2048.0f) &&
+		!BotNav_CombatLandingUnsafe(bs, dir, distance);
 }
 
 /*
 ==============
 BotCombat_ApplyDisruptorSnipe
 
-At range a disruptor bot taps alt to zoom, lets the zoom lock, then holds attack while
-standing still (the engine only charges a zoomed shot without movement input). A fully
+At range a disruptor bot taps alt to zoom, lets the zoom lock, then holds attack without
+movement input. It can also begin near the apex of a safe, unowned jump. A fully
 charged shot is released once the aim trace is on the enemy's head, or at the timeout.
 It unzooms when the enemy is lost, closes in, or movement is needed.
 ==============
@@ -15343,7 +15457,8 @@ static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int 
 {
 	const playerState_t *ps;
 	gentity_t *enemy;
-	qboolean want;
+	qboolean want, grounded, safeLanding, inView, movementOwned;
+	vec3_t toEnemy, forward;
 	int fullMs;
 
 	if (!bs || !ucmd || !g_entities[bs->client].client)
@@ -15353,18 +15468,37 @@ static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int 
 	if (ps->weapon != WP_DISRUPTOR || g_entities[bs->client].health <= 0)
 	{
 		bs->snipeStage = BOTCOMBAT_SNIPE_OFF;
+		bs->snipeAirborne = qfalse;
 		return;
+	}
+	grounded = ps->groundEntityNum != ENTITYNUM_NONE;
+	movementOwned = bs->sfjOwnsInput || holdCombat || bs->navWallJumpUntil > time ||
+		bs->sfjWallRunStage || bs->sfjRouteWallStage || bs->navHazardUntil > time;
+	safeLanding = grounded || (!movementOwned && ps->velocity[2] <= 40.0f &&
+		(bs->snipeAirborne || ps->velocity[2] >= -80.0f) &&
+		BotCombat_AirSnipeLandingSafe(bs));
+	inView = qfalse;
+	if (enemy && enemy->client && enemy->health > 0 && bs->frame_Enemy_Vis)
+	{
+		VectorSubtract(enemy->client->ps.origin, ps->origin, toEnemy);
+		toEnemy[2] += enemy->client->ps.viewheight - ps->viewheight;
+		VectorNormalize(toEnemy);
+		AngleVectors(ps->viewangles, forward, NULL, NULL);
+		inView = DotProduct(toEnemy, forward) >= 0.7071f;
 	}
 	want = BotCombat_SnipeWanted(bot_disruptor_sniperange.value, qtrue,
 		ps->ammo[weaponData[WP_DISRUPTOR].ammoIndex] >= weaponData[WP_DISRUPTOR].altEnergyPerShot,
 		enemy && enemy->client && enemy->health > 0 && bs->frame_Enemy_Vis,
-		ps->groundEntityNum != ENTITYNUM_NONE,
-		bs->sfjOwnsInput || holdCombat || bs->navWallJumpUntil > time,
+		BotCombat_AirSnipeAllowed(grounded, ps->velocity[2], bs->snipeAirborne,
+			inView, safeLanding, movementOwned), movementOwned,
 		bs->frame_Enemy_Len) ? qtrue : qfalse;
 	if (bs->snipeStage == BOTCOMBAT_SNIPE_OFF)
 	{
 		if (want && ps->zoomMode == 0 && ps->weaponstate == WEAPON_READY && ps->weaponTime <= 0)
+		{
+			bs->snipeAirborne = !grounded;
 			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_ZOOM, time);
+		}
 		else if (!want && ps->zoomMode == 1 && ps->zoomLocked)
 			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
 		else
