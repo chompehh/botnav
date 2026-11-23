@@ -2875,6 +2875,53 @@ BOOST_AUTO_TEST_CASE( saber_idle_footing_responds_to_strafe_controls_without_cha
 		NewBotAI_SaberFootingStrafeMs( 10, 100, 900, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( jump_swings_never_use_dfa_input )
+{
+	// Strong stance, forward, no strafe, attack while airborne is the DFA trigger.
+	BOOST_CHECK( NewBotAI_InputCouldStartDFA( 1, 127, 0, 1, 1 ) );
+	// Strafe-only jump swings and grounded presses cannot start one.
+	BOOST_CHECK( !NewBotAI_InputCouldStartDFA( 1, 0, 127, 1, 1 ) );
+	BOOST_CHECK( !NewBotAI_InputCouldStartDFA( 1, 127, 0, 1, 0 ) );
+	// Late air attack waits for the rise to slow below the DFA speed.
+	BOOST_CHECK( !NewBotAI_JumpSwingAirAttackReady( 1, 225.0f ) );
+	BOOST_CHECK( NewBotAI_JumpSwingAirAttackReady( 1, 80.0f ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingAirAttackReady( 0, 0.0f ) );
+	BOOST_CHECK( NewBotAI_JumpSwingEligible( 150.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 40.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 260.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 150.0f, 1, 1, 1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( continuous_sweeps_are_countered_early_instead_of_retreating )
+{
+	newbotai_saber_tactic_context_t context = {};
+	context.saberOnlyDuel = 1;
+	context.enemyAttacking = 1;
+	context.counterReady = 1;
+	context.enemySwingTimingKnown = 1;
+	context.closingKnown = 1;
+	context.currentDistance = 100.0f;
+	context.enemyDistance = 65.0f;
+	context.closingSpeed = 180.0f;
+	context.msSinceEnemySwingStart = 80;
+	context.enemySwingChain = 1;
+	// A single swing keeps the existing wait-for-the-gap answer.
+	BOOST_CHECK_EQUAL( NewBotAI_GetCorrectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_REPOSITION );
+	context.enemySwingChain = 2;
+	BOOST_CHECK_EQUAL( NewBotAI_GetCorrectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_COUNTER );
+	context.msSinceEnemySwingStart = 151;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	context.msSinceEnemySwingStart = 80;
+	context.currentDistance = 130.0f;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	context.currentDistance = 100.0f;
+	context.selfBlocked = 1;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	BOOST_CHECK( !NewBotAI_SweepChainStepsIn( 2, 100.0f ) );
+	BOOST_CHECK( NewBotAI_SweepChainStepsIn( 3, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_SweepChainStepsIn( 3, 140.0f ) );
+}
+
 BOOST_AUTO_TEST_CASE( saber_only_counterpressure_waits_out_early_sweep_but_does_not_retreat_forever )
 {
 	newbotai_saber_tactic_context_t context = {};

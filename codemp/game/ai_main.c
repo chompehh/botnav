@@ -1060,6 +1060,134 @@ static void NewBotAI_FilterWeakVerticalAttack(bot_state_t *bs, usercmd_t *ucmd, 
 	ucmd->rightmove = (signed char)(right * 127);
 }
 
+static void NewBotAI_EndJumpSwing(bot_state_t *bs, int time)
+{
+	bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_NONE;
+	bs->jumpSwingStageTime = time;
+	bs->jumpSwingNextTime = time + Q_irand(NEWBOTAI_JUMP_SWING_MIN_COOLDOWN_MS,
+		NEWBOTAI_JUMP_SWING_MAX_COOLDOWN_MS);
+}
+
+/*
+==============
+NewBotAI_ApplyJumpSwing
+
+Non-DFA jump attacks learned from human duels. Either strafe+attack on the ground and jump
+while that swing runs, or jump first and strafe+attack once the rise has slowed below the
+DFA threshold. Forward is always zero and jump is never held with a fresh attack press, so
+the engine cannot select a DFA, flip or cartwheel. Runs last on the final usercmd.
+==============
+*/
+static void NewBotAI_ApplyJumpSwing(bot_state_t *bs, usercmd_t *ucmd, int time)
+{
+	const playerState_t *ps;
+	const playerState_t *eps;
+	qboolean grounded, saberBusy, enemySwinging, enemyDown;
+	vec3_t toEnemy;
+	float dist;
+
+	if (!bs || !ucmd || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	if (!g_newBotAI.integer || ps->weapon != WP_SABER || ps->saberInFlight || ps->saberHolstered ||
+		!bs->currentEnemy || !bs->currentEnemy->client || bs->currentEnemy->health <= 0 ||
+		bs->currentEnemy->client->ps.weapon != WP_SABER || bs->sfjOwnsInput ||
+		bs->navWallJumpUntil > time || bs->flipkickInputTime > time || bs->gripkickActive ||
+		bs->pullKickJumpTime != 0 || bs->saberDefenseActive || BotNav_ShouldHoldCombat(bs) ||
+		ps->forceHandExtend != HANDEXTEND_NONE || ps->fd.forceGripBeingGripped > level.time)
+	{
+		if (bs->jumpSwingStage != NEWBOTAI_JUMP_SWING_NONE)
+			NewBotAI_EndJumpSwing(bs, time);
+		return;
+	}
+	eps = &bs->currentEnemy->client->ps;
+	grounded = ps->groundEntityNum != ENTITYNUM_NONE ? qtrue : qfalse;
+	saberBusy = (ps->weaponTime > 0 || BG_SaberInAttack(ps->saberMove) ||
+		PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove) ||
+		BG_SaberInSpecial(ps->saberMove)) ? qtrue : qfalse;
+	if (bs->jumpSwingStage == NEWBOTAI_JUMP_SWING_NONE)
+	{
+		if (time < bs->jumpSwingNextTime)
+			return;
+		VectorSubtract(eps->origin, ps->origin, toEnemy);
+		dist = sqrtf(toEnemy[0] * toEnemy[0] + toEnemy[1] * toEnemy[1]);
+		enemySwinging = (BG_SaberInAttack(eps->saberMove) || PM_SaberInStart(eps->saberMove)) ?
+			qtrue : qfalse;
+		enemyDown = (BG_InKnockDown(eps->legsAnim) || NewBotAI_IsGetupAnim(eps->legsAnim)) ?
+			qtrue : qfalse;
+		if (!NewBotAI_JumpSwingEligible(dist, grounded, !saberBusy, enemySwinging, enemyDown) ||
+			fabsf(toEnemy[2]) > 48.0f)
+			return;
+		bs->jumpSwingNextTime = time + NEWBOTAI_JUMP_SWING_ROLL_MS;
+		if (Q_irand(1, 100) > NEWBOTAI_JUMP_SWING_CHANCE)
+			return;
+		bs->jumpSwingDir = Q_irand(0, 1) ? 1 : -1;
+		if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], 0, bs->jumpSwingDir, qtrue))
+		{
+			bs->jumpSwingDir = -bs->jumpSwingDir;
+			if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], 0, bs->jumpSwingDir, qtrue))
+				return;
+		}
+		bs->jumpSwingStage = Q_irand(0, 1) ? NEWBOTAI_JUMP_SWING_ATTACK_FIRST : NEWBOTAI_JUMP_SWING_RISE;
+		bs->jumpSwingStageTime = time;
+	}
+
+	ucmd->forwardmove = 0;
+	ucmd->rightmove = (signed char)(bs->jumpSwingDir * 127);
+	ucmd->buttons &= ~BUTTON_ALT_ATTACK;
+	switch (bs->jumpSwingStage)
+	{
+	case NEWBOTAI_JUMP_SWING_ATTACK_FIRST:
+		ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ATTACK;
+		if (!grounded || time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_PRESS_MS * 3)
+		{
+			NewBotAI_EndJumpSwing(bs, time);
+			break;
+		}
+		if (saberBusy && time - bs->jumpSwingStageTime >= NEWBOTAI_JUMP_SWING_PRESS_MS)
+		{
+			bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_JUMP_AFTER;
+			bs->jumpSwingStageTime = time;
+		}
+		break;
+	case NEWBOTAI_JUMP_SWING_JUMP_AFTER:
+		// Attack released so no new move is chosen while the jump is held.
+		ucmd->buttons &= ~BUTTON_ATTACK;
+		ucmd->upmove = 127;
+		if (time - bs->jumpSwingStageTime >= NEWBOTAI_JUMP_SWING_JUMP_MS)
+			NewBotAI_EndJumpSwing(bs, time);
+		break;
+	case NEWBOTAI_JUMP_SWING_RISE:
+		ucmd->buttons &= ~BUTTON_ATTACK;
+		ucmd->upmove = grounded ? 127 : 0;
+		if (time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_AIR_TIMEOUT_MS ||
+			(grounded && time - bs->jumpSwingStageTime > 200))
+		{
+			NewBotAI_EndJumpSwing(bs, time);
+			break;
+		}
+		if (!saberBusy && NewBotAI_JumpSwingAirAttackReady(!grounded, ps->velocity[2]))
+		{
+			bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_AIR_ATTACK;
+			bs->jumpSwingStageTime = time;
+		}
+		break;
+	case NEWBOTAI_JUMP_SWING_AIR_ATTACK:
+		ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ATTACK;
+		if (grounded || saberBusy || time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_PRESS_MS * 3)
+			NewBotAI_EndJumpSwing(bs, time);
+		break;
+	default:
+		NewBotAI_EndJumpSwing(bs, time);
+		break;
+	}
+	if (NewBotAI_InputCouldStartDFA(1, ucmd->forwardmove, ucmd->rightmove,
+		(ucmd->buttons & BUTTON_ATTACK) ? 1 : 0, ucmd->upmove > 0 || !grounded))
+		ucmd->buttons &= ~BUTTON_ATTACK;
+}
+
 /*
 ==============
 BotFooting_Apply
@@ -1240,6 +1368,8 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 		NewBotAI_ApplyPostKickEscape(bs, &bs->lastucmd, time);
 	if (!holdCombat)
 		NewBotAI_FilterWeakVerticalAttack(bs, &bs->lastucmd, time);
+	if (!holdCombat)
+		NewBotAI_ApplyJumpSwing(bs, &bs->lastucmd, time);
 	if (bs->sfjOwnsInput)
 	{
 		if (bs->lastucmd.upmove >= 10)
@@ -22688,9 +22818,22 @@ static void NewBotAI_TrackEnemySwing(bot_state_t *bs)
 static qboolean NewBotAI_ShouldCounterSwing(bot_state_t *bs)
 {
 	NewBotAI_TrackEnemySwing(bs);
+	if (NewBotAI_IsSaberOnlyDuel(bs) && bs->enemySwingActive &&
+		bs->enemySwingChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN &&
+		bs->cur_ps.groundEntityNum != ENTITYNUM_NONE && bs->cur_ps.weaponTime <= 0 &&
+		bs->cur_ps.saberBlocked == BLOCKED_NONE && !bs->cur_ps.saberInFlight &&
+		(bs->cur_ps.saberMove == LS_NONE || bs->cur_ps.saberMove == LS_READY) &&
+		bs->counterSwingFor != bs->enemySwingStartTime &&
+		level.time - bs->enemySwingStartTime <= NEWBOTAI_CHAIN_COUNTER_WINDOW_MS &&
+		NewBotAI_GetEnemyDistance2D(bs) <= NEWBOTAI_CHAIN_COUNTER_RANGE)
+	{
+		//A continuous sweeper is countered early in the next linked swing.
+		bs->counterSwingFor = bs->enemySwingStartTime;
+		return qtrue;
+	}
 	if (NewBotAI_IsSaberOnlyDuel(bs))
 	{
-		//Saber-only: never swing into a live swing; punish in the gap right after it.
+		//Saber-only: never swing into a single live swing; punish in the gap right after it.
 		if (bs->enemySwingActive || bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
 			bs->cur_ps.weaponTime > 0 || bs->cur_ps.saberBlocked != BLOCKED_NONE ||
 			bs->cur_ps.saberInFlight ||
@@ -22757,6 +22900,10 @@ static qboolean NewBotAI_UpdateSwingDodge(bot_state_t *bs)
 			//Back off only from 90-120u; closer in, step inside or hold and block.
 			bs->swingDodgeStyle = NewBotAI_GetSaberOnlySweepResponse(dist2D,
 				mistakeChance, Q_irand(1, 100), Q_irand(1, 100));
+			//A continuous sweeper is answered by stepping in, not by retreating forever.
+			if (bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_BACKPEDAL &&
+				NewBotAI_SweepChainStepsIn(bs->enemySwingChain, dist2D))
+				bs->swingDodgeStyle = NEWBOTAI_SWING_DODGE_ADVANCE;
 		}
 		else
 		{
@@ -30349,6 +30496,7 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	{
 		context.enemySwingTimingKnown = 1;
 		context.msSinceEnemySwingStart = level.time - bs->enemyAttackStartTime;
+		context.enemySwingChain = bs->enemySwingChain;
 	}
 	{
 		float range2D, predicted2D, radial2D;
@@ -30425,7 +30573,7 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	}
 	if (!bs->saberDefenseActive && ps->groundEntityNum != ENTITYNUM_NONE &&
 		ps->weaponTime <= 0 && (ps->saberMove == LS_NONE || ps->saberMove == LS_READY) &&
-		NewBotAI_SaberPressureCounterReady(context))
+		(NewBotAI_SaberPressureCounterReady(context) || NewBotAI_SweepChainCounterReady(context)))
 	{
 		bs->saberTacticUntil = 0;
 		bs->saberTechniqueAirExitUntil = 0;

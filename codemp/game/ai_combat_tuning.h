@@ -414,6 +414,7 @@ typedef struct
 	int weakVerticalStance;	// blue/yellow: never select T2B (see NewBotAI_SaberAvoidWeakVertical)
 	int enemySwingTimingKnown;	// msSinceEnemySwingStart is valid (zero-initialized: unknown)
 	int msSinceEnemySwingStart;
+	int enemySwingChain;	// enemy swings linked within NEWBOTAI_SWEEP_CHAIN_LINK_MS (0: unknown)
 } newbotai_saber_tactic_context_t;
 
 typedef struct
@@ -562,6 +563,33 @@ static inline int NewBotAI_SaberPressureCounterReady(newbotai_saber_tactic_conte
 		(context.closingSpeed > 0.0f || context.currentDistance < 80.0f);
 }
 
+// Continuous sweeps: the dueltracks (chained swing = starts <400ms after the attacker's
+// previous swing ended) show defenders who counter-swing 0-150ms after a chained swing
+// starts hit 81.2% (n=5649) vs 61% at 150-300ms and ~55% later; endless retreat only
+// feeds the chain. Counter early in the swing once the enemy has linked two or more.
+#define NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN 2
+#define NEWBOTAI_CHAIN_COUNTER_WINDOW_MS 150
+#define NEWBOTAI_CHAIN_COUNTER_RANGE 120.0f
+
+static inline int NewBotAI_SweepChainCounterReady(newbotai_saber_tactic_context_t context)
+{
+	const float range = context.closingKnown ? context.currentDistance : context.enemyDistance;
+	return (context.saberOnlyDuel || context.saberCombat) && context.enemyAttacking &&
+		context.enemySwingChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN &&
+		!context.selfBlocked && !context.selfAttacking && context.counterReady &&
+		context.enemySwingTimingKnown && context.msSinceEnemySwingStart >= 0 &&
+		context.msSinceEnemySwingStart <= NEWBOTAI_CHAIN_COUNTER_WINDOW_MS &&
+		range <= NEWBOTAI_CHAIN_COUNTER_RANGE;
+}
+
+// Saber-only dodge against a sweep chain: from the third linked swing on, step in rather
+// than keep backing away (the chain otherwise pushes the bot across the arena).
+static inline int NewBotAI_SweepChainStepsIn(int enemyChain, float enemyDistance2D)
+{
+	return enemyChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN + 1 &&
+		enemyDistance2D <= NEWBOTAI_CHAIN_COUNTER_RANGE;
+}
+
 static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	newbotai_saber_tactic_context_t context)
 {
@@ -586,7 +614,7 @@ static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 		return inSwingReach ? NEWBOTAI_SABER_TACTIC_COUNTER : NEWBOTAI_SABER_TACTIC_STEP_IN;
 	}
 
-	if (NewBotAI_SaberPressureCounterReady(context))
+	if (NewBotAI_SaberPressureCounterReady(context) || NewBotAI_SweepChainCounterReady(context))
 		return NEWBOTAI_SABER_TACTIC_COUNTER;
 	if (context.saberOnlyDuel && context.selfAttacking && context.landedHit && inSwingReach)
 		return NEWBOTAI_SABER_TACTIC_CHAIN;
@@ -2532,6 +2560,53 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 	if (enemyKnockedOrRecovering)
 		return 1;
 	return (mistakeChance > 0 && roll > 0 && roll <= mistakeChance) ? 1 : 0;
+}
+
+// Human jump attacks (dueltracks, swing_start with grounded=0 joined to damage_dealt in the
+// swing window): airborne L2R hit 75.6% (n=496), R2L 73.8% (n=435) vs bots 64.5%/61.6%;
+// most at 128-384u (73%). Bots never DFA: every DFA variant needs forward with no strafe
+// and attack while rising (velocity z > 100) within 32u of the ground. Jump-swings press
+// attack with a strafe and no forward either before takeoff or once the rise has slowed.
+#define NEWBOTAI_JUMP_SWING_MIN_RANGE 64.0f
+#define NEWBOTAI_JUMP_SWING_MAX_RANGE 200.0f
+#define NEWBOTAI_JUMP_SWING_CHANCE 15
+#define NEWBOTAI_JUMP_SWING_ROLL_MS 600
+#define NEWBOTAI_JUMP_SWING_MIN_COOLDOWN_MS 3000
+#define NEWBOTAI_JUMP_SWING_MAX_COOLDOWN_MS 6000
+#define NEWBOTAI_JUMP_SWING_PRESS_MS 60
+#define NEWBOTAI_JUMP_SWING_JUMP_MS 250
+#define NEWBOTAI_JUMP_SWING_AIR_TIMEOUT_MS 900
+#define NEWBOTAI_DFA_RISE_SPEED 100.0f
+
+typedef enum
+{
+	NEWBOTAI_JUMP_SWING_NONE = 0,
+	NEWBOTAI_JUMP_SWING_ATTACK_FIRST,	// grounded strafe+attack, then jump during the swing
+	NEWBOTAI_JUMP_SWING_JUMP_AFTER,
+	NEWBOTAI_JUMP_SWING_RISE,	// jump first (no attack) ...
+	NEWBOTAI_JUMP_SWING_AIR_ATTACK	// ... then strafe+attack once the rise has slowed
+} newbotai_jump_swing_stage_t;
+
+static inline int NewBotAI_JumpSwingEligible(float enemyDistance2D, int grounded, int saberReady,
+	int enemySwinging, int enemyDown)
+{
+	return grounded && saberReady && !enemySwinging && !enemyDown &&
+		enemyDistance2D >= NEWBOTAI_JUMP_SWING_MIN_RANGE &&
+		enemyDistance2D <= NEWBOTAI_JUMP_SWING_MAX_RANGE;
+}
+
+// The engine only picks a DFA from forward-only movement with attack while rising fast.
+static inline int NewBotAI_InputCouldStartDFA(int strongStance, int forwardMove, int rightMove,
+	int attackOrSwinging, int airborneOrJumping)
+{
+	return strongStance && forwardMove > 0 && rightMove == 0 && attackOrSwinging &&
+		airborneOrJumping;
+}
+
+// Late-air attack is allowed once airborne and no longer rising fast enough for a DFA.
+static inline int NewBotAI_JumpSwingAirAttackReady(int airborne, float verticalSpeed)
+{
+	return airborne && verticalSpeed <= NEWBOTAI_DFA_RISE_SPEED;
 }
 
 // Combo gaps measured from jundon/void: pull->kick 0ms, throw->pull ~66ms, grip->throw
