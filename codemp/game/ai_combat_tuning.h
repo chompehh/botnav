@@ -949,6 +949,27 @@ static inline int NewBotAI_SaberCanOwnInputs(int holdingSaber, int visibleEnemy,
 	return holdingSaber && visibleEnemy && !engineBusy && !forceMovement && !navigationMovement;
 }
 
+// Force lightning releases the moment the button is let go, then debounces 1.5-3s, and
+// only deals 1-2 damage per tick: short bursts waste the cast. Hold 2-3s per burst.
+#define NEWBOTAI_LIGHTNING_HOLD_MIN_MS 2000
+#define NEWBOTAI_LIGHTNING_HOLD_MAX_MS 3000
+// ForceShootLightning traces from the caster's origin (waist), not the eye, along the view
+// direction. Aiming the eye slightly above the enemy's head puts that parallel bolt line
+// through the upper body; the level 3 cone is measured from the same origin.
+#define NEWBOTAI_LIGHTNING_AIM_ABOVE_HEAD 8.0f
+
+static inline float NewBotAI_LightningAimHeight(float enemyViewheight)
+{
+	return enemyViewheight + NEWBOTAI_LIGHTNING_AIM_ABOVE_HEAD;
+}
+
+// Once lightning is running the engine keeps it going until force runs out, so the
+// 25-force start requirement must not cut an active burst short.
+static inline int NewBotAI_LightningForceAllows(int lightningActive, int forcePower)
+{
+	return lightningActive ? forcePower > 0 : forcePower > 25;
+}
+
 #define NEWBOTAI_SABER_IGNITE_RANGE 768.0f
 #define NEWBOTAI_SABER_IGNITE_RETRY_MS 750
 

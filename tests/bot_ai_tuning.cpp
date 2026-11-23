@@ -2933,6 +2933,15 @@ BOOST_AUTO_TEST_CASE( saber_only_counterpressure_waits_out_early_sweep_but_does_
 	BOOST_CHECK( !NewBotAI_SaberPressureCounterReady( context ) );
 }
 
+BOOST_AUTO_TEST_CASE( lightning_holds_until_force_runs_out_and_aims_above_head )
+{
+	BOOST_CHECK( !NewBotAI_LightningForceAllows( 0, 25 ) );
+	BOOST_CHECK( NewBotAI_LightningForceAllows( 0, 26 ) );
+	BOOST_CHECK( NewBotAI_LightningForceAllows( 1, 5 ) );
+	BOOST_CHECK( !NewBotAI_LightningForceAllows( 1, 0 ) );
+	BOOST_CHECK_GT( NewBotAI_LightningAimHeight( 36.0f ), 36.0f );
+}
+
 BOOST_AUTO_TEST_CASE( holstered_saber_is_ignited_for_visible_close_enemies )
 {
 	BOOST_CHECK( NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 0, 1000 ) );

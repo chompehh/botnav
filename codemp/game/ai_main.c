@@ -266,6 +266,7 @@ static void NewBotAI_ClearLostSightCombatInput(bot_state_t *bs);
 static void NewBotAI_PrepareWaypointHandoff(bot_state_t *bs, qboolean clearEnemyLock);
 static qboolean NewBotAI_ShouldForceLostSightWaypointReset(bot_state_t *bs);
 static void NewBotAI_ClearLightningBurst(bot_state_t *bs);
+static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs);
 static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyGetupPushWindow(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyPreGetupKnockdownState(bot_state_t *bs);
@@ -18416,6 +18417,7 @@ void NewBotAI_GetAim(bot_state_t *bs)
 	vec3_t saberDiff;
 	gentity_t *saber;
 	qboolean aimRewritten = qfalse;
+	qboolean lightningAim;
 
 	bs->hitSpotted = qfalse;
 	if (bs->runningLikeASissy) {
@@ -18425,6 +18427,8 @@ void NewBotAI_GetAim(bot_state_t *bs)
 
 	if (!bs->currentEnemy || !bs->currentEnemy->client)
 		return;
+	lightningAim = ((bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) ||
+		bs->lightningHoldUntil > level.time) ? qtrue : qfalse;
 
 	/*
 		trType_t	trType;
@@ -18486,7 +18490,9 @@ void NewBotAI_GetAim(bot_state_t *bs)
 	else { //Normal aim at player
 		VectorCopy(bs->currentEnemy->client->ps.origin, headlevel);
 
-		if (bs->currentEnemy && bs->currentEnemy->client)
+		if (lightningAim)
+			headlevel[2] += NewBotAI_LightningAimHeight(bs->currentEnemy->client->ps.viewheight);
+		else if (bs->currentEnemy && bs->currentEnemy->client)
 			headlevel[2] += bs->currentEnemy->client->ps.viewheight - 16;//aim at chest?
 		if (bs->cur_ps.saberInFlight)
 		{
@@ -18496,6 +18502,10 @@ void NewBotAI_GetAim(bot_state_t *bs)
 		if (bs->cur_ps.saberInFlight)
 		{
 			NewBotAI_AdjustSaberThrowLead(bs);
+		}
+		else if (lightningAim)
+		{
+			// Keep the bolt line on the target; no swing/sweep yaw offsets.
 		}
 		else if (bs->saberTechniqueCandidate || bs->saberDefenseActive ||
 			bs->cur_ps.saberBlocked == BLOCKED_PARRY_BROKEN ||
@@ -19042,7 +19052,7 @@ static float NewBotAI_GetWallEscapeTurnAngle(void)
 
 static int NewBotAI_GetLightningBurstHoldMs(void)
 {
-	return Q_irand(1000, 2000);
+	return Q_irand(NEWBOTAI_LIGHTNING_HOLD_MIN_MS, NEWBOTAI_LIGHTNING_HOLD_MAX_MS);
 }
 
 static void NewBotAI_ResetRecoveryMovement(bot_state_t *bs)
@@ -19258,7 +19268,9 @@ static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs)
 	{
 		return qfalse;
 	}
-	if (bs->cur_ps.fd.forcePower <= 25 ||
+	if (!NewBotAI_LightningForceAllows(
+			(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) ? 1 : 0,
+			bs->cur_ps.fd.forcePower) ||
 		bs->frame_Enemy_Len < BotGetLightningStartDistance(bs) ||
 		bs->frame_Enemy_Len > BotGetLightningMaxDistance(bs))
 	{
@@ -19267,7 +19279,8 @@ static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs)
 
 	VectorSubtract(bs->currentEnemy->client->ps.origin, bs->eye, a_fo);
 	vectoangles(a_fo, a_fo);
-	if (!InFieldOfVision(bs->viewangles, 50, a_fo))
+	// The aim tracks the target during a burst; allow some slack for the turn rate.
+	if (!InFieldOfVision(bs->viewangles, 70, a_fo))
 	{
 		return qfalse;
 	}
@@ -34488,6 +34501,15 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		trap->EA_Alt_Attack(bs->client);
 	}
 
+	// The engine stops lightning as soon as the force button is released, so keep holding
+	// a running burst even on frames where the force chooser returned early.
+	if (!useTheForce && !BotNav_ShouldHoldCombat(bs) && !NewBotAI_IsEnemySaberThreatImminent(bs) &&
+		(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) &&
+		NewBotAI_CanContinueLightningBurst(bs))
+	{
+		level.clients[bs->client].ps.fd.forcePowerSelected = FP_LIGHTNING;
+		useTheForce = qtrue;
+	}
 	if ((!useTheForce ||
 		level.clients[bs->client].ps.fd.forcePowerSelected != FP_LIGHTNING) &&
 		!(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)))

@@ -43,7 +43,7 @@ BotGetAggressionBias = clamp(clamp(base, -1, 1) + healthComponent*bot_healthbias
 - `BotGetAggressionWeightedBonus(bs, biasPercent, maxBonus, aggressiveOnly)` scales a bonus by `aggressionBias * biasPercent/100 * maxBonus`. Only applies when aggression is positive (for `aggressiveOnly=true`).
 - Retreat thresholds: `hardRetreatHealth = 30 - aggression*25`, `softRetreatHealth = 60 - aggression*35`.
 - Saber throw defense break: `preferPull = (aggression > 0)` — pull when aggressive, push when defensive.
-- Lightning: fires at/above `bot_lightningdistance` for bots that know lightning and have a usable lightning level.
+- Lightning: fires at/above `bot_lightningdistance` for bots that know lightning and have a usable lightning level. Each burst is held for 2–3 s (the engine stops lightning the moment the button is released and then debounces it for 1.5–3 s) and keeps going until the burst ends, the target leaves range/view, or force runs out; the 25-force cost only gates the start. While lightning is active the bot aims about 8 units above the target's head: the bolt is traced from the caster's waist, so that view line carries it through the upper body.
 
 ## Combat Behavior Biases
 
