@@ -1128,6 +1128,7 @@ Notes:
 
 | Cvar | Default | Description |
 |------|---------|-------------|
+| `sv_dlRate` | `1024` | Dedicated server: per-client UDP download rate in KB/s (requires `sv_allowDownload 1`). Download-only packets are sent every server frame, separate from snapshots, with up to 48 blocks (96 KB) waiting for client acknowledgement. Legacy downloads were limited to `rate`/`sv_maxRate` per snapshot with an 8-block window. Set to `0` for legacy behaviour. Lower it on servers with limited upload bandwidth, because each downloading client can use this much. |
 | `bot_nochat` | `0` | Disable bot chat. |
 | `bot_tutorial` | `0` | Enable concise trainer tells from bots after tracked duels; at `1` tells are private, at `2+` tells may broadcast publicly. Messages are capped to 3 per burst with a 7s cooldown between sends, and unregistered reminders are sent once per session. |
 | `bot_learninglog` | `0` | Opt-in recording of accepted public chat in the existing events export, independently of tutorial chat and learned weight consumption. Private tells, team, clan and admin chat are excluded. Human explanations remain untrusted annotations, not automatic behavior rules. |

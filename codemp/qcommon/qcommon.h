@@ -181,7 +181,7 @@ void		Sys_ShowIP(void);
 
 //rww - 6/28/02 - Changed from 16384 to match sof2's. This does seem rather huge, but I guess it doesn't really hurt anything.
 
-#define MAX_DOWNLOAD_WINDOW			8		// max of eight download frames
+#define MAX_DOWNLOAD_WINDOW			48		// blocks in flight before waiting for client acks (server-side only)
 #define MAX_DOWNLOAD_BLKSIZE		2048	// 2048 byte block chunks
 
 

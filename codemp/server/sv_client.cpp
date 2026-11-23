@@ -746,15 +746,98 @@ Check to see if the client wants a file, open it if needed and start pumping the
 Fill up msg with data
 ==================
 */
+static int SV_WriteDownloadBlocks( client_t *cl, msg_t *msg, int maxBlocks );
+
 void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
+{
+	SV_WriteDownloadBlocks( cl, msg, 0 );
+}
+
+/*
+==================
+SV_SendDownloadMessages
+
+With sv_dlRate > 0, sends download-only messages every server frame so
+downloads are no longer limited to one snapshot's worth of blocks.
+sv_dlRate is the per-client rate in KB/s.
+==================
+*/
+void SV_SendDownloadMessages( void )
+{
+	static int	lastTime;
+	int			i, frameMsec, budget, maxBlocks;
+	client_t	*cl;
+	msg_t		msg;
+	static byte	msgBuffer[MAX_MSGLEN];
+
+	frameMsec = svs.time - lastTime;
+	lastTime = svs.time;
+	if ( !sv_dlRate || sv_dlRate->integer <= 0 || !sv_allowDownload->integer ) {
+		return;
+	}
+	if ( frameMsec < 1 ) {
+		frameMsec = 1;
+	} else if ( frameMsec > 100 ) {
+		frameMsec = 100;
+	}
+
+	for ( i = 0; i < sv_maxclients->integer; i++ ) {
+		cl = &svs.clients[i];
+		if ( cl->state < CS_CONNECTED || cl->state >= CS_ACTIVE || !*cl->downloadName ) {
+			continue;
+		}
+		if ( cl->netchan.remoteAddress.type == NA_BOT || cl->netchan.remoteAddress.type == NA_LOOPBACK ) {
+			continue;
+		}
+		if ( cl->netchan.unsentFragments ) {
+			continue;
+		}
+
+		budget = cl->downloadRateCredit + ( sv_dlRate->integer * 1024 / 1000 ) * frameMsec;
+		maxBlocks = budget / MAX_DOWNLOAD_BLKSIZE;
+		if ( maxBlocks <= 0 ) {
+			cl->downloadRateCredit = budget;
+			continue;
+		}
+		if ( maxBlocks > SV_DOWNLOAD_BLOCKS_PER_MSG ) {
+			maxBlocks = SV_DOWNLOAD_BLOCKS_PER_MSG;
+			budget = maxBlocks * MAX_DOWNLOAD_BLKSIZE;
+		}
+
+		MSG_Init( &msg, msgBuffer, sizeof( msgBuffer ) );
+		MSG_WriteLong( &msg, cl->lastClientCommand );
+		maxBlocks = SV_WriteDownloadBlocks( cl, &msg, maxBlocks );
+		if ( maxBlocks <= 0 ) {
+			// window full or waiting for acks; don't bank credit for a burst later
+			cl->downloadRateCredit = 0;
+			continue;
+		}
+		cl->downloadRateCredit = budget - maxBlocks * MAX_DOWNLOAD_BLKSIZE;
+		if ( cl->downloadRateCredit < 0 ) {
+			cl->downloadRateCredit = 0;
+		}
+		SV_Netchan_Transmit( cl, &msg );
+	}
+}
+
+/*
+==================
+SV_WriteDownloadBlocks
+
+maxBlocks <= 0 uses the legacy rate-per-snapshot budget.
+Returns the number of blocks written.
+==================
+*/
+static int SV_WriteDownloadBlocks( client_t *cl, msg_t *msg, int maxBlocks )
 {
 	int curindex;
 	int rate;
 	int blockspersnap;
+	int written = 0;
 	char errorMessage[1024];
 
 	if (!*cl->downloadName)
-		return;	// Nothing being downloaded
+		return 0;	// Nothing being downloaded
 
 	if(!cl->download)
 	{
@@ -799,7 +882,7 @@ void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 			if(cl->download)
 				FS_FCloseFile(cl->download);
 
-			return;
+			return 1;
 		}
 
 		Com_Printf( "clientDownload: %d : beginning \"%s\"\n", (int) (cl - svs.clients), cl->downloadName );
@@ -808,6 +891,7 @@ void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 		cl->downloadCurrentBlock = cl->downloadClientBlock = cl->downloadXmitBlock = 0;
 		cl->downloadCount = 0;
 		cl->downloadEOF = qfalse;
+		cl->downloadRateCredit = 0;
 	}
 
 	// Perform any reads that we need to
@@ -869,13 +953,16 @@ void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 	if (blockspersnap < 0)
 		blockspersnap = 1;
 
+	if (maxBlocks > 0)
+		blockspersnap = maxBlocks;
+
 	while (blockspersnap--) {
 
 		// Write out the next section of the file, if we have already reached our window,
 		// automatically start retransmitting
 
 		if (cl->downloadClientBlock == cl->downloadCurrentBlock)
-			return; // Nothing to transmit
+			return written; // Nothing to transmit
 
 		if (cl->downloadXmitBlock == cl->downloadCurrentBlock) {
 			// We have transmitted the complete window, should we start resending?
@@ -885,7 +972,7 @@ void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 			if (svs.time - cl->downloadSendTime > 1000)
 				cl->downloadXmitBlock = cl->downloadClientBlock;
 			else
-				return;
+				return written;
 		}
 
 		// Send current block
@@ -912,7 +999,9 @@ void SV_WriteDownloadToClient(client_t *cl, msg_t *msg)
 		cl->downloadXmitBlock++;
 
 		cl->downloadSendTime = svs.time;
+		written++;
 	}
+	return written;
 }
 
 /*

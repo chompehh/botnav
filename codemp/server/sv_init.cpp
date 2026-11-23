@@ -1018,6 +1018,7 @@ void SV_Init (void) {
 	Cvar_Get ("nextmap", "", CVAR_TEMP );
 
 	sv_allowDownload = Cvar_Get ("sv_allowDownload", "0", CVAR_SERVERINFO, "Allow clients to download mod files via UDP from the server");
+	sv_dlRate = Cvar_Get ("sv_dlRate", "1024", CVAR_ARCHIVE_ND, "Per-client UDP download rate in KB/s, sent every server frame (0 = legacy snapshot-rate downloads)");
 	sv_master[0] = Cvar_Get ("sv_master1", MASTER_SERVER_NAME, CVAR_PROTECTED );
 	sv_master[1] = Cvar_Get ("sv_master2", JKHUB_MASTER_SERVER_NAME, CVAR_PROTECTED);
 	sv_master[3] = Cvar_Get("sv_master3", "master.ouned.de", CVAR_PROTECTED);
