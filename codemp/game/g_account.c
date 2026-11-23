@@ -12024,7 +12024,7 @@ void G_CTFTrackEvent(gentity_t *player, int event, int flagTeam, const vec3_t or
 	char mapname[MAX_QPATH], name[MAX_NETNAME];
 	int result, team = player && player->client ? player->client->sess.sessionTeam : -1;
 
-	if ((level.gametype != GT_CTF && level.gametype != GT_CTY) ||
+	if ((!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY) ||
 		event < CTF_TRACK_PICKUP || event > CTF_TRACK_CAPTURE)
 		return;
 	db = G_GetTrackedPersistDB();
@@ -12662,7 +12662,7 @@ static void G_StrafeTrackBegin(gentity_t *ent, strafetrack_client_t *track, floa
 	track->recordingSessionId = G_StrafeRecordingSession(G_GetTrackedPersistDB());
 	track->routePriority = G_StrafeEditor(ent)->priority >= 0 ?
 		G_StrafeEditor(ent)->priority : g_strafeRoutePriority;
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		sqlite3 *db = G_GetTrackedPersistDB();
 

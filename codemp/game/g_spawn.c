@@ -945,7 +945,7 @@ void G_SpawnGEntityFromSpawnVars( qboolean inSubBSP ) {
 	int			i;
 	gentity_t	*ent;
 	char		*s, *value, *gametypeName;
-	static char *gametypeNames[GT_MAX_GAME_TYPE] = {"ffa", "holocron", "jedimaster", "duel", "powerduel", "single", "team", "siege", "ctf", "cty", "arcade", "jvm", "jom"};
+	static char *gametypeNames[GT_MAX_GAME_TYPE] = {"ffa", "holocron", "jedimaster", "duel", "powerduel", "single", "team", "siege", "ctf", "cty", "arcade", "jvm", "jom", "ctfc"};
 
 	G_SpawnString("classname", NULL, &value);
 	if (!value) {
@@ -1008,6 +1008,8 @@ void G_SpawnGEntityFromSpawnVars( qboolean inSubBSP ) {
 			gametypeName = gametypeNames[level.gametype];
 
 			s = strstr( value, gametypeName );
+			if (!s && level.gametype == GT_CTFC)
+				s = strstr(value, "ctf");
 			if (!s && level.gametype == GT_JOM)
 				s = strstr(value, "ffa");
 			if (!s && level.gametype == GT_JVM) {
@@ -1541,7 +1543,15 @@ void SP_worldspawn( void )
 	trap->SetConfigstring( CS_MUSIC, text );
 
 	G_SpawnString( "message", "", &text );
-	trap->SetConfigstring( CS_MESSAGE, text );				// map specific message
+	if ( level.gametype >= GT_ARCADE && level.gametype < GT_MAX_GAME_TYPE ) {
+		// Stock cgames only know gametypes up to CTY and show "Unknown Gametype" on the
+		// loading screen; every cgame draws the map message, so name the mode there too.
+		trap->SetConfigstring( CS_MESSAGE, text[0] ?
+			va( "%s - %s", text, BG_GetGametypeString( level.gametype ) ) :
+			BG_GetGametypeString( level.gametype ) );
+	} else {
+		trap->SetConfigstring( CS_MESSAGE, text );			// map specific message
+	}
 
 	trap->SetConfigstring( CS_MOTD, g_motd.string );		// message of the day
 

@@ -2,6 +2,7 @@
 #include "bg_public.h"
 #include <boost/test/unit_test.hpp>
 #include <limits>
+#include <string>
 
 BOOST_AUTO_TEST_SUITE(jvm_rules)
 
@@ -12,8 +13,9 @@ BOOST_AUTO_TEST_CASE(mode_ids_and_team_semantics)
 	BOOST_CHECK_EQUAL(GT_ARCADE, 10);
 	BOOST_CHECK_EQUAL(GT_JVM, 11);
 	BOOST_CHECK_EQUAL(GT_JOM, 12);
-	for (int mode = 0; mode < 13; ++mode) {
-		BOOST_CHECK_EQUAL(JVM_IsMode(mode), mode == 11 || mode == 12);
+	BOOST_CHECK_EQUAL(GT_CTFC, 13);
+	for (int mode = 0; mode < GT_MAX_GAME_TYPE; ++mode) {
+		BOOST_CHECK_EQUAL(JVM_IsMode(mode), mode == 11 || mode == 12 || mode == 13);
 		BOOST_CHECK_EQUAL(JVM_IsTeamGame(mode), mode >= 6 && mode != 12);
 	}
 	BOOST_CHECK(JVM_IsTeamGame(8));
@@ -352,6 +354,11 @@ BOOST_AUTO_TEST_CASE(jedi_and_merc_gripkick_reductions_are_independent_inputs)
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_TANK, .25f, .75f), .25f);
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_JEDI, .25f, .75f), .25f);
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_MERC, .25f, .75f), .75f);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, .5f), 5);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, 0.0f), 10);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, 2.0f), 0);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_JEDI, 10, .5f), 10);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_TANK, 10, 1.0f), 10);
 	BOOST_CHECK_CLOSE(JVM_DamageScale(JVM_JEDI, JVM_MERC, 0, 1, .5f, 2, .25f), .75f, .001f);
 	BOOST_CHECK_CLOSE(JVM_DamageScale(JVM_MERC, JVM_JEDI, 0, 1, .5f, 2, .75f), .25f, .001f);
 	BOOST_CHECK_EQUAL(JVM_DamageScale(JVM_JEDI, JVM_MERC, 0, 0, .5f, 2, 1), 1);
@@ -487,6 +494,48 @@ BOOST_AUTO_TEST_CASE(disabled_passive_absorb_defers_every_power_to_ordinary_beha
 		const bool eligible = power == FP_PUSH || power == FP_PULL || power == FP_GRIP;
 		BOOST_CHECK_EQUAL(JVM_PassiveAbsorb(GT_JOM, JVM_TANK, 0, eligible, 3), -1);
 	}
+}
+
+BOOST_AUTO_TEST_CASE(ctf_classes_plays_as_ctf_with_selected_classes)
+{
+	BOOST_CHECK(JVM_IsTeamGame(GT_CTFC));
+	BOOST_CHECK(JVM_IsCTFMode(GT_CTF));
+	BOOST_CHECK(JVM_IsCTFMode(GT_CTFC));
+	BOOST_CHECK(!JVM_IsCTFMode(GT_CTY));
+	BOOST_CHECK(!JVM_IsCTFMode(GT_JVM));
+	BOOST_CHECK(JVM_IsFlagMode(GT_CTFC));
+	BOOST_CHECK(JVM_IsFlagMode(GT_CTY));
+	BOOST_CHECK(!JVM_IsFlagMode(GT_JOM));
+	BOOST_CHECK(!JVM_IsFragMode(GT_CTFC));
+	BOOST_CHECK(!JVM_IsFragMode(GT_CTF));
+	BOOST_CHECK(JVM_IsFragMode(GT_JVM));
+	BOOST_CHECK(JVM_IsFragMode(GT_TEAM));
+	/* Any class on either team, unlike JvM. */
+	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 2, JVM_JEDI), JVM_JEDI);
+	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 1, JVM_MERC), JVM_MERC);
+	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 2, JVM_TANK), JVM_TANK);
+	BOOST_CHECK_EQUAL(JVM_DeathNextClass(GT_CTFC, JVM_JEDI, 1, 1, 0, 0, 0), 0);
+}
+
+BOOST_AUTO_TEST_CASE(ctf_classes_team_command_arguments)
+{
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("blue"), 2);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("B"), 2);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("2"), 2);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("Red"), 1);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("1"), 1);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("spectator"), 3);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("merc"), 0);
+	BOOST_CHECK_EQUAL(JVM_TeamArgTeam("blu"), 0);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("Merc"), JVM_MERC);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("tank"), JVM_TANK);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("1"), JVM_JEDI);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("3"), JVM_TANK);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("4"), -1);
+	BOOST_CHECK_EQUAL(JVM_ClassArg("jedis"), -1);
+	BOOST_CHECK(JVM_JoinHelp(GT_JVM) && JVM_JoinHelp(GT_JOM) && JVM_JoinHelp(GT_CTFC));
+	BOOST_CHECK(std::string(JVM_JoinHelp(GT_CTFC)).find("/team <red|blue|1|2> <jedi|merc|tank|1|2|3>") != std::string::npos);
+	BOOST_CHECK(!JVM_JoinHelp(GT_CTF));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

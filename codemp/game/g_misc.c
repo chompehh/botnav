@@ -1803,7 +1803,7 @@ void SP_misc_shield_floor_unit( gentity_t *ent )
 	vec3_t dest;
 	trace_t tr;
 
-	if (level.gametype != GT_CTF &&
+	if (!JVM_IsCTFMode(level.gametype) &&
 		level.gametype != GT_CTY &&
 		level.gametype != GT_SIEGE)
 	{

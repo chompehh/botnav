@@ -457,6 +457,20 @@ static inline int BotSFJ_TrackHopTrustedForSpeed(int deaths, int failures, int p
 }
 
 /*
+ * bot_editmode highlights a route in purple when bots die on it, it is flagged unsafe,
+ * any hop has lost trust, or failed/stalled runs outnumber clean finishes after a few tries.
+ */
+#define BOT_SFJ_EDIT_PROBLEM_MIN_RUNS 3
+
+static inline int BotSFJ_RouteIsProblematic(int deaths, int unsafe, int successes,
+	int failures, int untrustedHops)
+{
+	if (deaths > 0 || unsafe > 0 || untrustedHops > 0)
+		return 1;
+	return successes + failures >= BOT_SFJ_EDIT_PROBLEM_MIN_RUNS && failures > successes;
+}
+
+/*
  * Recorded takeoffs are within about 12u of the stored start and run along the
  * start->first-landing heading. The circle jump starts only once the bot is on
  * that line at the start, moving along it; a moving bot may trigger a little

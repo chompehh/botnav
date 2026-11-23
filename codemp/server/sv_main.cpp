@@ -39,6 +39,7 @@ cvar_t	*sv_zombietime;			// seconds to sink messages after disconnect
 cvar_t	*sv_rconPassword;		// password for remote server commands
 cvar_t	*sv_privatePassword;	// password for the privateClient slots
 cvar_t	*sv_allowDownload;
+cvar_t	*sv_dlRate;
 cvar_t	*sv_httpDownloads;
 cvar_t	*sv_httpServerPort;
 cvar_t	*sv_maxclients;
@@ -1312,6 +1313,9 @@ void SV_Frame( int msec ) {
 
 	// send messages back to the clients
 	SV_SendClientMessages();
+
+	// pump pending downloads at sv_dlRate instead of the snapshot rate
+	SV_SendDownloadMessages();
 
 	SV_CheckCvars();
 

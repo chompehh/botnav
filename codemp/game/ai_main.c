@@ -266,6 +266,8 @@ static void NewBotAI_ClearLostSightCombatInput(bot_state_t *bs);
 static void NewBotAI_PrepareWaypointHandoff(bot_state_t *bs, qboolean clearEnemyLock);
 static qboolean NewBotAI_ShouldForceLostSightWaypointReset(bot_state_t *bs);
 static void NewBotAI_ClearLightningBurst(bot_state_t *bs);
+static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs);
+static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyGetupPushWindow(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyPreGetupKnockdownState(bot_state_t *bs);
 static qboolean NewBotAI_ShouldAbortChargedThrowForGetupPush(bot_state_t *bs);
@@ -332,6 +334,12 @@ static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
+static qboolean BotCombat_GunMoveFire(bot_state_t *bs);
+static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly);
+static gentity_t *BotNav_ElevatorAbove(const vec3_t point);
+static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time);
+static qboolean BotCombat_ShouldKite(bot_state_t *bs);
+static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
 	const vec3_t end);
 static qboolean NewBotAI_ShouldConserveForce(bot_state_t *bs);
@@ -441,7 +449,7 @@ void BotReportStatus(bot_state_t *bs)
 	{
 		trap->EA_SayTeam(bs->client, siegeStateDescriptions[bs->siegeState]);
 	}
-	else if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	else if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		trap->EA_SayTeam(bs->client, ctfStateDescriptions[bs->ctfState]);
 	}
@@ -469,12 +477,12 @@ void BotOrder(gentity_t *ent, int clientnum, int ordernum)
 		return;
 	}
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY && level.gametype != GT_SIEGE && level.gametype != GT_TEAM)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY && level.gametype != GT_SIEGE && level.gametype != GT_TEAM)
 	{
 		return;
 	}
 
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		stateMin = CTFSTATE_NONE;
 		stateMax = CTFSTATE_MAXCTFSTATES;
@@ -1058,6 +1066,134 @@ static void NewBotAI_FilterWeakVerticalAttack(bot_state_t *bs, usercmd_t *ucmd, 
 	ucmd->rightmove = (signed char)(right * 127);
 }
 
+static void NewBotAI_EndJumpSwing(bot_state_t *bs, int time)
+{
+	bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_NONE;
+	bs->jumpSwingStageTime = time;
+	bs->jumpSwingNextTime = time + Q_irand(NEWBOTAI_JUMP_SWING_MIN_COOLDOWN_MS,
+		NEWBOTAI_JUMP_SWING_MAX_COOLDOWN_MS);
+}
+
+/*
+==============
+NewBotAI_ApplyJumpSwing
+
+Non-DFA jump attacks learned from human duels. Either strafe+attack on the ground and jump
+while that swing runs, or jump first and strafe+attack once the rise has slowed below the
+DFA threshold. Forward is always zero and jump is never held with a fresh attack press, so
+the engine cannot select a DFA, flip or cartwheel. Runs last on the final usercmd.
+==============
+*/
+static void NewBotAI_ApplyJumpSwing(bot_state_t *bs, usercmd_t *ucmd, int time)
+{
+	const playerState_t *ps;
+	const playerState_t *eps;
+	qboolean grounded, saberBusy, enemySwinging, enemyDown;
+	vec3_t toEnemy;
+	float dist;
+
+	if (!bs || !ucmd || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	if (!g_newBotAI.integer || ps->weapon != WP_SABER || ps->saberInFlight || ps->saberHolstered ||
+		!bs->currentEnemy || !bs->currentEnemy->client || bs->currentEnemy->health <= 0 ||
+		bs->currentEnemy->client->ps.weapon != WP_SABER || bs->sfjOwnsInput ||
+		bs->navWallJumpUntil > time || bs->flipkickInputTime > time || bs->gripkickActive ||
+		bs->pullKickJumpTime != 0 || bs->saberDefenseActive || BotNav_ShouldHoldCombat(bs) ||
+		ps->forceHandExtend != HANDEXTEND_NONE || ps->fd.forceGripBeingGripped > level.time)
+	{
+		if (bs->jumpSwingStage != NEWBOTAI_JUMP_SWING_NONE)
+			NewBotAI_EndJumpSwing(bs, time);
+		return;
+	}
+	eps = &bs->currentEnemy->client->ps;
+	grounded = ps->groundEntityNum != ENTITYNUM_NONE ? qtrue : qfalse;
+	saberBusy = (ps->weaponTime > 0 || BG_SaberInAttack(ps->saberMove) ||
+		PM_SaberInStart(ps->saberMove) || PM_SaberInTransition(ps->saberMove) ||
+		BG_SaberInSpecial(ps->saberMove)) ? qtrue : qfalse;
+	if (bs->jumpSwingStage == NEWBOTAI_JUMP_SWING_NONE)
+	{
+		if (time < bs->jumpSwingNextTime)
+			return;
+		VectorSubtract(eps->origin, ps->origin, toEnemy);
+		dist = sqrtf(toEnemy[0] * toEnemy[0] + toEnemy[1] * toEnemy[1]);
+		enemySwinging = (BG_SaberInAttack(eps->saberMove) || PM_SaberInStart(eps->saberMove)) ?
+			qtrue : qfalse;
+		enemyDown = (BG_InKnockDown(eps->legsAnim) || NewBotAI_IsGetupAnim(eps->legsAnim)) ?
+			qtrue : qfalse;
+		if (!NewBotAI_JumpSwingEligible(dist, grounded, !saberBusy, enemySwinging, enemyDown) ||
+			fabsf(toEnemy[2]) > 48.0f)
+			return;
+		bs->jumpSwingNextTime = time + NEWBOTAI_JUMP_SWING_ROLL_MS;
+		if (Q_irand(1, 100) > NEWBOTAI_JUMP_SWING_CHANCE)
+			return;
+		bs->jumpSwingDir = Q_irand(0, 1) ? 1 : -1;
+		if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], 0, bs->jumpSwingDir, qtrue))
+		{
+			bs->jumpSwingDir = -bs->jumpSwingDir;
+			if (!NewBotAI_SaberSafeFootwork(bs, ps->origin, bs->viewangles[YAW], 0, bs->jumpSwingDir, qtrue))
+				return;
+		}
+		bs->jumpSwingStage = Q_irand(0, 1) ? NEWBOTAI_JUMP_SWING_ATTACK_FIRST : NEWBOTAI_JUMP_SWING_RISE;
+		bs->jumpSwingStageTime = time;
+	}
+
+	ucmd->forwardmove = 0;
+	ucmd->rightmove = (signed char)(bs->jumpSwingDir * 127);
+	ucmd->buttons &= ~BUTTON_ALT_ATTACK;
+	switch (bs->jumpSwingStage)
+	{
+	case NEWBOTAI_JUMP_SWING_ATTACK_FIRST:
+		ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ATTACK;
+		if (!grounded || time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_PRESS_MS * 3)
+		{
+			NewBotAI_EndJumpSwing(bs, time);
+			break;
+		}
+		if (saberBusy && time - bs->jumpSwingStageTime >= NEWBOTAI_JUMP_SWING_PRESS_MS)
+		{
+			bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_JUMP_AFTER;
+			bs->jumpSwingStageTime = time;
+		}
+		break;
+	case NEWBOTAI_JUMP_SWING_JUMP_AFTER:
+		// Attack released so no new move is chosen while the jump is held.
+		ucmd->buttons &= ~BUTTON_ATTACK;
+		ucmd->upmove = 127;
+		if (time - bs->jumpSwingStageTime >= NEWBOTAI_JUMP_SWING_JUMP_MS)
+			NewBotAI_EndJumpSwing(bs, time);
+		break;
+	case NEWBOTAI_JUMP_SWING_RISE:
+		ucmd->buttons &= ~BUTTON_ATTACK;
+		ucmd->upmove = grounded ? 127 : 0;
+		if (time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_AIR_TIMEOUT_MS ||
+			(grounded && time - bs->jumpSwingStageTime > 200))
+		{
+			NewBotAI_EndJumpSwing(bs, time);
+			break;
+		}
+		if (!saberBusy && NewBotAI_JumpSwingAirAttackReady(!grounded, ps->velocity[2]))
+		{
+			bs->jumpSwingStage = NEWBOTAI_JUMP_SWING_AIR_ATTACK;
+			bs->jumpSwingStageTime = time;
+		}
+		break;
+	case NEWBOTAI_JUMP_SWING_AIR_ATTACK:
+		ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ATTACK;
+		if (grounded || saberBusy || time - bs->jumpSwingStageTime > NEWBOTAI_JUMP_SWING_PRESS_MS * 3)
+			NewBotAI_EndJumpSwing(bs, time);
+		break;
+	default:
+		NewBotAI_EndJumpSwing(bs, time);
+		break;
+	}
+	if (NewBotAI_InputCouldStartDFA(1, ucmd->forwardmove, ucmd->rightmove,
+		(ucmd->buttons & BUTTON_ATTACK) ? 1 : 0, ucmd->upmove > 0 || !grounded))
+		ucmd->buttons &= ~BUTTON_ATTACK;
+}
+
 /*
 ==============
 BotFooting_Apply
@@ -1133,6 +1269,7 @@ BotUpdateInput
 void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bot_input_t bi;
 	int j;
+	qboolean elevatorEscape;
 	const qboolean holdCombat = BotNav_ShouldHoldCombat(bs);
 
 	//add the delta angles to the bot's current view angles
@@ -1224,6 +1361,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	BotCombat_FilterRangedInput(bs, &bi);
 	BotNav_FilterGapInput(bs, &bi, time);
 	BotNav_FilterCombatHazardInput(bs, &bi, time);
+	elevatorEscape = BotNav_ApplyCrusherEscape(bs, &bi, time);
 	//respawn hack
 	if (bi.actionflags & ACTION_RESPAWN) {
 		if (bs->lastucmd.buttons & BUTTON_ATTACK) bi.actionflags &= ~(ACTION_RESPAWN|ACTION_ATTACK);
@@ -1232,12 +1370,18 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bs->sfjLastRandomUse = BotInputToUserCommand(&bi, &bs->lastucmd,
 		bs->cur_ps.delta_angles, time,
 		bs->noUseTime, bs->sfjOwnsInput || bs->navWallJumpUntil > time ? qfalse : qtrue);
-	BotFooting_Apply(bs, &bs->lastucmd, time);
-	if (!holdCombat && g_newBotAI.integer && !bs->sfjOwnsInput &&
+	if (!elevatorEscape)
+		BotFooting_Apply(bs, &bs->lastucmd, time);
+	if (!elevatorEscape && !holdCombat && g_newBotAI.integer && !bs->sfjOwnsInput &&
 		bs->navWallJumpUntil <= time)
 		NewBotAI_ApplyPostKickEscape(bs, &bs->lastucmd, time);
 	if (!holdCombat)
 		NewBotAI_FilterWeakVerticalAttack(bs, &bs->lastucmd, time);
+	if (!elevatorEscape && !holdCombat)
+		NewBotAI_ApplyJumpSwing(bs, &bs->lastucmd, time);
+	BotCombat_ApplyDisruptorSnipe(bs, &bs->lastucmd, time,
+		holdCombat || elevatorEscape || (bs->cur_ps.weapon == WP_DISRUPTOR &&
+		BotNav_ElevatorAbove(bs->cur_ps.origin) != NULL));
 	if (bs->sfjOwnsInput)
 	{
 		if (bs->lastucmd.upmove >= 10)
@@ -1250,6 +1394,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 		bs->lastucmd.weapon, bs->cur_ps.weapon, WP_NUM_WEAPONS, WP_MELEE, WP_SABER) &&
 		g_entities[bs->client].client &&
 		g_entities[bs->client].health > 0 &&
+		bs->snipeStage == BOTCOMBAT_SNIPE_OFF &&
 		(bs->lastucmd.buttons & (BUTTON_ATTACK | BUTTON_ALT_ATTACK))) {
 		gclient_t *client = g_entities[bs->client].client;
 		int interval = Com_Clampi(0, 2000, merc_botfloodprotect.integer);
@@ -3438,6 +3583,9 @@ static qboolean BotNav_DisplacementReachesHazard(bot_state_t *bs, gentity_t *tar
 		end, target->s.number, MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
 	if (tr.startsolid || tr.allsolid)
 		return qfalse;
+	/* Displaced under an activated lift or crusher: the same push/pull logic as ledges. */
+	if (BotNav_ActiveCrusherAt(tr.endpos, qtrue))
+		return qtrue;
 	if (tr.fraction < 1.0f)
 	{
 		/* A lethal volume hit before a wall is itself a reachable hazard. */
@@ -3446,6 +3594,185 @@ static qboolean BotNav_DisplacementReachesHazard(bot_state_t *bs, gentity_t *tar
 	}
 	return BotNav_PointLeadsToDeath(bs, target->client->ps.origin, direction,
 		distance, 1024.0f);
+}
+
+/*
+ * Activated (descending) movers that can crush, rebuilt once per frame. Movers that are
+ * not moving yet are ignored, so bots never set up a crush before the lift is triggered.
+ */
+#define BOTNAV_MAX_CRUSHERS 16
+static int botNavCrusherFrame = -1;
+static int botNavCrusherCount;
+static int botNavCrusherEnts[BOTNAV_MAX_CRUSHERS];
+static float botNavCrusherTravel[BOTNAV_MAX_CRUSHERS];
+
+static void BotNav_RefreshCrushers(void)
+{
+	int i;
+
+	if (botNavCrusherFrame == level.framenum)
+		return;
+	botNavCrusherFrame = level.framenum;
+	botNavCrusherCount = 0;
+	for (i = MAX_CLIENTS; i < level.num_entities && botNavCrusherCount < BOTNAV_MAX_CRUSHERS; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+		float travel;
+		int remaining;
+
+		if (!ent->inuse || ent->s.eType != ET_MOVER || ent->damage <= 0 ||
+			(ent->moverState != MOVER_1TO2 && ent->moverState != MOVER_2TO1) ||
+			ent->s.pos.trType != TR_LINEAR_STOP || ent->s.pos.trDelta[2] >= -1.0f)
+			continue;
+		remaining = ent->s.pos.trTime + ent->s.pos.trDuration - level.time;
+		if (remaining <= 0)
+			continue;
+		travel = -ent->s.pos.trDelta[2] * remaining * 0.001f;
+		botNavCrusherEnts[botNavCrusherCount] = i;
+		botNavCrusherTravel[botNavCrusherCount] = travel;
+		botNavCrusherCount++;
+	}
+}
+
+/* Returns the crusher entity that would crush a player standing at point, or NULL. */
+static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly)
+{
+	int i;
+
+	BotNav_RefreshCrushers();
+	for (i = 0; i < botNavCrusherCount; i++)
+	{
+		gentity_t *mover = &g_entities[botNavCrusherEnts[i]];
+
+		if (lethalOnly && !BotNav_CrusherLethal(mover->damage,
+			(mover->spawnflags & 4) ? 1 : 0))
+			continue;
+		if (BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f, mover->r.absmin, mover->r.absmax,
+			botNavCrusherTravel[i]))
+			return mover;
+	}
+	return NULL;
+}
+
+/* Include resting and rising vertical lifts, independently of offensive crusher detection. */
+static gentity_t *BotNav_ElevatorAbove(const vec3_t point)
+{
+	int i;
+	gentity_t *active = BotNav_ActiveCrusherAt(point, qfalse);
+
+	if (active)
+		return active;
+	for (i = MAX_CLIENTS; i < level.num_entities; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+		qboolean platform, door, train;
+		float nextTravelZ = 0.0f;
+
+		if (!ent->inuse || !ent->r.linked || ent->s.eType != ET_MOVER ||
+			!(ent->r.contents & CONTENTS_SOLID) || !ent->classname)
+			continue;
+		platform = !Q_stricmp(ent->classname, "func_plat");
+		door = !Q_stricmp(ent->classname, "func_door");
+		train = !Q_stricmp(ent->classname, "func_train");
+		if (train && ent->nextTrain && ent->nextTrain->nextTrain)
+			nextTravelZ = ent->nextTrain->nextTrain->s.origin[2] - ent->nextTrain->s.origin[2];
+		if (!BotNav_VerticalElevator(platform, door || train,
+			ent->pos2[2] - ent->pos1[2], nextTravelZ))
+			continue;
+		if (BotNav_BeneathElevator(point, 15.0f, 40.0f, ent->r.absmin, ent->r.absmax))
+			return ent;
+	}
+	return NULL;
+}
+
+/* Grounded bots leave the nearest safe exit from an overhead elevator. */
+static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time)
+{
+	gentity_t *mover;
+	vec3_t dir, best, angles, point;
+	float bestDist = 1.0e9f;
+	int i;
+
+	if (!bs || g_entities[bs->client].health <= 0 || bs->cur_ps.pm_type != PM_NORMAL ||
+		bs->cur_ps.groundEntityNum == ENTITYNUM_NONE)
+		return qfalse;
+	mover = BotNav_ElevatorAbove(bs->cur_ps.origin);
+	if (!mover)
+	{
+		vec3_t intended;
+		float bestAlignment = -2.0f;
+
+		if (bs->sfjOwnsInput || bs->navWallJumpUntil > time ||
+			(bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) ||
+			!BotSFJ_EffectiveInputDirection(bi, intended))
+			return qfalse;
+		VectorMA(bs->cur_ps.origin, 64.0f, intended, point);
+		if (!BotNav_ElevatorAbove(point))
+			return qfalse;
+		VectorClear(best);
+		for (i = 0; i < 8; i++)
+		{
+			float alignment;
+
+			VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
+			AngleVectors(angles, dir, NULL, NULL);
+			VectorMA(bs->cur_ps.origin, 64.0f, dir, point);
+			alignment = DotProduct(dir, intended);
+			if (alignment > bestAlignment && !BotNav_ElevatorAbove(point) &&
+				BotNav_CombatCandidateClear(bs, dir))
+			{
+				bestAlignment = alignment;
+				VectorCopy(dir, best);
+			}
+		}
+		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+			ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK);
+		VectorCopy(best, bi->dir);
+		bi->speed = bestAlignment > -2.0f ? 400.0f : 0.0f;
+		return qtrue;
+	}
+	VectorClear(best);
+	for (i = 0; i < 8; i++)
+	{
+		float step;
+		trace_t tr;
+
+		VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
+		AngleVectors(angles, dir, NULL, NULL);
+		if (!BotNav_CombatCandidateClear(bs, dir))
+			continue;
+		for (step = 32.0f; step <= 512.0f; step += 32.0f)
+		{
+			VectorMA(bs->cur_ps.origin, step, dir, point);
+			JP_Trace(&tr, bs->cur_ps.origin, g_entities[bs->client].r.mins,
+				g_entities[bs->client].r.maxs, point, bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
+			if (tr.startsolid || tr.allsolid || tr.fraction < 1.0f ||
+				BotNav_PointLeadsToDeath(bs, bs->cur_ps.origin, dir, step, 1024.0f) ||
+				BotNav_CombatLandingUnsafe(bs, dir, step))
+				break;
+			if (!BotNav_BeneathElevator(point, 15.0f, 40.0f, mover->r.absmin,
+				mover->r.absmax))
+			{
+				if (step < bestDist)
+				{
+					bestDist = step;
+					VectorCopy(dir, best);
+				}
+				break;
+			}
+		}
+	}
+	if (VectorLengthSquared(best) <= 0.0f)
+		return qfalse;
+	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK | ACTION_JUMP | ACTION_DELAYEDJUMP);
+	VectorCopy(best, bi->dir);
+	bi->speed = 400.0f;
+	NewBotAI_CombatDecision(bs, "EDGE: crusher escape", 1000,
+		"under an elevator (%s); leaving its footprint %.0fu away",
+		mover->classname ? mover->classname : "mover", bestDist);
+	(void)time;
+	return qtrue;
 }
 
 static void BotNav_SelectHazardForce(bot_state_t *bs, bot_input_t *bi,
@@ -4443,7 +4770,8 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 
 	if (BG_InRoll(ps, ps->legsAnim) && BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL)
 		BOT_SFJ_SOFT("roll in progress (pausing strafe)");
-	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs))
+	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs) &&
+		!BotCombat_GunMoveFire(bs))
 		BOT_SFJ_SOFT("queued attack");
 	if (!ignoreNavigation && (bi->actionflags & (softActions & ~(ACTION_ATTACK | ACTION_ALT_ATTACK))))
 		BOT_SFJ_SOFT("queued jump/crouch/walk");
@@ -6622,7 +6950,7 @@ static int BotSFJ_EditRouteDirection(const bot_sfj_track_route_t *route)
 {
 	const float *end;
 
-	if ((level.gametype != GT_CTF && level.gametype != GT_CTY) || route->nodeCount <= 0 ||
+	if ((!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY) || route->nodeCount <= 0 ||
 		!eFlagRed || !eFlagRed->inuse || (eFlagRed->flags & FL_DROPPED_ITEM) ||
 		!eFlagBlue || !eFlagBlue->inuse || (eFlagBlue->flags & FL_DROPPED_ITEM))
 		return 0;
@@ -6635,6 +6963,47 @@ static int BotSFJ_EditRouteDirection(const bot_sfj_track_route_t *route)
 static int BotSFJ_EditRouteColor(int direction, int neutral)
 {
 	return direction < 0 ? 0x000000ff : direction > 0 ? 0x00ff8000 : neutral;
+}
+
+#define BOT_SFJ_EDIT_PROBLEM_COLOR 0x00ff00ff
+
+static qboolean BotSFJ_EditRouteProblematic(const bot_sfj_track_route_t *route)
+{
+	int context, node, deaths = 0, unsafe = 0, successes = 0, failures = 0, untrusted = 0;
+	int hopFailures[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopPasses[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopDeaths[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+
+	for (context = 0; context < 4; context++)
+	{
+		const int index = route->stat[context];
+		const bot_sfj_route_stat_t *stat;
+
+		if (index < 0 || index >= g_botSfjRouteStatCount)
+			continue;
+		stat = &g_botSfjRouteStats[index];
+		deaths += stat->deaths;
+		unsafe += stat->unsafe;
+		successes += stat->completions;
+		failures += stat->stalls;
+		for (node = 0; node < route->nodeCount; node++)
+		{
+			hopFailures[node] += stat->hopFailures[node];
+			hopPasses[node] += stat->hopPasses[node];
+			hopDeaths[node] += stat->hopDeaths[node];
+		}
+	}
+	for (node = 0; node < route->nodeCount; node++)
+		untrusted += !BotSFJ_TrackHopTrusted(hopDeaths[node], hopFailures[node], hopPasses[node]);
+	return BotSFJ_RouteIsProblematic(deaths, unsafe, successes, failures, untrusted) ?
+		qtrue : qfalse;
+}
+
+static int BotSFJ_EditRouteDrawColor(const bot_sfj_track_route_t *route, int neutral)
+{
+	if (BotSFJ_EditRouteProblematic(route))
+		return BOT_SFJ_EDIT_PROBLEM_COLOR;
+	return BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), neutral);
 }
 
 static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *route,
@@ -6676,9 +7045,10 @@ static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *rou
 	else
 		Q_strncpyz(problem, "No recorded hop failures", sizeof(problem));
 	Com_sprintf(summary, sizeof(summary),
-		"^5Route ID %d^7: %d landings | recorded max %.0f ups%s\n"
+		"%s^5Route ID %d^7: %d landings | recorded max %.0f ups%s\n"
 		"Bot results (%d/4 speed contexts)\n%d successes / %d failed or stalled / %d interrupted\n"
 		"%s\nLanding numbers = hop numbers; per-hop results in console",
+		BotSFJ_EditRouteProblematic(route) ? "^6PROBLEM ROUTE^7 (deaths, unsafe or failing hops)\n" : "",
 		route->routeId, route->nodeCount, route->maxSpeed,
 		direction < 0 ? " | ^1toward red flag^7" : direction > 0 ? " | ^4toward blue flag^7" : "",
 		4 - missing, successes, failures, interrupted, problem);
@@ -6741,7 +7111,7 @@ static void BotSFJ_EditFrame(void)
 		if (!viewers[clientNum].notified)
 		{
 			trap->SendServerCommand(clientNum,
-				va("print \"[bot_editmode] %d loaded routes. Red/blue = toward that flag base; neutral routes have green starts and cyan landings. Stand near a numbered start to inspect it; face its direction to separate overlapping starts.\n\"",
+				va("print \"[bot_editmode] %d loaded routes. Red/blue = toward that flag base; neutral routes have green starts and cyan landings; purple = problem route (deaths, unsafe or failing hops). Stand near a numbered start to inspect it; face its direction to separate overlapping starts.\n\"",
 					g_botSfjTrackRouteCount));
 			if (!g_botSfjTrackRouteCount)
 				trap->SendServerCommand(clientNum,
@@ -6773,7 +7143,7 @@ static void BotSFJ_EditFrame(void)
 			if (DistanceSquared(viewer->client->ps.origin, route->start) > 2048.0f * 2048.0f)
 				continue;
 			BotSFJ_EditMarker(clientNum, route->start, route->routeId,
-				BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x0000ff00));
+				BotSFJ_EditRouteDrawColor(route, 0x0000ff00));
 			drawn++;
 		}
 		if (best < 0)
@@ -6800,7 +7170,7 @@ static void BotSFJ_EditFrame(void)
 		for (i = 0; i < route->nodeCount && i < 2; i++)
 		{
 			const int node = viewers[clientNum].hopCursor++ % route->nodeCount;
-			const int color = BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x00ffff00);
+			const int color = BotSFJ_EditRouteDrawColor(route, 0x00ffff00);
 			vec3_t from, to;
 
 			VectorCopy(node ? route->node[node - 1] : route->start, from);
@@ -7739,7 +8109,7 @@ static const float *BotNav_HuntTarget(bot_state_t *bs, const vec3_t origin)
 	int i, best = -1;
 	float bestDistance = 0.0f;
 
-	if (interval <= 0 || level.gametype == GT_SIEGE || level.gametype == GT_CTF ||
+	if (interval <= 0 || level.gametype == GT_SIEGE || JVM_IsCTFMode(level.gametype) ||
 		level.gametype == GT_CTY || level.gametype == GT_DUEL || level.gametype == GT_POWERDUEL)
 	{
 		bs->huntClient = 0;
@@ -7807,7 +8177,7 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 	const int targetTimeout = Com_Clampi(0, 60000, bot_target_timeout.integer);
 	int type = BOT_SFJ_GOAL_NONE, targetClient = -1;
 
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		const qboolean red = level.clients[bs->client].sess.sessionTeam == TEAM_RED;
 		const wpobject_t *base = red ? oFlagRed : oFlagBlue;
@@ -8146,7 +8516,7 @@ static float BotSFJ_FlagDistance(const float *position)
 {
 	float distance = -1.0f;
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY)
 		return distance;
 	if (eFlagRed && eFlagRed->inuse)
 		distance = Distance(position, eFlagRed->r.currentOrigin);
@@ -11283,6 +11653,8 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
 			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
 		return qfalse;
+	if (BotCombat_GunMoveFire(bs))
+		return qfalse;
 	carrying = BotSFJ_ClientCarriesFlag(client);
 	attackingFlag = (bs->sfjTravelGoalValid && bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK &&
 		!(bs->currentEnemy && BotSFJ_ClientCarriesFlag(bs->currentEnemy->client))) ? qtrue : qfalse;
@@ -11291,7 +11663,7 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 		ps->fd.forceGripBeingGripped > level.time ||
 		BG_InKnockDown(ps->legsAnim)) ? qtrue : qfalse;
 	anyHurt = (bs->lastHurtTime && level.time - bs->lastHurtTime < BOT_ROUTE_HARD_HIT_MS) ? qtrue : qfalse;
-	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && bs->sfjTravelGoalValid)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && bs->sfjTravelGoalValid)
 	{
 		const gentity_t *enemy = bs->currentEnemy;
 		const qboolean hasEnemy = enemy && enemy->client && enemy->health > 0;
@@ -11761,6 +12133,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	if (BotSFJ_DefensiveRouteEscape(aggression, enemyClient != NULL, carryingFlag,
 		enemyDistance, BotSFJ_EscapeStartDistance(minStrafe)))
 		retreating = qtrue;
+	if (enemyClient && BotCombat_ShouldKite(bs))
+		retreating = qtrue;
 	if (enemyClient && !retreating && BotSFJ_CombatTravel(bs, ps))
 		bs->sfjPursuitLatched = qtrue;
 	if (!routeCommitted || carryingFlag != bs->sfjWasCarrying ||
@@ -11904,7 +12278,9 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 			(routeRetreat && bs->sfjRoute && !carryingFlag)) &&
 			enemyDistance >= BotSFJ_EscapeStartDistance(minStrafe))
 		{
-			if (!BotSFJ_EscapeFacingAllows(BotSFJ_EscapeBackwardAvailable(bs),
+			/* Gun bots aim at the enemy through the escape, so they never turn away. */
+			if (!BotSFJ_EscapeFacingAllows(BotSFJ_EscapeBackwardAvailable(bs) ||
+				BotCombat_GunMoveFire(bs),
 				bs->frame_Enemy_Vis, enemyDistance, minStrafe))
 			{
 				BotSFJ_Reject(bs, "escape would turn the bot's back on a close visible enemy");
@@ -12725,7 +13101,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		candidate.actionflags |= ACTION_MOVELEFT;
 	else if (rightMove > 0)
 		candidate.actionflags |= ACTION_MOVERIGHT;
-	routeCombatAim = routeCommitted && !holdCombat &&
+	routeCombatAim = (routeCommitted || BotCombat_GunMoveFire(bs)) && !holdCombat &&
 		bs->currentEnemy && bs->currentEnemy->client && bs->frame_Enemy_Vis ? qtrue : qfalse;
 	if (routeCombatAim)
 	{
@@ -13711,7 +14087,7 @@ int BotIsAChickenWuss(bot_state_t *bs)
 		return 0;
 	}
 
-	if (level.gametype == GT_CTF && bs->currentEnemy && bs->currentEnemy->client)
+	if (JVM_IsCTFMode(level.gametype) && bs->currentEnemy && bs->currentEnemy->client)
 	{
 		if (bs->currentEnemy->client->ps.powerups[PW_REDFLAG] ||
 			bs->currentEnemy->client->ps.powerups[PW_BLUEFLAG])
@@ -14213,7 +14589,7 @@ int CTFTakesPriority(bot_state_t *bs)
 	trap->Print("CTFSTATE: %s\n", ctfStateNames[bs->ctfState]);
 #endif
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY)
 	{
 		return 0;
 	}
@@ -14981,6 +15357,239 @@ static qboolean BotCombat_HasRangedAmmo(bot_state_t *bs)
 	return qfalse;
 }
 
+static qboolean BotCombat_GunMoveFire(bot_state_t *bs)
+{
+	const gentity_t *enemy;
+	int weapon;
+
+	if (!bs || !(enemy = bs->currentEnemy) || !enemy->client)
+		return qfalse;
+	weapon = bs->cur_ps.weapon;
+	return BotCombat_GunMoveFireAllowed(bot_route_gunfire.integer,
+		weapon > WP_SABER && weapon <= LAST_USEABLE_WEAPON,
+		BotCombat_ModeAvailable(bs, weapon, 0) || BotCombat_ModeAvailable(bs, weapon, 1),
+		bs->frame_Enemy_Vis, enemy->health > 0, bs->frame_Enemy_Len) ? qtrue : qfalse;
+}
+
+static qboolean BotCombat_EnemyMeleeThreat(const gentity_t *enemy)
+{
+	static const int powers[] = { FP_PUSH, FP_PULL, FP_GRIP, FP_LIGHTNING, FP_DRAIN };
+	const playerState_t *eps;
+	int i;
+
+	if (!enemy || !enemy->client)
+		return qfalse;
+	eps = &enemy->client->ps;
+	if (eps->weapon == WP_SABER)
+		return qtrue;
+	for (i = 0; i < (int)ARRAY_LEN(powers); i++)
+	{
+		if (!(g_forcePowerDisable.integer & (1 << powers[i])) &&
+			eps->fd.forcePowerLevel[powers[i]] > FORCE_LEVEL_0 &&
+			(eps->fd.forcePowersKnown & (1 << powers[i])))
+			return qtrue;
+	}
+	return qfalse;
+}
+
+static qboolean BotCombat_ShouldKite(bot_state_t *bs)
+{
+	if (!bs || BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+		return qfalse;
+	return BotCombat_GunKiteWanted(bot_gun_kitedistance.value, BotCombat_GunMoveFire(bs),
+		BotCombat_EnemyMeleeThreat(bs->currentEnemy), bs->frame_Enemy_Len) ? qtrue : qfalse;
+}
+
+static void BotCombat_SetSnipeStage(bot_state_t *bs, int stage, int time)
+{
+	bs->snipeStage = stage;
+	bs->snipeStageTime = time;
+	if (stage == BOTCOMBAT_SNIPE_OFF)
+		bs->snipeAirborne = qfalse;
+}
+
+/* Check the ballistic path before surrendering air steering to the scope. */
+static qboolean BotCombat_AirSnipeLandingSafe(bot_state_t *bs)
+{
+	const playerState_t *ps = &bs->cur_ps;
+	vec3_t end, dir;
+	trace_t tr;
+	float gravity, drop, duration, distance, step, speed;
+
+	VectorCopy(ps->origin, end);
+	end[2] -= 2048.0f;
+	JP_Trace(&tr, ps->origin, g_entities[bs->client].r.mins,
+		g_entities[bs->client].r.maxs, end, bs->client,
+		MASK_PLAYERSOLID | CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP, qfalse, 0, 0);
+	if (tr.startsolid || tr.allsolid || tr.fraction >= 1.0f ||
+		(tr.contents & (CONTENTS_LAVA | CONTENTS_SLIME | CONTENTS_NODROP)))
+		return qfalse;
+	gravity = (float)ps->gravity;
+	if (gravity <= 0.0f)
+		return qfalse;
+	drop = ps->origin[2] - tr.endpos[2];
+	duration = (ps->velocity[2] + sqrtf(ps->velocity[2] * ps->velocity[2] +
+		2.0f * gravity * drop)) / gravity;
+	if (duration < 0.0f || duration > 2.0f)
+		return qfalse;
+	VectorSet(dir, ps->velocity[0], ps->velocity[1], 0.0f);
+	speed = VectorNormalize(dir);
+	distance = speed * duration;
+	for (step = 0.0f; step < distance; step += 64.0f)
+		if (BotNav_PointLeadsToDeath(bs, ps->origin, dir, step, 2048.0f) ||
+			BotNav_CombatLandingUnsafe(bs, dir, step))
+			return qfalse;
+	return !BotNav_PointLeadsToDeath(bs, ps->origin, dir, distance, 2048.0f) &&
+		!BotNav_CombatLandingUnsafe(bs, dir, distance);
+}
+
+/*
+==============
+BotCombat_ApplyDisruptorSnipe
+
+At range a disruptor bot taps alt to zoom, lets the zoom lock, then holds attack without
+movement input. It can also begin near the apex of a safe, unowned jump. A fully
+charged shot is released once the aim trace is on the enemy's head, or at the timeout.
+It unzooms when the enemy is lost, closes in, or movement is needed.
+==============
+*/
+static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat)
+{
+	const playerState_t *ps;
+	gentity_t *enemy;
+	qboolean want, grounded, safeLanding, inView, movementOwned;
+	vec3_t toEnemy, forward;
+	int fullMs;
+
+	if (!bs || !ucmd || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	enemy = bs->currentEnemy;
+	if (ps->weapon != WP_DISRUPTOR || g_entities[bs->client].health <= 0)
+	{
+		bs->snipeStage = BOTCOMBAT_SNIPE_OFF;
+		bs->snipeAirborne = qfalse;
+		return;
+	}
+	grounded = ps->groundEntityNum != ENTITYNUM_NONE;
+	movementOwned = bs->sfjOwnsInput || holdCombat || bs->navWallJumpUntil > time ||
+		bs->sfjWallRunStage || bs->sfjRouteWallStage || bs->navHazardUntil > time;
+	safeLanding = grounded || (!movementOwned && ps->velocity[2] <= 40.0f &&
+		(bs->snipeAirborne || ps->velocity[2] >= -80.0f) &&
+		BotCombat_AirSnipeLandingSafe(bs));
+	inView = qfalse;
+	if (enemy && enemy->client && enemy->health > 0 && bs->frame_Enemy_Vis)
+	{
+		VectorSubtract(enemy->client->ps.origin, ps->origin, toEnemy);
+		toEnemy[2] += enemy->client->ps.viewheight - ps->viewheight;
+		VectorNormalize(toEnemy);
+		AngleVectors(ps->viewangles, forward, NULL, NULL);
+		inView = DotProduct(toEnemy, forward) >= 0.7071f;
+	}
+	want = BotCombat_SnipeWanted(bot_disruptor_sniperange.value, qtrue,
+		ps->ammo[weaponData[WP_DISRUPTOR].ammoIndex] >= weaponData[WP_DISRUPTOR].altEnergyPerShot,
+		enemy && enemy->client && enemy->health > 0 && bs->frame_Enemy_Vis,
+		BotCombat_AirSnipeAllowed(grounded, ps->velocity[2], bs->snipeAirborne,
+			inView, safeLanding, movementOwned), movementOwned,
+		bs->frame_Enemy_Len) ? qtrue : qfalse;
+	if (bs->snipeStage == BOTCOMBAT_SNIPE_OFF)
+	{
+		if (want && ps->zoomMode == 0 && ps->weaponstate == WEAPON_READY && ps->weaponTime <= 0)
+		{
+			bs->snipeAirborne = !grounded;
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_ZOOM, time);
+		}
+		else if (!want && ps->zoomMode == 1 && ps->zoomLocked)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+		else
+			return;
+	}
+	if (bs->snipeStage != BOTCOMBAT_SNIPE_UNZOOM && bs->snipeStage != BOTCOMBAT_SNIPE_CHARGE && !want)
+		BotCombat_SetSnipeStage(bs, ps->zoomMode == 1 ? BOTCOMBAT_SNIPE_UNZOOM : BOTCOMBAT_SNIPE_OFF, time);
+
+	ucmd->buttons &= ~(BUTTON_ATTACK | BUTTON_ALT_ATTACK);
+	switch (bs->snipeStage)
+	{
+	case BOTCOMBAT_SNIPE_ZOOM:
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ALT_ATTACK;
+		if (ps->zoomMode == 1 && time - bs->snipeStageTime >= BOTCOMBAT_SNIPE_ZOOM_PRESS_MS)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_LOCK, time);
+		else if (time - bs->snipeStageTime > 1000)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+		break;
+	case BOTCOMBAT_SNIPE_LOCK:
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		if (ps->zoomMode == 1 && ps->zoomLocked)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_CHARGE, time);
+		else if (ps->zoomMode != 1 || time - bs->snipeStageTime > 500)
+			BotCombat_SetSnipeStage(bs, ps->zoomMode == 1 ? BOTCOMBAT_SNIPE_UNZOOM : BOTCOMBAT_SNIPE_OFF, time);
+		break;
+	case BOTCOMBAT_SNIPE_CHARGE:
+	{
+		trace_t tr;
+		vec3_t eye, fwd, end;
+		qboolean charged, onTarget = qfalse;
+		float headZ = 0.0f, hitZ = 0.0f;
+
+		if (ps->zoomMode != 1)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+			break;
+		}
+		if (!want)
+		{
+			// Releasing attack fires whatever charge is held; then leave the scope.
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+			break;
+		}
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		fullMs = BotCombat_DisruptorFullChargeMs((g_tweakWeapons.integer & WT_TRIBES) ? 1 : 0,
+			(g_tweakWeapons.integer & WT_DISRUPTOR_DAM) ? 1 : 0);
+		charged = (ps->weaponstate == WEAPON_CHARGING_ALT || ps->weaponstate == WEAPON_CHARGING) &&
+			level.time - ps->weaponChargeTime >= fullMs ? qtrue : qfalse;
+		if (charged)
+		{
+			VectorCopy(ps->origin, eye);
+			eye[2] += ps->viewheight;
+			AngleVectors(ps->viewangles, fwd, NULL, NULL);
+			VectorMA(eye, 8192.0f, fwd, end);
+			JP_Trace(&tr, eye, NULL, NULL, end, bs->client, MASK_SHOT, qfalse, 0, 0);
+			onTarget = (tr.entityNum == enemy->s.number) ? qtrue : qfalse;
+			hitZ = tr.endpos[2];
+			headZ = enemy->client->ps.origin[2] + enemy->client->ps.viewheight;
+		}
+		if (BotCombat_SnipeRelease(charged, onTarget, hitZ, headZ,
+			time - bs->snipeStageTime) && charged)
+		{
+			// One released frame fires the shot; the zoom stays locked for the next charge.
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_LOCK, time);
+			break;
+		}
+		if (time - bs->snipeStageTime >= BOTCOMBAT_SNIPE_TIMEOUT_MS + 2000)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+			break;
+		}
+		ucmd->buttons |= BUTTON_ATTACK;
+		break;
+	}
+	case BOTCOMBAT_SNIPE_UNZOOM:
+		if (ps->zoomMode != 1 || time - bs->snipeStageTime > 1500)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+			break;
+		}
+		if (ps->weaponstate == WEAPON_READY && ps->zoomLockTime < ucmd->serverTime &&
+			!(ps->eFlags & EF_ALT_FIRING))
+			ucmd->buttons |= BUTTON_ALT_ATTACK;
+		break;
+	default:
+		bs->snipeStage = BOTCOMBAT_SNIPE_OFF;
+		break;
+	}
+}
+
 static int BotCombat_SplashRadius(int weapon, int alt)
 {
 	switch (weapon)
@@ -15015,7 +15624,11 @@ static int BotCombat_SelectRanged(bot_state_t *bs, int *altOut)
 			case WP_BRYAR_PISTOL:
 			case WP_BRYAR_OLD: damage = alt ? 30.0f : 10.0f; break;
 			case WP_BLASTER: damage = 20.0f; break;
-			case WP_DISRUPTOR: damage = 30.0f; break;
+			case WP_DISRUPTOR:
+				damage = 30.0f;
+				if (bot_disruptor_sniperange.value > 0.0f && distance >= bot_disruptor_sniperange.value)
+					damage = 100.0f;
+				break;
 			case WP_BOWCASTER: damage = 50.0f; break;
 			case WP_REPEATER: damage = alt ? 60.0f : 14.0f; break;
 			case WP_DEMP2: damage = alt ? 36.0f : 35.0f; break;
@@ -15032,6 +15645,9 @@ static int BotCombat_SelectRanged(bot_state_t *bs, int *altOut)
 				interval += 1400;
 			if (weapon == WP_THERMAL)
 				interval += 1250;
+			if (weapon == WP_DISRUPTOR && damage > 30.0f)
+				interval += BotCombat_DisruptorFullChargeMs((g_tweakWeapons.integer & WT_TRIBES) ? 1 : 0,
+					(g_tweakWeapons.integer & WT_DISRUPTOR_DAM) ? 1 : 0);
 			dps = damage * 1000.0f / (interval > 0 ? interval : 1000);
 			effectiveness = 1.0f;
 			if (distance > 600.0f && weapon == WP_FLECHETTE && !alt)
@@ -15345,7 +15961,7 @@ void GetIdealDestination(bot_state_t *bs)
 	}
 
 	if (!badthing && (BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) ||
-		((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)) &&
+		((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)) &&
 		CTFTakesPriority(bs))
 	{
 		bs->runningToEscapeThreat = BotSFJ_ClientCarriesFlag(g_entities[bs->client].client);
@@ -15961,7 +16577,7 @@ void CommanderBotTeamplayAI(bot_state_t *bs)
 //pick which commander ai to use based on gametype
 void CommanderBotAI(bot_state_t *bs)
 {
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		CommanderBotCTFAI(bs);
 	}
@@ -17039,6 +17655,19 @@ int BotTryAnotherWeapon(bot_state_t *bs)
 			BotSelectWeapon(bs->client, i);
 			return bs->cur_ps.weapon != i;
 		}
+	}
+
+	// Out of ammo: the saber beats the stun baton/fists that the index scan would reach first.
+	if ((bs->cur_ps.stats[STAT_WEAPONS] & (1 << WP_SABER)) && !bs->cur_ps.saberInFlight)
+	{
+		bs->doAltAttack = 0;
+		bs->virtualWeapon = WP_SABER;
+		if (bs->cur_ps.weapon != WP_SABER)
+		{
+			BotSelectWeapon(bs->client, WP_SABER);
+			return 1;
+		}
+		return 0;
 	}
 
 	i = 1;
@@ -18360,6 +18989,7 @@ void NewBotAI_GetAim(bot_state_t *bs)
 	vec3_t saberDiff;
 	gentity_t *saber;
 	qboolean aimRewritten = qfalse;
+	qboolean lightningAim;
 
 	bs->hitSpotted = qfalse;
 	if (bs->runningLikeASissy) {
@@ -18369,6 +18999,8 @@ void NewBotAI_GetAim(bot_state_t *bs)
 
 	if (!bs->currentEnemy || !bs->currentEnemy->client)
 		return;
+	lightningAim = ((bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) ||
+		bs->lightningHoldUntil > level.time) ? qtrue : qfalse;
 
 	/*
 		trType_t	trType;
@@ -18430,7 +19062,11 @@ void NewBotAI_GetAim(bot_state_t *bs)
 	else { //Normal aim at player
 		VectorCopy(bs->currentEnemy->client->ps.origin, headlevel);
 
-		if (bs->currentEnemy && bs->currentEnemy->client)
+		if (lightningAim)
+			headlevel[2] += NewBotAI_LightningAimHeight(bs->currentEnemy->client->ps.viewheight);
+		else if (bs->snipeStage != BOTCOMBAT_SNIPE_OFF && bs->cur_ps.weapon == WP_DISRUPTOR)
+			headlevel[2] += bs->currentEnemy->client->ps.viewheight;
+		else if (bs->currentEnemy && bs->currentEnemy->client)
 			headlevel[2] += bs->currentEnemy->client->ps.viewheight - 16;//aim at chest?
 		if (bs->cur_ps.saberInFlight)
 		{
@@ -18440,6 +19076,10 @@ void NewBotAI_GetAim(bot_state_t *bs)
 		if (bs->cur_ps.saberInFlight)
 		{
 			NewBotAI_AdjustSaberThrowLead(bs);
+		}
+		else if (lightningAim || bs->cur_ps.weapon > WP_SABER)
+		{
+			// Keep the bolt/shot line on the target; no swing/sweep yaw offsets.
 		}
 		else if (bs->saberTechniqueCandidate || bs->saberDefenseActive ||
 			bs->cur_ps.saberBlocked == BLOCKED_PARRY_BROKEN ||
@@ -18986,7 +19626,7 @@ static float NewBotAI_GetWallEscapeTurnAngle(void)
 
 static int NewBotAI_GetLightningBurstHoldMs(void)
 {
-	return Q_irand(1000, 2000);
+	return Q_irand(NEWBOTAI_LIGHTNING_HOLD_MIN_MS, NEWBOTAI_LIGHTNING_HOLD_MAX_MS);
 }
 
 static void NewBotAI_ResetRecoveryMovement(bot_state_t *bs)
@@ -19202,7 +19842,9 @@ static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs)
 	{
 		return qfalse;
 	}
-	if (bs->cur_ps.fd.forcePower <= 25 ||
+	if (!NewBotAI_LightningForceAllows(
+			(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) ? 1 : 0,
+			bs->cur_ps.fd.forcePower) ||
 		bs->frame_Enemy_Len < BotGetLightningStartDistance(bs) ||
 		bs->frame_Enemy_Len > BotGetLightningMaxDistance(bs))
 	{
@@ -19211,7 +19853,8 @@ static qboolean NewBotAI_CanContinueLightningBurst(bot_state_t *bs)
 
 	VectorSubtract(bs->currentEnemy->client->ps.origin, bs->eye, a_fo);
 	vectoangles(a_fo, a_fo);
-	if (!InFieldOfVision(bs->viewangles, 50, a_fo))
+	// The aim tracks the target during a burst; allow some slack for the turn rate.
+	if (!InFieldOfVision(bs->viewangles, 70, a_fo))
 	{
 		return qfalse;
 	}
@@ -21081,13 +21724,31 @@ static qboolean NewBotAI_UpdateSaberThrowPass(bot_state_t *bs, qboolean *heading
 	return bs->saberThrowPassedTarget;
 }
 
+static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs)
+{
+	const playerState_t *ps;
+	int start;
+
+	if (!bs || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	start = NewBotAI_SaberThrowSyncedStart(ps->saberInFlight ? 1 : 0, bs->saberThrowStartTime,
+		ps->saberDidThrowTime, level.time);
+	if (start == bs->saberThrowStartTime)
+		return;
+	bs->saberThrowStartTime = start;
+	bs->saberThrowLastVisibleTime = 0;
+	bs->saberThrowPassedTarget = qfalse;
+	bs->saberThrowPhase = NEWBOTAI_THROW_LAUNCH;
+	bs->saberThrowPhaseTime = 0;
+	bs->saberThrowSteerTime = 0;
+}
+
 void NewBotAI_SaberThrowing(bot_state_t* bs)
 {
 	if (NewBotAI_HasDroppedOwnSaber(bs))
 		return;
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = bs->cur_ps.saberDidThrowTime > 0 ?
-			bs->cur_ps.saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 
 	if (!NewBotAI_SaberThrowShouldHold(bs, level.time - bs->saberThrowStartTime, qfalse))
 	{
@@ -22601,9 +23262,22 @@ static void NewBotAI_TrackEnemySwing(bot_state_t *bs)
 static qboolean NewBotAI_ShouldCounterSwing(bot_state_t *bs)
 {
 	NewBotAI_TrackEnemySwing(bs);
+	if (NewBotAI_IsSaberOnlyDuel(bs) && bs->enemySwingActive &&
+		bs->enemySwingChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN &&
+		bs->cur_ps.groundEntityNum != ENTITYNUM_NONE && bs->cur_ps.weaponTime <= 0 &&
+		bs->cur_ps.saberBlocked == BLOCKED_NONE && !bs->cur_ps.saberInFlight &&
+		(bs->cur_ps.saberMove == LS_NONE || bs->cur_ps.saberMove == LS_READY) &&
+		bs->counterSwingFor != bs->enemySwingStartTime &&
+		level.time - bs->enemySwingStartTime <= NEWBOTAI_CHAIN_COUNTER_WINDOW_MS &&
+		NewBotAI_GetEnemyDistance2D(bs) <= NEWBOTAI_CHAIN_COUNTER_RANGE)
+	{
+		//A continuous sweeper is countered early in the next linked swing.
+		bs->counterSwingFor = bs->enemySwingStartTime;
+		return qtrue;
+	}
 	if (NewBotAI_IsSaberOnlyDuel(bs))
 	{
-		//Saber-only: never swing into a live swing; punish in the gap right after it.
+		//Saber-only: never swing into a single live swing; punish in the gap right after it.
 		if (bs->enemySwingActive || bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
 			bs->cur_ps.weaponTime > 0 || bs->cur_ps.saberBlocked != BLOCKED_NONE ||
 			bs->cur_ps.saberInFlight ||
@@ -22670,6 +23344,10 @@ static qboolean NewBotAI_UpdateSwingDodge(bot_state_t *bs)
 			//Back off only from 90-120u; closer in, step inside or hold and block.
 			bs->swingDodgeStyle = NewBotAI_GetSaberOnlySweepResponse(dist2D,
 				mistakeChance, Q_irand(1, 100), Q_irand(1, 100));
+			//A continuous sweeper is answered by stepping in, not by retreating forever.
+			if (bs->swingDodgeStyle != NEWBOTAI_SWING_DODGE_BACKPEDAL &&
+				NewBotAI_SweepChainStepsIn(bs->enemySwingChain, dist2D))
+				bs->swingDodgeStyle = NEWBOTAI_SWING_DODGE_ADVANCE;
 		}
 		else
 		{
@@ -26220,8 +26898,7 @@ static void NewBotAI_AdjustSaberThrowLead(bot_state_t *bs)
 		ps->saberEntityNum <= 0 || ps->saberEntityNum >= ENTITYNUM_WORLD)
 		return;
 	saber = &g_entities[ps->saberEntityNum];
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = ps->saberDidThrowTime > 0 ? ps->saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 	if (!saber->inuse || saber->think == saberBackToOwner)
 	{
 		if (bs->saberThrowPhase != NEWBOTAI_THROW_RECALL)
@@ -26562,8 +27239,7 @@ static void NewBotAI_ApplySaberThrowInput(bot_state_t *bs, bot_input_t *bi)
 		}
 		return;
 	}
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = ps->saberDidThrowTime > 0 ? ps->saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 	if (!bs->frame_Enemy_Vis)
 		NewBotAI_AdjustSaberThrowLead(bs);
 	hardRecall = !bs->currentEnemy || !bs->currentEnemy->client ||
@@ -30264,6 +30940,7 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	{
 		context.enemySwingTimingKnown = 1;
 		context.msSinceEnemySwingStart = level.time - bs->enemyAttackStartTime;
+		context.enemySwingChain = bs->enemySwingChain;
 	}
 	{
 		float range2D, predicted2D, radial2D;
@@ -30340,7 +31017,7 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	}
 	if (!bs->saberDefenseActive && ps->groundEntityNum != ENTITYNUM_NONE &&
 		ps->weaponTime <= 0 && (ps->saberMove == LS_NONE || ps->saberMove == LS_READY) &&
-		NewBotAI_SaberPressureCounterReady(context))
+		(NewBotAI_SaberPressureCounterReady(context) || NewBotAI_SweepChainCounterReady(context)))
 	{
 		bs->saberTacticUntil = 0;
 		bs->saberTechniqueAirExitUntil = 0;
@@ -31030,7 +31707,7 @@ qboolean NewBotAI_CapRoute(bot_state_t *bs, float thinktime)
 	int activeCapRoute, activeCapRouteSequence; //sequence,
 	vec3_t newSpot = { 0 };
 
-	if (level.gametype != GT_CTF || !g_entities[bs->client].client || !g_entities[bs->client].client->pers.activeCapRoute)
+	if (!JVM_IsCTFMode(level.gametype) || !g_entities[bs->client].client || !g_entities[bs->client].client->pers.activeCapRoute)
 		return qfalse;
 
 	if (level.clients[bs->client].sess.sessionTeam == TEAM_RED) {
@@ -32112,6 +32789,7 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		return;
 
 	NewBotAI_ConfigureSaberThrow(bs);
+	NewBotAI_SyncSaberThrowStart(bs);
 
 	targetMode = BotGetNewBotAITargetMode();
 	someonesHere = BotHasActiveHumanPlayers();
@@ -32209,7 +32887,7 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		}
 	}
 
-	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
 		BotSFJ_SetTravelGoal(bs, &bs->cur_ps, BotSFJ_ClientCarriesFlag(g_entities[bs->client].client));
 
 	// Route runners and defensive flag objectives navigate instead of hunting opponents.
@@ -32574,6 +33252,17 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		NewBotAI_Tribes(bs, thinktime);
 		NewBotAI_ApplyRandomStrafeOverlay(bs);
 		return;
+	}
+
+	// A fully holstered saber makes every attack gate treat the saber as unusable, so the
+	// bot would never press attack (which also ignites it). Ignite it explicitly in combat.
+	if (NewBotAI_ShouldIgniteSaberForCombat(bs->cur_ps.weapon == WP_SABER,
+		bs->cur_ps.saberHolstered, bs->cur_ps.saberInFlight ? 1 : 0, bs->frame_Enemy_Vis,
+		bs->frame_Enemy_Len, g_entities[bs->client].client->ps.weaponTime,
+		bs->duelOfferHoldUntil > level.time, level.time - bs->saberIgniteRetryTime))
+	{
+		bs->saberIgniteRetryTime = level.time;
+		Cmd_ToggleSaber_f(&g_entities[bs->client]);
 	}
 
 	bs->saberTechniqueCandidate = bs->cur_ps.weapon == WP_SABER &&
@@ -33757,9 +34446,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 
 	if (bs->cur_ps.saberInFlight)
 	{
-		if (bs->saberThrowStartTime <= 0)
-			bs->saberThrowStartTime = bs->cur_ps.saberDidThrowTime > 0 ?
-				bs->cur_ps.saberDidThrowTime : level.time;
+		NewBotAI_SyncSaberThrowStart(bs);
 		bs->saberThrowTime = level.time + Q_irand(4000, 10000);
 	}
 
@@ -34406,6 +35093,15 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 		trap->EA_Alt_Attack(bs->client);
 	}
 
+	// The engine stops lightning as soon as the force button is released, so keep holding
+	// a running burst even on frames where the force chooser returned early.
+	if (!useTheForce && !BotNav_ShouldHoldCombat(bs) && !NewBotAI_IsEnemySaberThreatImminent(bs) &&
+		(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)) &&
+		NewBotAI_CanContinueLightningBurst(bs))
+	{
+		level.clients[bs->client].ps.fd.forcePowerSelected = FP_LIGHTNING;
+		useTheForce = qtrue;
+	}
 	if ((!useTheForce ||
 		level.clients[bs->client].ps.fd.forcePowerSelected != FP_LIGHTNING) &&
 		!(bs->cur_ps.fd.forcePowersActive & (1 << FP_LIGHTNING)))

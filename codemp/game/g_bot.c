@@ -164,6 +164,7 @@ int G_GetMapTypeBits(char *type)
 		if( strstr( type, "ctf" ) ) {
 			typeBits |= (1 << GT_CTF);
 			typeBits |= (1 << GT_CTY);
+			typeBits |= (1 << GT_CTFC);
 		}
 		if( strstr( type, "cty" ) ) {
 			typeBits |= (1 << GT_CTY);
@@ -320,6 +321,7 @@ const char *G_GetDefaultMap(int gametype)
         mapName = "mp/siege_hoth";
         break;
     case GT_CTF:
+    case GT_CTFC:
        mapName = "mp/ctf3";            
        break;
     default:

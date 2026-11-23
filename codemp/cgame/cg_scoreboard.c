@@ -85,8 +85,8 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 	//vec3_t	headAngles;
 	clientInfo_t	*ci;
 	int				iconx = SB_BOTICON_X + (SB_RATING_WIDTH / 2);
-	float			scale = (largeFormat && (!cg_smallScoreboard.integer && cgs.gametype != GT_CTF)) ? 1.0f : 0.75f,
-					iconSize = (largeFormat && (!cg_smallScoreboard.integer && cgs.gametype != GT_CTF)) ? SB_NORMAL_HEIGHT : SB_INTER_HEIGHT;
+	float			scale = (largeFormat && (!cg_smallScoreboard.integer && !JVM_IsCTFMode(cgs.gametype))) ? 1.0f : 0.75f,
+					iconSize = (largeFormat && (!cg_smallScoreboard.integer && !JVM_IsCTFMode(cgs.gametype))) ? SB_NORMAL_HEIGHT : SB_INTER_HEIGHT;
 
 	if ( score->client < 0 || score->client >= cgs.maxclients ) {
 		Com_Printf( "Bad score->client: %i\n", score->client );
@@ -94,7 +94,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 	}
 
 	ci = &cgs.clientinfo[score->client];
-	if (cgs.gametype == GT_JOM && ci->team != TEAM_SPECTATOR)
+	if ((cgs.gametype == GT_JOM || cgs.gametype == GT_CTFC) && ci->team != TEAM_SPECTATOR)
 		CG_Text_Paint(iconx - 28, y + 12, 0.35f, colorWhite,
 			ci->jvmClass == JVM_TANK ? "Tank" : ci->jvmClass == JVM_MERC ? "Merc" : "Jedi",
 			0, 0, ITEM_TEXTSTYLE_SHADOWED, FONT_SMALL);
@@ -102,7 +102,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 	// draw the handicap or bot skill marker (unless player has flag)
 	if ( ci->powerups & (1<<PW_NEUTRALFLAG) )
 	{
-		if ( largeFormat && (!cg_smallScoreboard.integer && cgs.gametype != GT_CTF))//JAPRO - Clientside - Small Scoreboard
+		if ( largeFormat && (!cg_smallScoreboard.integer && !JVM_IsCTFMode(cgs.gametype)))//JAPRO - Clientside - Small Scoreboard
 			CG_DrawFlagModel( iconx, y - (32 - BIGCHAR_HEIGHT) / 2, iconSize, iconSize, TEAM_FREE, qfalse );
 		else
 			CG_DrawFlagModel( iconx, y, iconSize, iconSize, TEAM_FREE, qfalse );
@@ -128,7 +128,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 
 			if (scl->classShader)
 			{
-				CG_DrawPic (iconx, y, (((largeFormat && !cg_smallScoreboard.integer && cgs.gametype != GT_CTF))?24:12), ((largeFormat && !cg_smallScoreboard.integer)?24:12), scl->classShader);//JAPRO - Clientside - Small Scoreboard & ratio fix.
+				CG_DrawPic (iconx, y, (((largeFormat && !cg_smallScoreboard.integer && !JVM_IsCTFMode(cgs.gametype)))?24:12), ((largeFormat && !cg_smallScoreboard.integer)?24:12), scl->classShader);//JAPRO - Clientside - Small Scoreboard & ratio fix.
 			}
 		}
 	}
@@ -166,7 +166,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 		}
 
 		hcolor[3] = fade * 0.7;
-		CG_FillRect( SB_SCORELINE_X - 5, y + 2, 640 - SB_SCORELINE_X * 2 + 10, (largeFormat && (!cg_smallScoreboard.integer && cgs.gametype != GT_CTF))?SB_NORMAL_HEIGHT:SB_INTER_HEIGHT, hcolor );//JAPRO - Clientside - Small Scoreboard
+		CG_FillRect( SB_SCORELINE_X - 5, y + 2, 640 - SB_SCORELINE_X * 2 + 10, (largeFormat && (!cg_smallScoreboard.integer && !JVM_IsCTFMode(cgs.gametype)))?SB_NORMAL_HEIGHT:SB_INTER_HEIGHT, hcolor );//JAPRO - Clientside - Small Scoreboard
 	}
 
 	CG_Text_Paint (SB_NAME_X, y, 0.9f * scale, colorWhite, ci->name,0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_MEDIUM );
@@ -179,7 +179,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 			{
 				CG_Text_Paint (SB_SCORE_X, y, 1.0f * scale, colorWhite, va("%i/%i", ci->wins, ci->losses),0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL );
 			}
-			else if (cgs.gametype == GT_CTF)
+			else if (JVM_IsCTFMode(cgs.gametype))
 			{
 				CG_Text_Paint(SB_SCORELINE_X + 0.47f * SB_SCORELINE_WIDTH, y, 1.0f * scale, colorWhite, va("%i", score->score),0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
 				CG_Text_Paint(SB_SCORELINE_X + 0.59f * SB_SCORELINE_WIDTH, y, 1.0f * scale, colorWhite, va("%i", score->captures),0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
@@ -191,7 +191,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 //JAPRO - Clientside - Scoreboard Deaths - Start
 				if ((cg_scoreDeaths.integer == 2 && (cgs.serverMod < SVMOD_JAPLUS || !cgs.pluginSet)) || cg_scoreDeaths.integer == 3) //3 shows local count always (debugging)
 					score->deaths = ci->deaths;
-				if (cg_scoreDeaths.integer && (cg_scoreDeaths.integer == 2 || (cgs.serverMod >= SVMOD_JAPLUS && cgs.pluginSet) || cg_scoreDeaths.integer == 3) && (cgs.gametype != GT_CTF && cgs.gametype != GT_DUEL))
+				if (cg_scoreDeaths.integer && (cg_scoreDeaths.integer == 2 || (cgs.serverMod >= SVMOD_JAPLUS && cgs.pluginSet) || cg_scoreDeaths.integer == 3) && (!JVM_IsCTFMode(cgs.gametype) && cgs.gametype != GT_DUEL))
 					CG_Text_Paint(SB_SCORE_X, y, 1.0f * scale, colorWhite, va("%i/%i", score->score, score->deaths), 0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
 				else
 					CG_Text_Paint(SB_SCORE_X, y, 1.0f * scale, colorWhite, va("%i", score->score), 0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
@@ -199,7 +199,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 			}
 		}
 		
-		if (cgs.gametype == GT_CTF)
+		if (JVM_IsCTFMode(cgs.gametype))
 		{
 			if (ci->botSkill != -1)
 				CG_Text_Paint(SB_SCORELINE_X + 0.80 * SB_SCORELINE_WIDTH, y, 1.0f * scale, colorWhite, "BOT", 0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
@@ -217,7 +217,7 @@ static void CG_DrawClientScore( int y, score_t *score, float *color, float fade,
 			CG_Text_Paint(SB_TIME_X, y, 1.0f * scale, colorWhite, va("%i", score->time),0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL);
 		}
 	}
-	else if (cgs.gametype == GT_CTF)
+	else if (JVM_IsCTFMode(cgs.gametype))
 	{
 		CG_Text_Paint (SB_SCORELINE_X + 0.47f * SB_SCORELINE_WIDTH, y, 1.0f * scale, colorWhite, "-",0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL); //score
 		CG_Text_Paint (SB_SCORELINE_X + 0.59f * SB_SCORELINE_WIDTH, y, 1.0f * scale, colorWhite, "-",0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_SMALL); //caps
@@ -518,7 +518,7 @@ qboolean CG_DrawOldScoreboard( void ) {
 
 		CG_Text_Paint ( SB_SCORE_X, y, 1.0f, colorWhite, sWL, 0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_MEDIUM );
 	}
-	else if (cgs.gametype == GT_CTF)
+	else if (JVM_IsCTFMode(cgs.gametype))
 	{
 		CG_Text_Paint ( SB_SCORELINE_X + 0.47f * SB_SCORELINE_WIDTH, y, 1.0f, colorWhite, CG_GetStringEdString("MP_INGAME", "SCORE"), 0, 0, ITEM_TEXTSTYLE_OUTLINED, FONT_MEDIUM );
 
@@ -539,7 +539,7 @@ qboolean CG_DrawOldScoreboard( void ) {
 	y = SB_TOP;
 
 	// If there are more than SB_MAXCLIENTS_NORMAL, use the interleaved scores
-	if ( cg.numScores > SB_MAXCLIENTS_NORMAL || (cg_smallScoreboard.integer || cgs.gametype == GT_CTF)) {//JAPRO - Clientside - Small Scoreboard
+	if ( cg.numScores > SB_MAXCLIENTS_NORMAL || (cg_smallScoreboard.integer || JVM_IsCTFMode(cgs.gametype))) {//JAPRO - Clientside - Small Scoreboard
 		maxClients = SB_MAXCLIENTS_INTER;
 		lineHeight = SB_INTER_HEIGHT;
 		topBorderSize = 8;
@@ -637,7 +637,7 @@ qboolean CG_DrawOldScoreboard( void ) {
 		}
 		maxClients = realMaxClients;
 
-		if (cgs.serverMod == SVMOD_JAPRO && (cgs.gametype == GT_TEAM || cgs.gametype == GT_CTF)) { 	//how do we tell if server has racemode set. meme..
+		if (cgs.serverMod == SVMOD_JAPRO && (cgs.gametype == GT_TEAM || JVM_IsCTFMode(cgs.gametype))) { 	//how do we tell if server has racemode set. meme..
 			//Check if someone is in team free?
 			//Loop through each player, if they are in team free, break and set a flag
 			//if flag is set, do this stuff VVV

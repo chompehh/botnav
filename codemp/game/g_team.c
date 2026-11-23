@@ -45,6 +45,7 @@ void Team_InitGame( void ) {
 	switch( level.gametype ) {
 	case GT_CTF:
 	case GT_CTY:
+	case GT_CTFC:
 		teamgame.redStatus = -1; // Invalid to force update
 		Team_SetFlagStatus( TEAM_RED, FLAG_ATBASE );
 		teamgame.blueStatus = -1; // Invalid to force update
@@ -322,7 +323,7 @@ void Team_SetFlagStatus( int team, flagStatus_t status ) {
 	if( modified ) {
 		char st[4] = { 0 };
 
-		if( level.gametype == GT_CTF || level.gametype == GT_CTY ) {
+		if( JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY ) {
 			if (g_neutralFlag.integer) {
 				return;//IDK, bugged,  Fix this?,  It sends a weird configstring to clients when used with neutralflag?
 			}
@@ -659,7 +660,7 @@ gentity_t *Team_ResetFlag( int team ) {
 }
 
 void Team_ResetFlags( void ) {
-	if(level.gametype == GT_CTF)
+	if(JVM_IsCTFMode(level.gametype))
 	{
 		Team_ResetFlag( TEAM_RED );
 		Team_ResetFlag( TEAM_BLUE );
@@ -721,7 +722,7 @@ void Team_TakeFlagSound( gentity_t *ent, int team, int playerteam) {
 	}
 
 	te = G_TempEntity( ent->s.pos.trBase, EV_GLOBAL_TEAM_SOUND );
-	if ((level.gametype == GT_CTF || level.gametype == GT_TEAM) && g_neutralFlag.integer >= 4)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_TEAM) && g_neutralFlag.integer >= 4)
 	{
 		if (playerteam == TEAM_BLUE) {
 			te->s.eventParm = GTS_BLUE_TAKEN;
@@ -764,7 +765,7 @@ void Team_ReturnFlag( int team ) {
 	gentity_t *flag = Team_ResetFlag(team);
 	Team_TrackObjective(NULL, CTF_TRACK_RETURN, team, flag ? flag->r.currentOrigin : NULL);
 	Team_ReturnFlagSound(flag, team);
-	if( level.gametype != GT_CTF ) {
+	if( !JVM_IsCTFMode(level.gametype) ) {
 		//PrintMsg(NULL, "The flag has returned!\n" );
 	}
 	else { //flag should always have team in normal CTF
@@ -1221,7 +1222,7 @@ int Team_TouchEnemyFlag( gentity_t *ent, gentity_t *other, int team ) {
 
 	//PrintMsg (NULL, "%s" S_COLOR_WHITE " got the %s flag!\n",
 	//	other->client->pers.netname, TeamName(team));
-	if (level.gametype != GT_CTF) { //changed this from team == team_free
+	if (!JVM_IsCTFMode(level.gametype)) { //changed this from team == team_free
 		trap->SendServerCommand( -1, va("print \"%s^7 is now the rabbit!\n\"", other->client->pers.netname ));
 		if (g_neutralFlag.integer == 2) {
 			other->client->ps.stats[STAT_WEAPONS] = (1 << WP_DISRUPTOR);
@@ -1297,7 +1298,7 @@ int Team_TouchEnemyFlag( gentity_t *ent, gentity_t *other, int team ) {
 		}
 	}
 
-	if (level.gametype == GT_CTF && g_neutralFlag.integer == 6) {
+	if (JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer == 6) {
 		cl->ps.powerups[PW_NEUTRALFLAG] = INT_MAX; // flags never expire
 	}
 	else {
@@ -1314,7 +1315,7 @@ int Team_TouchEnemyFlag( gentity_t *ent, gentity_t *other, int team ) {
 		cl->pers.stats.topSpeedFlag = 0;
 		cl->pers.stats.displacementFlag = 0;
 	}
-	else if (level.gametype == GT_CTF && g_neutralFlag.integer >= 4 && !(ent->r.contents & CONTENTS_CORPSE))
+	else if (JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer >= 4 && !(ent->r.contents & CONTENTS_CORPSE))
 	{
 		cl->pers.stats.startTimeFlag = level.time;
 		cl->pers.stats.topSpeedFlag = 0;
@@ -1336,7 +1337,7 @@ int Team_TouchEnemyFlag( gentity_t *ent, gentity_t *other, int team ) {
 	//AddTeamScore(ent->s.pos.trBase, other->client->sess.sessionTeam, 1, qtrue); //wtf why?
 
 	Team_TrackObjective(other, CTF_TRACK_PICKUP,
-		level.gametype == GT_CTF && g_neutralFlag.integer == 6 ? TEAM_FREE : team,
+		JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer == 6 ? TEAM_FREE : team,
 		other->client->ps.origin);
 	Team_SetFlagStatus( team, FLAG_TAKEN );
 
@@ -1373,7 +1374,7 @@ int Pickup_Team( gentity_t *ent, gentity_t *other ) {
 		if ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer < 4) {
 			return Team_TouchEnemyFlag( ent, other, team );
 		}
-		else if ((level.gametype == GT_CTF) && g_neutralFlag.integer >= 4) {
+		else if ((JVM_IsCTFMode(level.gametype)) && g_neutralFlag.integer >= 4) {
 			return Team_TouchEnemyFlag(ent, other, team);
 		}
 		else {
@@ -1520,9 +1521,9 @@ gentity_t *SelectRandomTeamSpawnPoint( int teamstate, team_t team, int siegeClas
 		}
 
 		//Seperate spawning for 1flag and 2flag ctf?
-		if ((spot->spawnflags & 2) && level.gametype == GT_CTF && g_neutralFlag.integer >= 4) //eh?
+		if ((spot->spawnflags & 2) && JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer >= 4) //eh?
 			continue;
-		if ((spot->spawnflags & 1) && level.gametype == GT_CTF && !g_neutralFlag.integer)
+		if ((spot->spawnflags & 1) && JVM_IsCTFMode(level.gametype) && !g_neutralFlag.integer)
 			continue;
 		//
 

@@ -148,7 +148,7 @@ void SetGametypeFuncSolids (void) {
 		ent = &g_entities[i];
 		if (ent->inuse) {
 			if (ent->s.eType == ET_MOVER && ent->spawnflags & 512) {
-				if (level.gametype == GT_CTF || level.gametype == GT_CTY) { //Make nonsolid/invis
+				if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) { //Make nonsolid/invis
 					ent->r.contents = 0;
 					ent->r.svFlags |= SVF_NOCLIENT;
 					ent->s.eFlags |= EF_NODRAW;
@@ -160,7 +160,7 @@ void SetGametypeFuncSolids (void) {
 				}
 			}
 			else if (ent->r.contents == CONTENTS_TRIGGER && ent->spawnflags & 8192) {
-				if (level.gametype == GT_CTF || level.gametype == GT_CTY) { //Make nonsolid/invis
+				if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) { //Make nonsolid/invis
 					ent->flags |= FL_INACTIVE;
 				}
 				else {
@@ -3685,7 +3685,7 @@ void PrintStats(int client) {
 		showTeamPowers = qfalse;
 	if ((((g_forcePowerDisable.integer & (1<<FP_DRAIN)) || !g_friendlyFire.value)) || g_gunGame.integer) //Team Drain is disabled
 		showDrain = qfalse;
-	if (level.gametype == GT_CTF || level.gametype == GT_CTF) //Don't show unneeded frag stats in objective gametype
+	if (JVM_IsCTFMode(level.gametype) || JVM_IsCTFMode(level.gametype)) //Don't show unneeded frag stats in objective gametype
 		showNet = qfalse;
 
 	Q_strncpyz(msg, "\n"S_COLOR_CYAN, sizeof(msg));
@@ -3704,7 +3704,7 @@ void PrintStats(int client) {
 	}
 	if (level.gametype == GT_TEAM && g_friendlyFire.value)
 		Q_strncpyz(lTK, va("Team Dmg%s", whitespace), sizeof(lTK)); //Should be just "Team Dmg"
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY) {
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) {
 		Q_strncpyz(lCaptures, va("Caps%s", whitespace), sizeof(lCaptures));
 		Q_strncpyz(lReturns, va("Rets%s", whitespace), sizeof(lReturns));
 		Q_strncpyz(lFragCarrier, va("Carrier Kills%s", whitespace), sizeof(lFragCarrier));
@@ -3734,7 +3734,7 @@ void PrintStats(int client) {
 	}
 	if (level.gametype == GT_TEAM && g_friendlyFire.value)
 		Q_strcat (msg, sizeof(msg), lTK);
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY) {
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) {
 		Q_strcat(msg, sizeof(msg), lCaptures);
 		Q_strcat(msg, sizeof(msg), lReturns);
 		Q_strcat(msg, sizeof(msg), lFragCarrier);
@@ -3785,12 +3785,12 @@ void PrintStats(int client) {
 
 			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lScore), int_to_string(cl->ps.persistant[PERS_SCORE], numbuf, sizeof(numbuf)));
 			Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
-			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lKills), int_to_string((level.gametype == GT_CTF) ? cl->pers.stats.kills : cl->ps.persistant[PERS_SCORE] + cl->pers.stats.teamKills + cl->ps.fd.suicides, numbuf, sizeof(numbuf)));
+			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lKills), int_to_string((JVM_IsCTFMode(level.gametype)) ? cl->pers.stats.kills : cl->ps.persistant[PERS_SCORE] + cl->pers.stats.teamKills + cl->ps.fd.suicides, numbuf, sizeof(numbuf)));
 			Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
-			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lDeaths), int_to_string((level.gametype == GT_CTF) ? cl->ps.persistant[PERS_KILLED] - cl->ps.fd.suicides : cl->ps.persistant[PERS_KILLED], numbuf, sizeof(numbuf)));
+			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lDeaths), int_to_string((JVM_IsCTFMode(level.gametype)) ? cl->ps.persistant[PERS_KILLED] - cl->ps.fd.suicides : cl->ps.persistant[PERS_KILLED], numbuf, sizeof(numbuf)));
 			Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
 			if (showNet) {
-				Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lNet), int_to_string((level.gametype == GT_CTF) ? cl->pers.stats.kills - cl->ps.persistant[PERS_KILLED] + cl->ps.fd.suicides : cl->ps.persistant[PERS_SCORE] + cl->pers.stats.teamKills + cl->ps.fd.suicides - cl->ps.persistant[PERS_KILLED], numbuf, sizeof(numbuf)));
+				Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lNet), int_to_string((JVM_IsCTFMode(level.gametype)) ? cl->pers.stats.kills - cl->ps.persistant[PERS_KILLED] + cl->ps.fd.suicides : cl->ps.persistant[PERS_SCORE] + cl->pers.stats.teamKills + cl->ps.fd.suicides - cl->ps.persistant[PERS_KILLED], numbuf, sizeof(numbuf)));
 				Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
 			}
 			Com_sprintf(partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lDmgGiven), int_to_string(cl->pers.stats.damageGiven, numbuf, sizeof(numbuf)));
@@ -3807,7 +3807,7 @@ void PrintStats(int client) {
 				Com_sprintf (partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lTK), int_to_string(cl->pers.stats.teamDamageGiven, numbuf, sizeof(numbuf)));
 				Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
 			}
-			else if (level.gametype == GT_CTF || level.gametype == GT_CTY) {
+			else if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) {
 				Com_sprintf (partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lCaptures), int_to_string(cl->pers.teamState.captures, numbuf, sizeof(numbuf)));
 				Q_strcat(partialTmpMsg, sizeof(partialTmpMsg), partialTmpMsg2);
 				Com_sprintf (partialTmpMsg2, sizeof(partialTmpMsg2), "%-*s", strlen(lReturns), int_to_string(cl->pers.teamState.flagrecovery, numbuf, sizeof(numbuf)));
@@ -4125,7 +4125,7 @@ void CheckExitRules( void ) {
 	{
 		sKillLimit = "Kill limit hit.";
 	}
-	if ( (level.gametype < GT_SIEGE || JVM_IsMode(level.gametype)) && fraglimit.integer ) {
+	if ( level.gametype != GT_SIEGE && JVM_IsFragMode(level.gametype) && fraglimit.integer ) {
 		if ( level.teamScores[TEAM_RED] >= fraglimit.integer ) {
 			trap->SendServerCommand( -1, va("print \"Red %s\n\"", G_GetStringEdString("MP_SVGAME", "HIT_THE_KILL_LIMIT")) );
 			if (d_powerDuelPrint.integer)
@@ -4215,7 +4215,7 @@ void CheckExitRules( void ) {
 		}
 	}
 
-	if ( level.gametype >= GT_CTF && !JVM_IsMode(level.gametype) && capturelimit.integer ) {
+	if ( JVM_IsFlagMode(level.gametype) && capturelimit.integer ) {
 
 		if ( level.teamScores[TEAM_RED] >= capturelimit.integer )
 		{
@@ -5044,7 +5044,7 @@ void OneFlagCTFCapture(int team) {
 }
 
 void OneFlagCTFCheckTimers() {
-	if (level.gametype != GT_CTF)
+	if (!JVM_IsCTFMode(level.gametype))
 		return;
 	if (g_neutralFlag.integer < 4)
 		return;
@@ -5841,7 +5841,7 @@ void G_RunFrame( int levelTime ) {
 #endif
 				WP_SaberStartMissileBlockCheck(ent, &ent->client->pers.cmd);
 
-				if (level.gametype == GT_CTF) { //No clue why it wont work when i use pm->xyspeed.
+				if (JVM_IsCTFMode(level.gametype)) { //No clue why it wont work when i use pm->xyspeed.
 					if (ent->client->pers.stats.startTimeFlag) {
 						const float xyspeed = sqrt(ent->client->ps.velocity[0] * ent->client->ps.velocity[0] + ent->client->ps.velocity[1] * ent->client->ps.velocity[1]);//Is this before snapvector??
 						ent->client->pers.stats.displacementFlag += xyspeed/sv_fps.value;

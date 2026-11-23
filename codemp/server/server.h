@@ -185,6 +185,7 @@ typedef struct client_s {
 	int				downloadBlockSize[MAX_DOWNLOAD_WINDOW];
 	qboolean		downloadEOF;		// We have sent the EOF block
 	int				downloadSendTime;	// time we last got an ack from the client
+	int				downloadRateCredit;	// unused sv_dlRate bytes carried to the next frame
 
 	int				deltaMessage;		// frame last client usercmd message
 	int				lastReliableTime[4];	// svs.time when reliable command was last received
@@ -286,6 +287,7 @@ extern	cvar_t	*sv_zombietime;
 extern	cvar_t	*sv_rconPassword;
 extern	cvar_t	*sv_privatePassword;
 extern	cvar_t	*sv_allowDownload;
+extern	cvar_t	*sv_dlRate;
 extern	cvar_t	*sv_httpDownloads;
 extern	cvar_t	*sv_httpServerPort;
 extern	cvar_t	*sv_maxclients;
@@ -431,6 +433,8 @@ void SV_ExecuteClientCommand( client_t *cl, const char *s, qboolean clientOK );
 void SV_ClientThink (client_t *cl, usercmd_t *cmd);
 
 void SV_WriteDownloadToClient( client_t *cl , msg_t *msg );
+void SV_SendDownloadMessages( void );
+#define SV_DOWNLOAD_BLOCKS_PER_MSG	16	// 32KB, below MAX_MSGLEN
 
 //
 // sv_ccmds.c

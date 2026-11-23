@@ -517,6 +517,7 @@ static const char *gameTypes[GT_MAX_GAME_TYPE] = {
 	"Arcade",
 	"Jedi vs Merc",
 	"Jedi or Merc",
+	"CTF+Classes",
 };
 static const int numGameTypes = ARRAY_LEN( gameTypes );
 
@@ -1642,7 +1643,7 @@ static void UI_SetCapFragLimits(qboolean uiVars) {
 
 static const char* UI_GetGameTypeName(int gtEnum)
 {
-	if (gtEnum == GT_JVM || gtEnum == GT_JOM || gtEnum == GT_ARCADE)
+	if (gtEnum == GT_JVM || gtEnum == GT_JOM || gtEnum == GT_ARCADE || gtEnum == GT_CTFC)
 		return BG_GetGametypeString(gtEnum);
 	switch ( gtEnum )
 	{
@@ -10901,7 +10902,7 @@ static qboolean GameType_Parse(char **p, qboolean join) {
 		if (Q_stricmp(token, "}") == 0) {
 			count = join ? &uiInfo.numJoinGameTypes : &uiInfo.numGameTypes;
 			types = join ? uiInfo.joinGameTypes : uiInfo.gameTypes;
-			for (gt = GT_ARCADE; gt <= GT_JOM; gt++) {
+			for (gt = GT_ARCADE; gt <= GT_CTFC; gt++) {
 				for (i = 0; i < *count; i++)
 					if (types[i].gtEnum == gt)
 						break;

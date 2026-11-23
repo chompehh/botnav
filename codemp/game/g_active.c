@@ -2554,6 +2554,12 @@ void G_UpdateClientBroadcasts( gentity_t *self ) {
 			}
 		}
 		else {
+			// The duel anti-wallhack hides an occluded opponent from us with
+			// SVF_NOTSINGLECLIENT. Once the duel is over (or after a respawn next to the
+			// old opponent) that must not survive, or the player stays invisible to us.
+			if ((other->r.svFlags & SVF_NOTSINGLECLIENT) && other->r.singleClient == self->s.number) {
+				other->r.svFlags &= ~SVF_NOTSINGLECLIENT;
+			}
 			VectorSubtract(self->client->ps.origin, other->client->ps.origin, angles);
 			dist = VectorLengthSquared(angles);
 			vectoangles(angles, angles);

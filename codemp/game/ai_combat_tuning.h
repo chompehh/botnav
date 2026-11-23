@@ -414,6 +414,7 @@ typedef struct
 	int weakVerticalStance;	// blue/yellow: never select T2B (see NewBotAI_SaberAvoidWeakVertical)
 	int enemySwingTimingKnown;	// msSinceEnemySwingStart is valid (zero-initialized: unknown)
 	int msSinceEnemySwingStart;
+	int enemySwingChain;	// enemy swings linked within NEWBOTAI_SWEEP_CHAIN_LINK_MS (0: unknown)
 } newbotai_saber_tactic_context_t;
 
 typedef struct
@@ -562,6 +563,33 @@ static inline int NewBotAI_SaberPressureCounterReady(newbotai_saber_tactic_conte
 		(context.closingSpeed > 0.0f || context.currentDistance < 80.0f);
 }
 
+// Continuous sweeps: the dueltracks (chained swing = starts <400ms after the attacker's
+// previous swing ended) show defenders who counter-swing 0-150ms after a chained swing
+// starts hit 81.2% (n=5649) vs 61% at 150-300ms and ~55% later; endless retreat only
+// feeds the chain. Counter early in the swing once the enemy has linked two or more.
+#define NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN 2
+#define NEWBOTAI_CHAIN_COUNTER_WINDOW_MS 150
+#define NEWBOTAI_CHAIN_COUNTER_RANGE 120.0f
+
+static inline int NewBotAI_SweepChainCounterReady(newbotai_saber_tactic_context_t context)
+{
+	const float range = context.closingKnown ? context.currentDistance : context.enemyDistance;
+	return (context.saberOnlyDuel || context.saberCombat) && context.enemyAttacking &&
+		context.enemySwingChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN &&
+		!context.selfBlocked && !context.selfAttacking && context.counterReady &&
+		context.enemySwingTimingKnown && context.msSinceEnemySwingStart >= 0 &&
+		context.msSinceEnemySwingStart <= NEWBOTAI_CHAIN_COUNTER_WINDOW_MS &&
+		range <= NEWBOTAI_CHAIN_COUNTER_RANGE;
+}
+
+// Saber-only dodge against a sweep chain: from the third linked swing on, step in rather
+// than keep backing away (the chain otherwise pushes the bot across the arena).
+static inline int NewBotAI_SweepChainStepsIn(int enemyChain, float enemyDistance2D)
+{
+	return enemyChain >= NEWBOTAI_CHAIN_COUNTER_MIN_CHAIN + 1 &&
+		enemyDistance2D <= NEWBOTAI_CHAIN_COUNTER_RANGE;
+}
+
 static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 	newbotai_saber_tactic_context_t context)
 {
@@ -586,7 +614,7 @@ static inline newbotai_saber_tactic_t NewBotAI_GetCorrectSaberTactic(
 		return inSwingReach ? NEWBOTAI_SABER_TACTIC_COUNTER : NEWBOTAI_SABER_TACTIC_STEP_IN;
 	}
 
-	if (NewBotAI_SaberPressureCounterReady(context))
+	if (NewBotAI_SaberPressureCounterReady(context) || NewBotAI_SweepChainCounterReady(context))
 		return NEWBOTAI_SABER_TACTIC_COUNTER;
 	if (context.saberOnlyDuel && context.selfAttacking && context.landedHit && inSwingReach)
 		return NEWBOTAI_SABER_TACTIC_CHAIN;
@@ -947,6 +975,39 @@ static inline int NewBotAI_SaberCanOwnInputs(int holdingSaber, int visibleEnemy,
 	int engineBusy, int forceMovement, int navigationMovement)
 {
 	return holdingSaber && visibleEnemy && !engineBusy && !forceMovement && !navigationMovement;
+}
+
+// Force lightning releases the moment the button is let go, then debounces 1.5-3s, and
+// only deals 1-2 damage per tick: short bursts waste the cast. Hold 2-3s per burst.
+#define NEWBOTAI_LIGHTNING_HOLD_MIN_MS 2000
+#define NEWBOTAI_LIGHTNING_HOLD_MAX_MS 3000
+// ForceShootLightning traces from the caster's origin (waist), not the eye, along the view
+// direction. Aiming the eye slightly above the enemy's head puts that parallel bolt line
+// through the upper body; the level 3 cone is measured from the same origin.
+#define NEWBOTAI_LIGHTNING_AIM_ABOVE_HEAD 8.0f
+
+static inline float NewBotAI_LightningAimHeight(float enemyViewheight)
+{
+	return enemyViewheight + NEWBOTAI_LIGHTNING_AIM_ABOVE_HEAD;
+}
+
+// Once lightning is running the engine keeps it going until force runs out, so the
+// 25-force start requirement must not cut an active burst short.
+static inline int NewBotAI_LightningForceAllows(int lightningActive, int forcePower)
+{
+	return lightningActive ? forcePower > 0 : forcePower > 25;
+}
+
+#define NEWBOTAI_SABER_IGNITE_RANGE 768.0f
+#define NEWBOTAI_SABER_IGNITE_RETRY_MS 750
+
+static inline int NewBotAI_ShouldIgniteSaberForCombat(int holdingSaber, int holstered,
+	int inFlight, int enemyVisible, float enemyDistance, int weaponTime, int offeringDuel,
+	int msSinceLastIgnite)
+{
+	return holdingSaber && holstered >= 2 && !inFlight && enemyVisible &&
+		enemyDistance < NEWBOTAI_SABER_IGNITE_RANGE && weaponTime < 1 && !offeringDuel &&
+		msSinceLastIgnite >= NEWBOTAI_SABER_IGNITE_RETRY_MS;
 }
 
 static inline int NewBotAI_SaberPrimaryBladeAvailable(int holstered)
@@ -2501,6 +2562,158 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 	return (mistakeChance > 0 && roll > 0 && roll <= mistakeChance) ? 1 : 0;
 }
 
+// Elevators and crushers. A mover only threatens while it is moving down (activated):
+// a player hull overlapping its footprint, currently below it, is crushed if the mover's
+// remaining travel brings its underside below the top of that hull.
+#define BOTNAV_CRUSHER_LETHAL_DAMAGE 20
+#define BOTNAV_CRUSHER_MAX_GAP 768.0f
+
+static inline int BotNav_VerticalElevator(int platform, int doorOrTrain,
+	float travelZ, float nextTravelZ)
+{
+	return platform || (doorOrTrain &&
+		(travelZ >= 1.0f || travelZ <= -1.0f || nextTravelZ >= 1.0f || nextTravelZ <= -1.0f));
+}
+
+static inline int BotNav_BeneathElevator(const float point[3], float halfWidth,
+	float height, const float moverMins[3], const float moverMaxs[3])
+{
+	const float top = point[2] + height;
+	return point[0] + halfWidth > moverMins[0] && point[0] - halfWidth < moverMaxs[0] &&
+		point[1] + halfWidth > moverMins[1] && point[1] - halfWidth < moverMaxs[1] &&
+		moverMins[2] >= top - 8.0f && moverMins[2] - top <= BOTNAV_CRUSHER_MAX_GAP;
+}
+
+static inline int BotNav_CrusherThreatensPoint(const float point[3], float halfWidth,
+	float height, const float moverMins[3], const float moverMaxs[3], float travelDown)
+{
+	const float top = point[2] + height;
+
+	if (travelDown <= 0.0f || !BotNav_BeneathElevator(point, halfWidth, height, moverMins, moverMaxs))
+		return 0;
+	return moverMins[2] - travelDown < top;
+}
+
+// Offensive use needs a mover that kills (crusher flag or heavy damage), not a 2-damage plat
+// that just reverses.
+static inline int BotNav_CrusherLethal(int damage, int crusherFlag)
+{
+	return damage > 0 && (crusherFlag || damage >= BOTNAV_CRUSHER_LETHAL_DAMAGE);
+}
+
+// Gun bots fire while their movement is owned by a route or strafe jump: shots do not
+// change the world-space wish, which is kept through the aim turn.
+#define BOTCOMBAT_GUN_MOVEFIRE_MAX_RANGE 2048.0f
+
+static inline int BotCombat_GunMoveFireAllowed(int enabled, int holdingGun, int hasAmmo,
+	int enemyVisible, int enemyAlive, float enemyDistance)
+{
+	return enabled && holdingGun && hasAmmo && enemyVisible && enemyAlive &&
+		enemyDistance < BOTCOMBAT_GUN_MOVEFIRE_MAX_RANGE;
+}
+
+// Kite saber and force users: keep out of saber and short force range while shooting.
+static inline int BotCombat_GunKiteWanted(float kiteDistance, int gunMoveFire,
+	int enemyMeleeThreat, float enemyDistance)
+{
+	return kiteDistance > 0.0f && gunMoveFire && enemyMeleeThreat &&
+		enemyDistance < kiteDistance;
+}
+
+// Disruptor sniping: zoom (alt tap), then hold attack still to charge. A full charge is
+// maxCount/2 * 50ms (1500ms by default). Release on a head trace, or at the timeout.
+#define BOTCOMBAT_SNIPE_TIMEOUT_MS 4000
+#define BOTCOMBAT_SNIPE_ZOOM_PRESS_MS 150
+#define BOTCOMBAT_SNIPE_HEAD_BAND 14.0f
+
+typedef enum
+{
+	BOTCOMBAT_SNIPE_OFF = 0,
+	BOTCOMBAT_SNIPE_ZOOM,	// alt held to zoom in
+	BOTCOMBAT_SNIPE_LOCK,	// alt released so the zoom locks
+	BOTCOMBAT_SNIPE_CHARGE,	// attack held, standing still
+	BOTCOMBAT_SNIPE_UNZOOM	// alt tap to leave the scope
+} botcombat_snipe_stage_t;
+
+static inline int BotCombat_SnipeWanted(float sniperange, int holdingDisruptor, int hasAltAmmo,
+	int enemyVisible, int grounded, int movementOwned, float enemyDistance)
+{
+	return sniperange > 0.0f && holdingDisruptor && hasAltAmmo && enemyVisible && grounded &&
+		!movementOwned && enemyDistance >= sniperange;
+}
+
+static inline int BotCombat_AirSnipeAllowed(int grounded, float verticalSpeed,
+	int alreadyStarted, int targetInView, int safeLanding, int movementOwned)
+{
+	return !movementOwned && (grounded || (safeLanding &&
+		(alreadyStarted ? verticalSpeed <= 40.0f :
+		(targetInView && verticalSpeed >= -80.0f && verticalSpeed <= 40.0f))));
+}
+
+static inline int BotCombat_DisruptorFullChargeMs(int tribes, int damageTweak)
+{
+	const int maxCount = tribes ? 50 : (damageTweak ? 40 : 60);
+	return (maxCount / 2) * 50;
+}
+
+// Release the charged shot when the aim trace ends within the head band (top of the hull).
+static inline int BotCombat_SnipeRelease(int charged, int traceHitsEnemy, float hitZ,
+	float enemyHeadZ, int heldMs)
+{
+	if (heldMs >= BOTCOMBAT_SNIPE_TIMEOUT_MS)
+		return 1;
+	if (!charged || !traceHitsEnemy)
+		return 0;
+	return hitZ >= enemyHeadZ - BOTCOMBAT_SNIPE_HEAD_BAND;
+}
+
+// Human jump attacks (dueltracks, swing_start with grounded=0 joined to damage_dealt in the
+// swing window): airborne L2R hit 75.6% (n=496), R2L 73.8% (n=435) vs bots 64.5%/61.6%;
+// most at 128-384u (73%). Bots never DFA: every DFA variant needs forward with no strafe
+// and attack while rising (velocity z > 100) within 32u of the ground. Jump-swings press
+// attack with a strafe and no forward either before takeoff or once the rise has slowed.
+#define NEWBOTAI_JUMP_SWING_MIN_RANGE 64.0f
+#define NEWBOTAI_JUMP_SWING_MAX_RANGE 200.0f
+#define NEWBOTAI_JUMP_SWING_CHANCE 15
+#define NEWBOTAI_JUMP_SWING_ROLL_MS 600
+#define NEWBOTAI_JUMP_SWING_MIN_COOLDOWN_MS 3000
+#define NEWBOTAI_JUMP_SWING_MAX_COOLDOWN_MS 6000
+#define NEWBOTAI_JUMP_SWING_PRESS_MS 60
+#define NEWBOTAI_JUMP_SWING_JUMP_MS 250
+#define NEWBOTAI_JUMP_SWING_AIR_TIMEOUT_MS 900
+#define NEWBOTAI_DFA_RISE_SPEED 100.0f
+
+typedef enum
+{
+	NEWBOTAI_JUMP_SWING_NONE = 0,
+	NEWBOTAI_JUMP_SWING_ATTACK_FIRST,	// grounded strafe+attack, then jump during the swing
+	NEWBOTAI_JUMP_SWING_JUMP_AFTER,
+	NEWBOTAI_JUMP_SWING_RISE,	// jump first (no attack) ...
+	NEWBOTAI_JUMP_SWING_AIR_ATTACK	// ... then strafe+attack once the rise has slowed
+} newbotai_jump_swing_stage_t;
+
+static inline int NewBotAI_JumpSwingEligible(float enemyDistance2D, int grounded, int saberReady,
+	int enemySwinging, int enemyDown)
+{
+	return grounded && saberReady && !enemySwinging && !enemyDown &&
+		enemyDistance2D >= NEWBOTAI_JUMP_SWING_MIN_RANGE &&
+		enemyDistance2D <= NEWBOTAI_JUMP_SWING_MAX_RANGE;
+}
+
+// The engine only picks a DFA from forward-only movement with attack while rising fast.
+static inline int NewBotAI_InputCouldStartDFA(int strongStance, int forwardMove, int rightMove,
+	int attackOrSwinging, int airborneOrJumping)
+{
+	return strongStance && forwardMove > 0 && rightMove == 0 && attackOrSwinging &&
+		airborneOrJumping;
+}
+
+// Late-air attack is allowed once airborne and no longer rising fast enough for a DFA.
+static inline int NewBotAI_JumpSwingAirAttackReady(int airborne, float verticalSpeed)
+{
+	return airborne && verticalSpeed <= NEWBOTAI_DFA_RISE_SPEED;
+}
+
 // Combo gaps measured from jundon/void: pull->kick 0ms, throw->pull ~66ms, grip->throw
 // ~100ms, drain->pull/throw ~66ms. Skill 7+ uses those directly; lower skills add 100-250ms
 // plus the configured extra delay and a mistake-bias delay.
@@ -2832,17 +3045,40 @@ static inline newbotai_throw_phase_t NewBotAI_SaberThrowNextPhase(newbotai_throw
 	return phase;
 }
 
+// Dueltracks throw_start/throw_end pairs: humans held a median 990ms (p90 2930ms) and hit
+// 59.7%; long human throws (1.5s+) still hit 54-56%. Bots held a median 759ms (p90 1075ms)
+// partly because a stale start time from a previous throw recalled the next one at once.
+#define NEWBOTAI_SABER_THROW_HOLD_MAX_MS 2200
+#define NEWBOTAI_SABER_THROW_HOLD_L1_MS 750
+#define NEWBOTAI_SABER_THROW_EXTEND_L3_MS 3200
+#define NEWBOTAI_SABER_THROW_EXTEND_L2_MS 2800
+
 static inline int NewBotAI_SaberThrowRecallDue(int throwLevel, int heldMs, int unsafe,
 	int returning, int forceAllowed)
 {
-	const int maximum = throwLevel >= 3 ? 1500 : throwLevel == 2 ? 1800 : 750;
+	const int maximum = throwLevel >= 2 ? NEWBOTAI_SABER_THROW_HOLD_MAX_MS :
+		NEWBOTAI_SABER_THROW_HOLD_L1_MS;
 	return unsafe || returning || !forceAllowed || heldMs < 0 || heldMs >= maximum;
 }
 
 static inline int NewBotAI_SaberThrowExtensionRecallDue(int throwLevel, int heldMs)
 {
-	const int maximum = throwLevel >= 3 ? 2800 : throwLevel == 2 ? 2400 : 750;
+	const int maximum = throwLevel >= 3 ? NEWBOTAI_SABER_THROW_EXTEND_L3_MS :
+		throwLevel == 2 ? NEWBOTAI_SABER_THROW_EXTEND_L2_MS : NEWBOTAI_SABER_THROW_HOLD_L1_MS;
 	return heldMs < 0 || heldMs >= maximum;
+}
+
+// Start time the throw controller should judge the current throw by: the engine stamps
+// saberDidThrowTime on every throw, so a tracked start from an earlier throw is replaced.
+// Returns 0 when no saber is in flight.
+static inline int NewBotAI_SaberThrowSyncedStart(int inFlight, int trackedStart,
+	int didThrowTime, int now)
+{
+	if (!inFlight)
+		return 0;
+	if (didThrowTime > 0)
+		return didThrowTime;
+	return trackedStart > 0 ? trackedStart : now;
 }
 
 static inline int NewBotAI_SaberThrowRoutingHold(int throwLevel, newbotai_throw_phase_t phase,

@@ -207,7 +207,7 @@ void multi_trigger( gentity_t *ent, gentity_t *activator )
 			return;
 	}
 
-	if (level.gametype == GT_CTF && (ent->spawnflags & 16384) && activator && activator->client && g_neutralFlag.integer < 6) {
+	if (JVM_IsCTFMode(level.gametype) && (ent->spawnflags & 16384) && activator && activator->client && g_neutralFlag.integer < 6) {
 		if (activator->client->ps.powerups[PW_NEUTRALFLAG]) {
 			if (g_neutralFlag.integer == 4 && activator->client->sess.sessionTeam != ent->alliedTeam)
 				return;
@@ -231,7 +231,7 @@ void multi_trigger( gentity_t *ent, gentity_t *activator )
 		}
 	}
 
-	if (level.gametype == GT_CTF && (ent->spawnflags & 32768) && activator && activator->client && g_neutralFlag.integer == 6) {
+	if (JVM_IsCTFMode(level.gametype) && (ent->spawnflags & 32768) && activator && activator->client && g_neutralFlag.integer == 6) {
 		if (activator->client->ps.powerups[PW_NEUTRALFLAG]) {
 			if (ent->alliedTeam == TEAM_RED) {
 				Team_StartOneFlagCapture(activator, ent->alliedTeam);
@@ -468,7 +468,7 @@ void Touch_Multi( gentity_t *self, gentity_t *other, trace_t *trace )
 	{
 		if ( other->client->sess.sessionTeam != self->alliedTeam )
 		{
-			if (level.gametype == GT_CTF && g_neutralFlag.integer == 5) {
+			if (JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer == 5) {
 			}
 			else {
 				return;
@@ -1362,7 +1362,7 @@ qboolean ValidRaceSettings(int restrictions, gentity_t *player)
 		return qfalse;
 	if (player->client->pers.practice)
 		return qfalse;
-	if ((restrictions & (1 << 5)) && (level.gametype == GT_CTF || level.gametype == GT_CTY))//spawnflags 32 is FFA_ONLY
+	if ((restrictions & (1 << 5)) && (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY))//spawnflags 32 is FFA_ONLY
 		return qfalse;
 	if ((player->client->ps.stats[STAT_RESTRICTIONS] & JAPRO_RESTRICT_ALLOWTELES) && !(restrictions & (1 << 6))) //spawnflags 64 on end trigger is allow_teles
 		return qfalse;

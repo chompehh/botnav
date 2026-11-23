@@ -2733,8 +2733,8 @@ BOOST_AUTO_TEST_CASE( saber_throw_routing_hold_survives_lateral_motion_but_is_bo
 	BOOST_CHECK( NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 800 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 800 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 1, NEWBOTAI_THROW_BYPASS, 600 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 1800 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 1500 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 2200 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 2200 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, -1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_LAUNCH, 800 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 800 ) );
@@ -2758,10 +2758,10 @@ BOOST_AUTO_TEST_CASE( saber_throw_recall_request_is_level_bounded_and_safety_sen
 {
 	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 1, 749, 0, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 1, 750, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 2, 1799, 0, 0, 1 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 2, 1800, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 3, 1499, 0, 0, 1 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 1500, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 2, 2199, 0, 0, 1 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 2, 2200, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 3, 2199, 0, 0, 1 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 2200, 0, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 1, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 0, 1, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 0, 0, 0 ) );
@@ -2875,6 +2875,132 @@ BOOST_AUTO_TEST_CASE( saber_idle_footing_responds_to_strafe_controls_without_cha
 		NewBotAI_SaberFootingStrafeMs( 10, 100, 900, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( descending_movers_threaten_only_players_beneath_them )
+{
+	const float mins[3] = { 0.0f, 0.0f, 200.0f };
+	const float maxs[3] = { 128.0f, 128.0f, 216.0f };
+	const float under[3] = { 64.0f, 64.0f, 0.0f };
+	const float beside[3] = { 200.0f, 64.0f, 0.0f };
+	const float above[3] = { 64.0f, 64.0f, 216.0f };
+
+	// Travelling 200u down brings the underside to z=0, below the 40u-tall hull.
+	BOOST_CHECK( BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	// Stopping 64u down leaves a 136u gap: no crush.
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 64.0f ) );
+	// Not activated (no travel), outside the footprint, or standing on top: no threat.
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 0.0f ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( beside, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( above, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	BOOST_CHECK( BotNav_CrusherLethal( 2, 1 ) );
+	BOOST_CHECK( !BotNav_CrusherLethal( 2, 0 ) );
+	BOOST_CHECK( BotNav_CrusherLethal( 50, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( stationary_elevator_avoidance_does_not_change_crush_targeting )
+{
+	const float mins[3] = { 0.0f, 0.0f, 200.0f };
+	const float maxs[3] = { 128.0f, 128.0f, 216.0f };
+	const float under[3] = { 64.0f, 64.0f, 0.0f };
+	const float beside[3] = { 150.0f, 64.0f, 0.0f };
+	const float onTop[3] = { 64.0f, 64.0f, 216.0f };
+	BOOST_CHECK( BotNav_VerticalElevator( 1, 0, 0.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, -128.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, 0.0f, 128.0f ) );
+	BOOST_CHECK( !BotNav_VerticalElevator( 0, 1, 0.0f, 0.0f ) );
+	BOOST_CHECK( !BotNav_VerticalElevator( 0, 0, 128.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_BeneathElevator( under, 15.0f, 40.0f, mins, maxs ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 0.0f ) );
+	BOOST_CHECK( !BotNav_BeneathElevator( beside, 15.0f, 40.0f, mins, maxs ) );
+	BOOST_CHECK( !BotNav_BeneathElevator( onTop, 15.0f, 40.0f, mins, maxs ) );
+}
+
+BOOST_AUTO_TEST_CASE( airborne_sniping_starts_at_apex_and_preserves_safety )
+{
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 0, 20.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 0, -200.0f, 1, 1, 1, 0 ) );
+	BOOST_CHECK( BotCombat_AirSnipeAllowed( 1, 0.0f, 1, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 100.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, -100.0f, 0, 1, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 0, 1, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 1, 0, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, -200.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !BotCombat_AirSnipeAllowed( 0, 0.0f, 0, 1, 1, 1 ) );
+}
+
+BOOST_AUTO_TEST_CASE( gun_bots_fire_on_the_move_and_kite_melee_threats )
+{
+	BOOST_CHECK( BotCombat_GunMoveFireAllowed( 1, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 0, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 1, 1, 0, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 1, 1, 1, 0, 1, 900.0f ) );
+	BOOST_CHECK( BotCombat_GunKiteWanted( 600.0f, 1, 1, 400.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 600.0f, 1, 0, 400.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 600.0f, 1, 1, 700.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 0.0f, 1, 1, 100.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( disruptor_snipes_only_still_at_range_and_waits_for_the_head )
+{
+	BOOST_CHECK( BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 0, 900.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 0, 300.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 0, 0, 900.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK_EQUAL( BotCombat_DisruptorFullChargeMs( 0, 0 ), 1500 );
+	BOOST_CHECK_EQUAL( BotCombat_DisruptorFullChargeMs( 0, 1 ), 1000 );
+	// Charged and on the head: fire. Charged on the body: keep holding until the timeout.
+	BOOST_CHECK( BotCombat_SnipeRelease( 1, 1, 60.0f, 64.0f, 2000 ) );
+	BOOST_CHECK( !BotCombat_SnipeRelease( 1, 1, 30.0f, 64.0f, 2000 ) );
+	BOOST_CHECK( !BotCombat_SnipeRelease( 0, 1, 60.0f, 64.0f, 900 ) );
+	BOOST_CHECK( BotCombat_SnipeRelease( 1, 0, 0.0f, 64.0f, BOTCOMBAT_SNIPE_TIMEOUT_MS ) );
+}
+
+BOOST_AUTO_TEST_CASE( jump_swings_never_use_dfa_input )
+{
+	// Strong stance, forward, no strafe, attack while airborne is the DFA trigger.
+	BOOST_CHECK( NewBotAI_InputCouldStartDFA( 1, 127, 0, 1, 1 ) );
+	// Strafe-only jump swings and grounded presses cannot start one.
+	BOOST_CHECK( !NewBotAI_InputCouldStartDFA( 1, 0, 127, 1, 1 ) );
+	BOOST_CHECK( !NewBotAI_InputCouldStartDFA( 1, 127, 0, 1, 0 ) );
+	// Late air attack waits for the rise to slow below the DFA speed.
+	BOOST_CHECK( !NewBotAI_JumpSwingAirAttackReady( 1, 225.0f ) );
+	BOOST_CHECK( NewBotAI_JumpSwingAirAttackReady( 1, 80.0f ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingAirAttackReady( 0, 0.0f ) );
+	BOOST_CHECK( NewBotAI_JumpSwingEligible( 150.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 40.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 260.0f, 1, 1, 0, 0 ) );
+	BOOST_CHECK( !NewBotAI_JumpSwingEligible( 150.0f, 1, 1, 1, 0 ) );
+}
+
+BOOST_AUTO_TEST_CASE( continuous_sweeps_are_countered_early_instead_of_retreating )
+{
+	newbotai_saber_tactic_context_t context = {};
+	context.saberOnlyDuel = 1;
+	context.enemyAttacking = 1;
+	context.counterReady = 1;
+	context.enemySwingTimingKnown = 1;
+	context.closingKnown = 1;
+	context.currentDistance = 100.0f;
+	context.enemyDistance = 65.0f;
+	context.closingSpeed = 180.0f;
+	context.msSinceEnemySwingStart = 80;
+	context.enemySwingChain = 1;
+	// A single swing keeps the existing wait-for-the-gap answer.
+	BOOST_CHECK_EQUAL( NewBotAI_GetCorrectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_REPOSITION );
+	context.enemySwingChain = 2;
+	BOOST_CHECK_EQUAL( NewBotAI_GetCorrectSaberTactic( context ), NEWBOTAI_SABER_TACTIC_COUNTER );
+	context.msSinceEnemySwingStart = 151;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	context.msSinceEnemySwingStart = 80;
+	context.currentDistance = 130.0f;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	context.currentDistance = 100.0f;
+	context.selfBlocked = 1;
+	BOOST_CHECK( !NewBotAI_SweepChainCounterReady( context ) );
+	BOOST_CHECK( !NewBotAI_SweepChainStepsIn( 2, 100.0f ) );
+	BOOST_CHECK( NewBotAI_SweepChainStepsIn( 3, 100.0f ) );
+	BOOST_CHECK( !NewBotAI_SweepChainStepsIn( 3, 140.0f ) );
+}
+
 BOOST_AUTO_TEST_CASE( saber_only_counterpressure_waits_out_early_sweep_but_does_not_retreat_forever )
 {
 	newbotai_saber_tactic_context_t context = {};
@@ -2933,14 +3059,35 @@ BOOST_AUTO_TEST_CASE( saber_only_counterpressure_waits_out_early_sweep_but_does_
 	BOOST_CHECK( !NewBotAI_SaberPressureCounterReady( context ) );
 }
 
+BOOST_AUTO_TEST_CASE( lightning_holds_until_force_runs_out_and_aims_above_head )
+{
+	BOOST_CHECK( !NewBotAI_LightningForceAllows( 0, 25 ) );
+	BOOST_CHECK( NewBotAI_LightningForceAllows( 0, 26 ) );
+	BOOST_CHECK( NewBotAI_LightningForceAllows( 1, 5 ) );
+	BOOST_CHECK( !NewBotAI_LightningForceAllows( 1, 0 ) );
+	BOOST_CHECK_GT( NewBotAI_LightningAimHeight( 36.0f ), 36.0f );
+}
+
+BOOST_AUTO_TEST_CASE( holstered_saber_is_ignited_for_visible_close_enemies )
+{
+	BOOST_CHECK( NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 1, 0, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 1, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 0, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 900.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 1, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 0, 100 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 0, 2, 0, 1, 200.0f, 0, 0, 1000 ) );
+}
+
 BOOST_AUTO_TEST_CASE( saber_throw_shared_policy_keeps_soft_recall_out_of_protected_routes )
 {
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 599, 1, 0, 0, 1, -30, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 1000, 0, 1, 0, 1, 0, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 1000, 1, 0, 0, 1, -30, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 1799, 1, 0, 0, 1, 0, 0 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 1800, 1, 0, 0, 0, 30, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 1500, 0, 1, 0, 0, 30, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 2200, 1, 0, 0, 0, 30, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 2200, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 1, NEWBOTAI_THROW_LAUNCH, 750, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_RECALL, 50, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, -1, 0, 1, 0, 0, 30, 1 ) );
@@ -3032,15 +3179,21 @@ BOOST_AUTO_TEST_CASE( contextual_throw_extensions_never_shorten_legacy_protectio
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
 		1600, 0, 1, 0, 1, 600, 40, 0, 0, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
-		1799, 1, 0, 0, 1, 800, 10, 0, 0, 0 ) );
+		2199, 1, 0, 0, 1, 800, 10, 0, 0, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
-		1800, 1, 0, 0, 1, 800, 10, 0, 0, 30 ) );
+		2200, 1, 0, 0, 1, 800, 10, 0, 0, 30 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
 		2200, 1, 0, 0, 1, 800, 60, 0, 0, 0 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 1500, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 1500 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 3, 2800 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 2, 2400 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 2200, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 2200 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 3199 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 3, 3200 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 2, 2800 ) );
+	// A start stamped by an earlier throw is replaced by the engine's new throw time.
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 1000, 5000, 5200 ), 5000 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 1000, 0, 5200 ), 1000 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 0, 0, 5200 ), 5200 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 0, 1000, 5000, 5200 ), 0 );
 }
 
 BOOST_AUTO_TEST_CASE( contextual_throw_never_overrides_hard_recalls )
@@ -5515,6 +5668,17 @@ BOOST_AUTO_TEST_CASE( route_failure_attribution_covers_unlaunched_and_interrupte
 	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2500, 0, 1, 1) );
 	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 1) );
 	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( editmode_flags_problem_routes )
+{
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 0, 0, 0) );
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 0, 2, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 0, 1, 2, 0) );
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 2, 2, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(1, 0, 10, 0, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 1, 10, 0, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 0, 10, 0, 1) );
 }
 
 BOOST_AUTO_TEST_CASE( speed_hops_lose_trust_sooner_and_recover_with_success )

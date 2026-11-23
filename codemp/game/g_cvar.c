@@ -480,7 +480,7 @@ void CVU_Rabbit( void ) {
 			if (!G_CallSpawn(ent))
 				G_FreeEntity( ent );
 		}
-		else if (((g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5 || g_neutralFlag.integer == 6) && (level.gametype == GT_CTF))) { //One Flag CTF
+		else if (((g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5 || g_neutralFlag.integer == 6) && (JVM_IsCTFMode(level.gametype)))) { //One Flag CTF
 			//Remove and spawn neutral flag.  Remove CTF flags
 
 			RemoveRabbit(); //Delete the current flag first
@@ -493,7 +493,7 @@ void CVU_Rabbit( void ) {
 			if (!G_CallSpawn(ent))
 				G_FreeEntity(ent);
 		}
-		else if (((g_neutralFlag.integer != 4 && g_neutralFlag.integer != 5 && g_neutralFlag.integer != 6) && (level.gametype == GT_CTF))) { //turned off neutral flag in standard CTF gametype
+		else if (((g_neutralFlag.integer != 4 && g_neutralFlag.integer != 5 && g_neutralFlag.integer != 6) && (JVM_IsCTFMode(level.gametype)))) { //turned off neutral flag in standard CTF gametype
 			//Remove neutral flag.  Remove and add CTF flags.
 			RemoveRabbit(); //Delete the current flag first
 			RemoveRedBlueFlags();

@@ -354,6 +354,14 @@ typedef struct bot_state_s
 	int					saberThrowCompletionKey;
 	int					saberThrowCompletionMs;
 	qboolean			saberThrowPassedTarget; // current throw has flown past the target once
+	int					saberIgniteRetryTime; // last combat saber ignite attempt (level.time)
+	int					jumpSwingStage; // newbotai_jump_swing_stage_t
+	int					jumpSwingStageTime;
+	int					jumpSwingDir; // strafe side for the jump-swing (-1 left, 1 right)
+	int					jumpSwingNextTime; // next time a jump-swing may be rolled
+	int					snipeStage; // botcombat_snipe_stage_t
+	int					snipeStageTime;
+	qboolean			snipeAirborne;
 	int					saberThrowPhase;
 	int					saberThrowPhaseTime;
 	int					saberThrowSteerTime;

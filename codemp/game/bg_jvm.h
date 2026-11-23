@@ -17,7 +17,22 @@ typedef enum {
 #define JVM_PUSHPULL (1 << 13)
 
 static inline int JVM_IsMode(int gametype) {
-	return gametype == 11 || gametype == 12;
+	return gametype == 11 || gametype == 12 || gametype == 13;
+}
+
+/* GT_CTF (8) or GT_CTFC (13, CTF+Classes). */
+static inline int JVM_IsCTFMode(int gametype) {
+	return gametype == 8 || gametype == 13;
+}
+
+/* Capture-scored team games: CTF, CTY and CTF+Classes. */
+static inline int JVM_IsFlagMode(int gametype) {
+	return gametype == 8 || gametype == 9 || gametype == 13;
+}
+
+/* Frag-limited games: everything below CTF plus JvM/JoM, but never flag games. */
+static inline int JVM_IsFragMode(int gametype) {
+	return (gametype < 8 || gametype == 11 || gametype == 12) && !JVM_IsFlagMode(gametype);
 }
 
 static inline int JVM_ForceProfileRequired(int gametype, int warnClient, int setForce) {
@@ -228,6 +243,59 @@ static inline int JVM_TeamArgClass(const char *arg) {
 	return -1;
 }
 
+static inline int JVM_ArgEquals(const char *arg, const char *word) {
+	int i;
+	for (i = 0; arg[i] && word[i]; i++) {
+		char c = arg[i];
+		if (c >= 'A' && c <= 'Z')
+			c = (char)(c - 'A' + 'a');
+		if (c != word[i])
+			return 0;
+	}
+	return !arg[i] && !word[i];
+}
+
+/* Class argument by name (jedi|merc|tank) or number (1|2|3); -1 otherwise. */
+static inline int JVM_ClassArg(const char *arg) {
+	if (!arg || !arg[0])
+		return -1;
+	if (JVM_ArgEquals(arg, "jedi"))
+		return JVM_JEDI;
+	if (JVM_ArgEquals(arg, "merc"))
+		return JVM_MERC;
+	if (JVM_ArgEquals(arg, "tank"))
+		return JVM_TANK;
+	return JVM_TeamArgClass(arg);
+}
+
+/* CTF+Classes /team argument: red|r|1 -> 1 (TEAM_RED), blue|b|2 -> 2 (TEAM_BLUE),
+ * spectator|s|3 -> 3 (TEAM_SPECTATOR); 0 for anything else. */
+static inline int JVM_TeamArgTeam(const char *arg) {
+	if (!arg || !arg[0])
+		return 0;
+	if (JVM_ArgEquals(arg, "red") || JVM_ArgEquals(arg, "r") || JVM_ArgEquals(arg, "1"))
+		return 1;
+	if (JVM_ArgEquals(arg, "blue") || JVM_ArgEquals(arg, "b") || JVM_ArgEquals(arg, "2"))
+		return 2;
+	if (JVM_ArgEquals(arg, "spectator") || JVM_ArgEquals(arg, "s") || JVM_ArgEquals(arg, "3"))
+		return 3;
+	return 0;
+}
+
+/* Console join help for class modes; NULL for other gametypes. */
+static inline const char *JVM_JoinHelp(int gametype) {
+	if (gametype == 11)
+		return "^3Jedi vs Merc: ^7/team red^3 (or ^7/team 1^3) joins the Jedi team, ^7/team blue^3 (or ^7/team 2^3) joins the Merc team.\n"
+			"^3On red, ^7/class jedi^3 or ^7/class tank^3 picks your class.\n";
+	if (gametype == 12)
+		return "^3Jedi or Merc: ^7/team <class>^3 joins as ^7jedi^3 (1), ^7merc^3 (2) or ^7tank^3 (3), for example ^7/team merc^3 or ^7/team 2^3.\n"
+			"^7/class <jedi|merc|tank>^3 changes class later.\n";
+	if (gametype == 13)
+		return "^3CTF+Classes: ^7/team <red|blue|1|2> <jedi|merc|tank|1|2|3>^3, for example ^7/team blue merc^3 or ^7/team 2 2^3.\n"
+			"^7/class <jedi|merc|tank>^3 changes class on your current team.\n";
+	return 0;
+}
+
 static inline float JVM_DamageScale(int targetClass, int attackerClass,
 	int saber, int gripOrFlipkick, float tankScale, float saberScale,
 	float reduction) {
@@ -242,6 +310,16 @@ static inline float JVM_DamageScale(int targetClass, int attackerClass,
 
 static inline float JVM_GripkickReduction(int targetClass, float jediReduction, float mercReduction) {
 	return targetClass == JVM_MERC ? mercReduction : jediReduction;
+}
+
+/* merc_nerfdrain: fraction (0-1) of Force Drain health gain removed when the drained
+ * player is a Merc. The drained target still loses the full amount. */
+static inline int JVM_DrainHealthGain(int targetClass, int gain, float mercNerf) {
+	float kept;
+	if (gain <= 0 || targetClass != JVM_MERC)
+		return gain;
+	kept = 1.0f - JVM_ClampScale(mercNerf, 1.0f);
+	return (int)(gain * kept + 0.5f);
 }
 
 static inline int JVM_GrappleDrain(float *fraction, int elapsed, float rate) {

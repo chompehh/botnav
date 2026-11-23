@@ -118,6 +118,8 @@ XCVAR_DEF( merc_botfloodprotect, "100", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_flipkick, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_countergrip, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_dropchance, "50", NULL, CVAR_ARCHIVE, qtrue )
+// Fraction (0-1) of Force Drain health gain removed when the drained player is a Merc.
+XCVAR_DEF( merc_nerfdrain, "0.5", NULL, CVAR_ARCHIVE, qtrue )
 // Merc spawn loadout bitmasks (same layout as g_startingWeapons / g_startingItems).
 // Default 102384: pistol..rocket launcher, concussion, old bryar; never the saber.
 XCVAR_DEF( merc_startingweapons, "102384", NULL, CVAR_ARCHIVE, qtrue )
@@ -371,6 +373,12 @@ XCVAR_DEF( bot_strafetrack_autoexport, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_trackexport_partmb, "2000", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafetrack_exportinterval, "60", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_route_combathold, "1", NULL, CVAR_ARCHIVE, qtrue )
+// Gun bots keep aiming and firing while on routes or strafe-jumping (movement keeps its world wish).
+XCVAR_DEF( bot_route_gunfire, "1", NULL, CVAR_ARCHIVE, qtrue )
+// Gun bots back away from saber/force users closer than this (units); 0 disables kiting.
+XCVAR_DEF( bot_gun_kitedistance, "600", NULL, CVAR_ARCHIVE, qtrue )
+// Disruptor bots zoom and fully charge shots at or beyond this range (units); 0 disables.
+XCVAR_DEF( bot_disruptor_sniperange, "512", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_soakmode, "0", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_hunt_interval, "3000", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( bot_strafetrack_bots, "0", NULL, CVAR_ARCHIVE, qtrue )
