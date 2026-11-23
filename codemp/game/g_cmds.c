@@ -1067,6 +1067,14 @@ void BroadcastTeamChange( gclient_t *client, int oldTeam )
 			client->sess.jvmClass == JVM_TANK ? "Tank" : "Jedi"));
 		return;
 	}
+	if (level.gametype == GT_CTFC &&
+		(client->sess.sessionTeam == TEAM_RED || client->sess.sessionTeam == TEAM_BLUE)) {
+		trap->SendServerCommand(-1, va("print \"%s^7 joined the %s^7 team as a %s\n\"",
+			client->pers.netname, client->sess.sessionTeam == TEAM_RED ? "^1Red" : "^4Blue",
+			client->sess.jvmClass == JVM_MERC ? "Merc" :
+			client->sess.jvmClass == JVM_TANK ? "Tank" : "Jedi"));
+		return;
+	}
 	if (level.gametype == GT_JOM && client->sess.sessionTeam == TEAM_FREE) {
 		trap->SendServerCommand(-1, va("cp \"%s^7 has joined the game (%s)\n\"",
 			client->pers.netname, client->sess.jvmClass == JVM_MERC ? "Merc" :
@@ -1694,11 +1702,8 @@ void StopFollowing( gentity_t *ent ) {
 	SetClientViewAngle( ent, ent->client->ps.viewangles ); //Fix viewangles getting fucked up when we stop spectating someone?
 }
 
-/*
-=================
-Cmd_Team_f
-=================
-*/
+static void G_JVMChangeClass(gentity_t *ent, int playerClass);
+
 static void Cmd_Class_f(gentity_t *ent) {
 	char name[MAX_TOKEN_CHARS];
 	int playerClass;
@@ -1719,7 +1724,9 @@ static void Cmd_Class_f(gentity_t *ent) {
 	else if (!Q_stricmp(name, "tank"))
 		playerClass = JVM_TANK;
 	else {
-		trap->SendServerCommand(ent - g_entities, "print \"Usage: /class jedi|merc|tank (or /team 1|2|3)\n\"");
+		trap->SendServerCommand(ent - g_entities, level.gametype == GT_CTFC ?
+			"print \"Usage: /class jedi|merc|tank (or /team <red|blue|1|2> <jedi|merc|tank|1|2|3>)\n\"" :
+			"print \"Usage: /class jedi|merc|tank (or /team 1|2|3)\n\"");
 		return;
 	}
 	if (ent->client->switchTeamTime > level.time || ent->client->ps.duelInProgress)
@@ -1732,6 +1739,10 @@ static void Cmd_Class_f(gentity_t *ent) {
 	}
 	if (ent->client->sess.jvmClass == playerClass && !ent->client->jvmNextClass)
 		return;
+	G_JVMChangeClass(ent, playerClass);
+}
+
+static void G_JVMChangeClass(gentity_t *ent, int playerClass) {
 	ent->client->jvmNextClass = 0;
 	ent->client->jvmClassChanging = qtrue;
 	/* Kill using the old class so class selection cannot evade damage/death. */
@@ -1752,11 +1763,76 @@ static void Cmd_Class_f(gentity_t *ent) {
 		BroadcastTeamChange(ent->client, ent->client->sess.sessionTeam);
 }
 
+/*
+=================
+Cmd_Team_f
+=================
+*/
 void Cmd_Team_f( gentity_t *ent ) {
 	int			oldTeam;
 	char		s[MAX_TOKEN_CHARS];
 
 	oldTeam = ent->client->sess.sessionTeam;
+	if (level.gametype == GT_CTFC && trap->Argc() >= 2) {
+		char	classArg[MAX_TOKEN_CHARS];
+		int		team, playerClass, oldClass;
+
+		trap->Argv(1, s, sizeof(s));
+		team = JVM_TeamArgTeam(s);
+		playerClass = -1;
+		if (trap->Argc() >= 3) {
+			trap->Argv(2, classArg, sizeof(classArg));
+			playerClass = JVM_ClassArg(classArg);
+			if (playerClass < 0) {
+				trap->SendServerCommand(ent-g_entities, "print \"Usage: /team <red|blue|1|2> <jedi|merc|tank|1|2|3>\n\"");
+				return;
+			}
+		} else if (!team && JVM_ClassArg(s) >= 0) {
+			/* "/team merc" keeps the current team and changes class. */
+			if (oldTeam != TEAM_RED && oldTeam != TEAM_BLUE) {
+				trap->SendServerCommand(ent-g_entities, "print \"Pick a team too: /team <red|blue|1|2> <jedi|merc|tank|1|2|3>\n\"");
+				return;
+			}
+			Cmd_Class_f(ent);
+			return;
+		}
+		if (team == TEAM_RED || team == TEAM_BLUE) {
+			if (playerClass >= 0 && team == oldTeam) {
+				/* Same team: only the class changes. */
+				if (ent->client->switchTeamTime > level.time || ent->client->ps.duelInProgress) {
+					trap->SendServerCommand( ent-g_entities, va("print \"%s\n\"", G_GetStringEdString("MP_SVGAME", "NOSWITCH")) );
+					return;
+				}
+				if (playerClass == ent->client->sess.jvmClass && !ent->client->jvmNextClass) {
+					trap->SendServerCommand(ent-g_entities, "print \"You are already on that team and class.\n\"");
+					return;
+				}
+				G_JVMChangeClass(ent, playerClass);
+				return;
+			}
+			if (ent->client->switchTeamTime > level.time) {
+				trap->SendServerCommand( ent-g_entities, va("print \"%s\n\"", G_GetStringEdString("MP_SVGAME", "NOSWITCH")) );
+				return;
+			}
+			if (gEscaping)
+				return;
+			oldClass = ent->client->sess.jvmClass;
+			if (playerClass >= 0) {
+				ent->client->sess.jvmClass = playerClass;
+				ent->client->jvmNextClass = 0;
+				ent->client->ps.fd.forceDoInit = 1;
+			}
+			SetTeam(ent, team == TEAM_RED ? "red" : "blue", qfalse);
+			if (oldTeam != ent->client->sess.sessionTeam) {
+				ent->client->switchTeamTime = level.time + 5000;
+			} else {
+				ent->client->sess.jvmClass = oldClass;
+			}
+			G_WriteClientSessionData(ent->client);
+			return;
+		}
+		/* spectator/auto/follow etc. fall through to the normal handler */
+	}
 	if (level.gametype == GT_JOM && trap->Argc() == 2) {
 		trap->Argv(1, s, sizeof(s));
 		if (!Q_stricmp(s, "jedi") || !Q_stricmp(s, "merc") || !Q_stricmp(s, "tank") ||
@@ -2833,7 +2909,8 @@ static const char *gameNames[GT_MAX_GAME_TYPE] = {
 	"Capture the Ysalamiri",
 	"Arcade",
 	"Jedi vs Merc",
-	"Jedi or Merc"
+	"Jedi or Merc",
+	"CTF+Classes"
 };
 
 /*
@@ -5972,7 +6049,7 @@ void Cmd_Aminfo_f(gentity_t *ent)
 	}
 	if (g_allowSaberSwitch.integer)
 		Q_strcat(buf, sizeof(buf), "saber ");
-	if (g_allowFlagThrow.integer && ((level.gametype == GT_CTF) || g_neutralFlag.integer))
+	if (g_allowFlagThrow.integer && ((JVM_IsCTFMode(level.gametype)) || g_neutralFlag.integer))
 		Q_strcat(buf, sizeof(buf), "throwFlag ");
 	if (g_allowTargetLaser.integer)
 		Q_strcat(buf, sizeof(buf), "+button15 (target laser) ");
@@ -6202,7 +6279,7 @@ static void Cmd_Jetpack_f(gentity_t *ent)
 void PrintStats(int client);
 static void Cmd_PrintStats_f(gentity_t *ent)
 {
-	if (level.gametype != GT_CTF && level.gametype != GT_TEAM && !g_gunGame.integer && !fraglimit.integer) {
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_TEAM && !g_gunGame.integer && !fraglimit.integer) {
 		trap->SendServerCommand( ent-g_entities, "print \"Command only allowed in TFFA, CTF, Gun Game, or when there is a fraglimit. (printStats).\n\"" );
 		return;
 	}
@@ -7562,7 +7639,7 @@ static void Cmd_SetSpawnPoint_f(gentity_t *ent)
 	label = team == TEAM_RED ? "red" : team == TEAM_BLUE ? "blue" : "neutral";
 	if (team != TEAM_FREE)
 	{
-		if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+		if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 		{
 			classnames[0] = team == TEAM_RED ? "team_CTF_redplayer" : "team_CTF_blueplayer";
 			classnames[1] = team == TEAM_RED ? "team_CTF_redspawn" : "team_CTF_bluespawn";
@@ -8763,7 +8840,7 @@ void Cmd_ServerConfig_f(gentity_t *ent) //loda fixme fix indenting on this, make
 	}
 
 	//CTF changes
-	if (level.gametype == GT_CTF || ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer)) {// CTF Settings
+	if (JVM_IsCTFMode(level.gametype) || ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer)) {// CTF Settings
 		Q_strncpyz(buf, " ^3CTF Changes:\n", sizeof(buf));
 		if (g_flagDrag.value)
 			Q_strcat(buf, sizeof(buf), va("   ^5Flag Drag: ^2%.3f\n", g_flagDrag.value));
@@ -8906,7 +8983,7 @@ void Cmd_ServerConfig_f(gentity_t *ent) //loda fixme fix indenting on this, make
 //[JAPRO - Serverside - All - Serverconfig - End]
 
 void Cmd_Throwflag_f( gentity_t *ent ) {
-	if (level.gametype == GT_CTF) {
+	if (JVM_IsCTFMode(level.gametype)) {
 	}
 	else if ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer) {
 	}

@@ -254,10 +254,12 @@ void CG_DrawInformation( void ) {
 		y += iPropHeight;
 	}
 
-	// game type
+	// game type (the server appends custom gametype names to the map message)
 	s = BG_GetGametypeString( cgs.gametype );
-	CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, s, UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );
-	y += iPropHeight;
+	if ( cgs.gametype < GT_ARCADE || !strstr( CG_ConfigString( CS_MESSAGE ), s ) ) {
+		CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, s, UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );
+		y += iPropHeight;
+	}
 
 	if (cgs.gametype != GT_SIEGE)
 	{
@@ -267,7 +269,7 @@ void CG_DrawInformation( void ) {
 			y += iPropHeight;
 		}
 
-		if (cgs.gametype < GT_CTF || JVM_IsMode(cgs.gametype)) {
+		if (JVM_IsFragMode(cgs.gametype)) {
 			value = atoi( Info_ValueForKey( info, "fraglimit" ) );
 			if ( value ) {
 				CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, va( "%s %i", CG_GetStringEdString("MP_INGAME", "FRAGLIMIT"), value ), UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );
@@ -285,7 +287,7 @@ void CG_DrawInformation( void ) {
 		}
 	}
 
-	if (cgs.gametype >= GT_CTF && !JVM_IsMode(cgs.gametype)) {
+	if (JVM_IsFlagMode(cgs.gametype)) {
 		value = atoi( Info_ValueForKey( info, "capturelimit" ) );
 		if ( value ) {
 			CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, va( "%s %i", CG_GetStringEdString("MP_INGAME", "CAPTURELIMIT"), value ), UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );
@@ -385,6 +387,7 @@ void CG_DrawInformation( void ) {
 	case GT_SIEGE:
 		break;
 	case GT_CTF:
+	case GT_CTFC:
 		CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, va( "%s", (char *)CG_GetStringEdString("MP_INGAME", "RULES_CTF_1")), UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );
 		y += iPropHeight;
 		CG_DrawProportionalString( (SCREEN_WIDTH / 2), y, va( "%s", (char *)CG_GetStringEdString("MP_INGAME", "RULES_CTF_2")), UI_CENTER|UI_INFOFONT|UI_DROPSHADOW, colorWhite );

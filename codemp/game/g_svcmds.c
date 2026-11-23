@@ -659,7 +659,7 @@ void Svcmd_ChangeGametype_f (void) { //because of "variable change -- restarting
 
 	G_CacheGametype();
 
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY) { //
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) { //
 		gentity_t	*ent;
 
 		RemoveCTFFlags(); //Delete the current flag first

@@ -249,6 +249,7 @@ typedef enum {
 	GT_ARCADE,
 	GT_JVM = 11,
 	GT_JOM = 12,
+	GT_CTFC = 13,		// CTF+Classes: CTF with Jedi, Merc and Tank classes
 	GT_MAX_GAME_TYPE
 } gametype_t;
 

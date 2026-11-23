@@ -2889,7 +2889,7 @@ gentity_t *LaunchItem( gitem_t *item, vec3_t origin, vec3_t velocity ) {
 	VectorCopy( velocity, dropped->s.pos.trDelta );
 
 	dropped->flags |= FL_BOUNCE_HALF;
-	if (((level.gametype == GT_CTF || level.gametype == GT_CTY) || ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer < 4)) && item->giType == IT_TEAM) { // Special case for CTF flags
+	if (((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) || ((level.gametype == GT_FFA || level.gametype == GT_TEAM) && g_neutralFlag.integer < 4)) && item->giType == IT_TEAM) { // Special case for CTF flags
 		dropped->think = Team_DroppedFlagThink;
 		if (g_tweakWeapons.integer & WT_TRIBES)
 			dropped->nextthink = level.time + 45000; //MV_TRIBES todo
@@ -3164,7 +3164,7 @@ void FinishSpawningItem( gentity_t *ent ) {
 	}
 
 	/*
-	if (level.gametype != GT_CTF &&	level.gametype != GT_CTY &&	ent->item->giType == IT_TEAM) {
+	if (!JVM_IsCTFMode(level.gametype) &&	level.gametype != GT_CTY &&	ent->item->giType == IT_TEAM) {
 		if (ent->item->giTag == PW_BLUEFLAG || ent->item->giTag == PW_REDFLAG) {//always remove red/blu flags if not ctf/cty
 			G_FreeEntity( ent );
 			return;
@@ -3182,11 +3182,11 @@ void FinishSpawningItem( gentity_t *ent ) {
 				G_FreeEntity(ent);
 				return;
 			}
-			if (g_neutralFlag.integer < 4 && level.gametype == GT_CTF) {
+			if (g_neutralFlag.integer < 4 && JVM_IsCTFMode(level.gametype)) {
 				G_FreeEntity(ent);
 				return;
 			}
-			if (g_neutralFlag.integer >= 4 && level.gametype != GT_CTF) {
+			if (g_neutralFlag.integer >= 4 && !JVM_IsCTFMode(level.gametype)) {
 				G_FreeEntity(ent);
 				return;
 			}
@@ -3194,15 +3194,15 @@ void FinishSpawningItem( gentity_t *ent ) {
 		else if (ent->item->giTag == PW_REDFLAG) {
 			VectorCopy(ent->s.origin, level.redFlagOrigin);
 			level.redFlag = qtrue;
-			if (level.gametype != GT_CTF &&	level.gametype != GT_CTY) {
+			if (!JVM_IsCTFMode(level.gametype) &&	level.gametype != GT_CTY) {
 				G_FreeEntity( ent );
 				return;
 			}
-			if (level.gametype == GT_CTF && (g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5)) {
+			if (JVM_IsCTFMode(level.gametype) && (g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5)) {
 				G_FreeEntity(ent);
 				return;
 			}
-			if (level.gametype == GT_CTF && g_neutralFlag.integer == 6) {
+			if (JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer == 6) {
 				//Get rid of it...only if neutralflag is at base... what am i doing
 				if (!level.redCapturing) {
 					G_FreeEntity(ent);
@@ -3213,15 +3213,15 @@ void FinishSpawningItem( gentity_t *ent ) {
 		else if (ent->item->giTag == PW_BLUEFLAG) {
 			VectorCopy(ent->s.origin, level.blueFlagOrigin);
 			level.blueFlag = qtrue;
-			if (level.gametype != GT_CTF &&	level.gametype != GT_CTY) {
+			if (!JVM_IsCTFMode(level.gametype) &&	level.gametype != GT_CTY) {
 				G_FreeEntity( ent );
 				return;
 			}
-			if (level.gametype == GT_CTF && (g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5)) {
+			if (JVM_IsCTFMode(level.gametype) && (g_neutralFlag.integer == 4 || g_neutralFlag.integer == 5)) {
 				G_FreeEntity(ent);
 				return;
 			}
-			if (level.gametype == GT_CTF && g_neutralFlag.integer == 6) {
+			if (JVM_IsCTFMode(level.gametype) && g_neutralFlag.integer == 6) {
 				//Get rid of it...only if neutralflag is at base... what am i doing
 				if (!level.blueCapturing) {
 					G_FreeEntity(ent);
@@ -3323,7 +3323,7 @@ void G_CheckTeamItems( void ) {
 	// Set up team stuff
 	Team_InitGame();
 
-	if( level.gametype == GT_CTF || level.gametype == GT_CTY ) {
+	if( JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY ) {
 		gitem_t	*item;
 
 		// check for the two flags

@@ -3215,7 +3215,7 @@ void ClientBegin( int clientNum, qboolean allowTeamReset ) {
 
 	if (g_raceMode.integer == 1 && level.gametype == GT_FFA)//Japro racemode, uhh, cant think of any case where racemode should be turned off since its off by default and this is their first time in server?
 		client->sess.raceMode = qtrue;
-	else if (g_raceMode.integer && (level.gametype == GT_TEAM || level.gametype == GT_CTF) && client->sess.sessionTeam == TEAM_FREE)
+	else if (g_raceMode.integer && (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype)) && client->sess.sessionTeam == TEAM_FREE)
 		client->sess.raceMode = qtrue;
 	if (client->sess.sessionTeam != TEAM_FREE && client->sess.sessionTeam != TEAM_SPECTATOR)
 		client->sess.raceMode = qfalse;
@@ -3267,9 +3267,10 @@ void ClientBegin( int clientNum, qboolean allowTeamReset ) {
 		if (Q_stricmp(g_consoleMOTD.string, ""))
 			trap->SendServerCommand(ent-g_entities, va("print \"%s\n\"", g_consoleMOTD.string));
 
-		if (!(ent->r.svFlags & SVF_BOT) && (level.gametype == GT_ARCADE ||
-			level.gametype == GT_JVM || level.gametype == GT_JOM))
+		if (!(ent->r.svFlags & SVF_BOT) && (level.gametype == GT_ARCADE || JVM_IsMode(level.gametype)))
 			trap->SendServerCommand(ent-g_entities, "print \"^3Profile menu missing? Type ^7/ui_openprofile^3 (or ^7/ui_openmenu ingame_player^3).\n\"");
+		if (!(ent->r.svFlags & SVF_BOT) && JVM_JoinHelp(level.gametype))
+			trap->SendServerCommand(ent-g_entities, va("print \"%s\"", JVM_JoinHelp(level.gametype)));
 
 		if (Q_stricmp(g_centerMOTD.string, "")) {
 			strcpy(ent->client->csMessage, G_NewString(va("^7%s\n", g_centerMOTD.string )));
@@ -3691,7 +3692,7 @@ void PrintStats(int client);
 void G_GiveGunGameWeapon(gclient_t* client) {
 	int score;
 	qboolean finishedGG = qfalse;
-	if (level.gametype == GT_TEAM || level.gametype == GT_CTF) {
+	if (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype)) {
 		score = level.teamScores[client->ps.persistant[PERS_TEAM]] - client->ps.fd.suicides;
 	}
 	else {
@@ -3818,7 +3819,7 @@ void G_GiveGunGameWeapon(gclient_t* client) {
 		int i;
 		gentity_t* other;
 
-		if (level.gametype == GT_TEAM || level.gametype == GT_CTF) {
+		if (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype)) {
 			trap->SendServerCommand(-1, va("print \"%s team (%s)^3 won the gungame\n\"", TeamName(client->ps.persistant[PERS_TEAM]), client->pers.netname));
 			trap->SendServerCommand(-1, va("cp \"%s team (%s)^3 won the gungame\n\n\n\n\n\n\n\n\n\n\n\n\"", TeamName(client->ps.persistant[PERS_TEAM]), client->pers.netname));
 		}
@@ -3839,7 +3840,7 @@ void G_GiveGunGameWeapon(gclient_t* client) {
 		}
 		Svcmd_ResetScores_f();
 	}
-	else if (level.gametype == GT_TEAM || level.gametype == GT_CTF) { //Update our teams guns
+	else if (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype)) { //Update our teams guns
 		int i, j;
 		gentity_t* other;
 		for (i = 0; i < level.numConnectedClients; i++) {
@@ -4190,7 +4191,7 @@ void ClientSpawn(gentity_t *ent) {
 	if ( client->sess.sessionTeam == TEAM_SPECTATOR ) {
 		spawnPoint = SelectSpectatorSpawnPoint (
 						spawn_origin, spawn_angles);
-	} else if (level.gametype == GT_CTF || level.gametype == GT_CTY) {
+	} else if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) {
 		// all base oriented team games use the CTF spawn points
 		spawnPoint = SelectCTFSpawnPoint ( 
 						client->sess.sessionTeam, 
@@ -4403,7 +4404,7 @@ void ClientSpawn(gentity_t *ent) {
 
 	if (g_raceMode.integer == 1 && level.gametype == GT_FFA)
 		client->sess.raceMode = qtrue;
-	else if (g_raceMode.integer && (level.gametype == GT_TEAM || level.gametype == GT_CTF) && client->sess.sessionTeam == TEAM_FREE)
+	else if (g_raceMode.integer && (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype)) && client->sess.sessionTeam == TEAM_FREE)
 		client->sess.raceMode = qtrue;
 	if (client->sess.sessionTeam != TEAM_FREE && client->sess.sessionTeam != TEAM_SPECTATOR)
 		client->sess.raceMode = qfalse;

@@ -1425,7 +1425,7 @@ int CalculateTeamAward(gentity_t *ent)
 	{
 		teamAwards |= (1<<TEAM_MVP);
 	}
-	if (GT_CTF == level.gametype ||
+	if (JVM_IsCTFMode(level.gametype) ||
 		GT_CTY == level.gametype)
 	{
 		if (CalculateTeamDefender(ent))

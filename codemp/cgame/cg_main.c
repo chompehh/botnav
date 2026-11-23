@@ -824,7 +824,7 @@ static void CG_RegisterSounds( void ) {
 		cgs.media.redScoredSound = trap->S_RegisterSound( "sound/chars/protocol/misc/40MOM044");
 		cgs.media.blueScoredSound = trap->S_RegisterSound( "sound/chars/protocol/misc/40MOM043" );
 
-		if ( cgs.serverMod == SVMOD_JAPRO || cgs.gametype == GT_CTF || com_buildScript.integer ) {
+		if ( cgs.serverMod == SVMOD_JAPRO || JVM_IsCTFMode(cgs.gametype) || com_buildScript.integer ) {
 			cgs.media.redFlagReturnedSound = trap->S_RegisterSound( "sound/chars/protocol/misc/40MOM042" );
 			cgs.media.blueFlagReturnedSound = trap->S_RegisterSound( "sound/chars/protocol/misc/40MOM041" );
 			cgs.media.redTookFlagSound = trap->S_RegisterSound( "sound/chars/protocol/misc/40MOM040" );
@@ -1376,7 +1376,7 @@ static void CG_RegisterGraphics( void ) {
 		}
 	}
 
-	if ( cgs.serverMod == SVMOD_JAPRO || cgs.gametype == GT_CTF || cgs.gametype == GT_CTY || com_buildScript.integer ) {
+	if ( cgs.serverMod == SVMOD_JAPRO || JVM_IsCTFMode(cgs.gametype) || cgs.gametype == GT_CTY || com_buildScript.integer ) {
 		if (com_buildScript.integer)
 		{
 			trap->R_RegisterModel( "models/flags/r_flag.md3" );
@@ -1385,7 +1385,7 @@ static void CG_RegisterGraphics( void ) {
 			trap->R_RegisterModel( "models/flags/b_flag_ysal.md3" );
 		}
 
-		if (cgs.gametype == GT_CTF || cgs.serverMod == SVMOD_JAPRO) //for dynamic gametype switchin
+		if (JVM_IsCTFMode(cgs.gametype) || cgs.serverMod == SVMOD_JAPRO) //for dynamic gametype switchin
 		{
 			cgs.media.redFlagModel = trap->R_RegisterModel( "models/flags/r_flag.md3" );
 			cgs.media.blueFlagModel = trap->R_RegisterModel( "models/flags/b_flag.md3" );
@@ -1408,7 +1408,7 @@ static void CG_RegisterGraphics( void ) {
 		trap->R_RegisterShaderNoMip("gfx/2d/net.tga");
 	}
 
-	if ( cgs.serverMod == SVMOD_JAPRO && ( cgs.gametype == GT_FFA || cgs.gametype == GT_TEAM || cgs.gametype == GT_CTF) )//loda
+	if ( cgs.serverMod == SVMOD_JAPRO && ( cgs.gametype == GT_FFA || cgs.gametype == GT_TEAM || JVM_IsCTFMode(cgs.gametype)) )//loda
 	{
 		cgs.media.neutralFlagModel = trap->R_RegisterModel( "models/flags/n_flag.md3" );
 	}

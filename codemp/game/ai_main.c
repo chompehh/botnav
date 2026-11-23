@@ -448,7 +448,7 @@ void BotReportStatus(bot_state_t *bs)
 	{
 		trap->EA_SayTeam(bs->client, siegeStateDescriptions[bs->siegeState]);
 	}
-	else if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	else if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		trap->EA_SayTeam(bs->client, ctfStateDescriptions[bs->ctfState]);
 	}
@@ -476,12 +476,12 @@ void BotOrder(gentity_t *ent, int clientnum, int ordernum)
 		return;
 	}
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY && level.gametype != GT_SIEGE && level.gametype != GT_TEAM)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY && level.gametype != GT_SIEGE && level.gametype != GT_TEAM)
 	{
 		return;
 	}
 
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		stateMin = CTFSTATE_NONE;
 		stateMax = CTFSTATE_MAXCTFSTATES;
@@ -6873,7 +6873,7 @@ static int BotSFJ_EditRouteDirection(const bot_sfj_track_route_t *route)
 {
 	const float *end;
 
-	if ((level.gametype != GT_CTF && level.gametype != GT_CTY) || route->nodeCount <= 0 ||
+	if ((!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY) || route->nodeCount <= 0 ||
 		!eFlagRed || !eFlagRed->inuse || (eFlagRed->flags & FL_DROPPED_ITEM) ||
 		!eFlagBlue || !eFlagBlue->inuse || (eFlagBlue->flags & FL_DROPPED_ITEM))
 		return 0;
@@ -8032,7 +8032,7 @@ static const float *BotNav_HuntTarget(bot_state_t *bs, const vec3_t origin)
 	int i, best = -1;
 	float bestDistance = 0.0f;
 
-	if (interval <= 0 || level.gametype == GT_SIEGE || level.gametype == GT_CTF ||
+	if (interval <= 0 || level.gametype == GT_SIEGE || JVM_IsCTFMode(level.gametype) ||
 		level.gametype == GT_CTY || level.gametype == GT_DUEL || level.gametype == GT_POWERDUEL)
 	{
 		bs->huntClient = 0;
@@ -8100,7 +8100,7 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 	const int targetTimeout = Com_Clampi(0, 60000, bot_target_timeout.integer);
 	int type = BOT_SFJ_GOAL_NONE, targetClient = -1;
 
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		const qboolean red = level.clients[bs->client].sess.sessionTeam == TEAM_RED;
 		const wpobject_t *base = red ? oFlagRed : oFlagBlue;
@@ -8439,7 +8439,7 @@ static float BotSFJ_FlagDistance(const float *position)
 {
 	float distance = -1.0f;
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY)
 		return distance;
 	if (eFlagRed && eFlagRed->inuse)
 		distance = Distance(position, eFlagRed->r.currentOrigin);
@@ -11586,7 +11586,7 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 		ps->fd.forceGripBeingGripped > level.time ||
 		BG_InKnockDown(ps->legsAnim)) ? qtrue : qfalse;
 	anyHurt = (bs->lastHurtTime && level.time - bs->lastHurtTime < BOT_ROUTE_HARD_HIT_MS) ? qtrue : qfalse;
-	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && bs->sfjTravelGoalValid)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && bs->sfjTravelGoalValid)
 	{
 		const gentity_t *enemy = bs->currentEnemy;
 		const qboolean hasEnemy = enemy && enemy->client && enemy->health > 0;
@@ -14010,7 +14010,7 @@ int BotIsAChickenWuss(bot_state_t *bs)
 		return 0;
 	}
 
-	if (level.gametype == GT_CTF && bs->currentEnemy && bs->currentEnemy->client)
+	if (JVM_IsCTFMode(level.gametype) && bs->currentEnemy && bs->currentEnemy->client)
 	{
 		if (bs->currentEnemy->client->ps.powerups[PW_REDFLAG] ||
 			bs->currentEnemy->client->ps.powerups[PW_BLUEFLAG])
@@ -14512,7 +14512,7 @@ int CTFTakesPriority(bot_state_t *bs)
 	trap->Print("CTFSTATE: %s\n", ctfStateNames[bs->ctfState]);
 #endif
 
-	if (level.gametype != GT_CTF && level.gametype != GT_CTY)
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY)
 	{
 		return 0;
 	}
@@ -15827,7 +15827,7 @@ void GetIdealDestination(bot_state_t *bs)
 	}
 
 	if (!badthing && (BotSFJ_ClientCarriesFlag(g_entities[bs->client].client) ||
-		((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)) &&
+		((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)) &&
 		CTFTakesPriority(bs))
 	{
 		bs->runningToEscapeThreat = BotSFJ_ClientCarriesFlag(g_entities[bs->client].client);
@@ -16443,7 +16443,7 @@ void CommanderBotTeamplayAI(bot_state_t *bs)
 //pick which commander ai to use based on gametype
 void CommanderBotAI(bot_state_t *bs)
 {
-	if (level.gametype == GT_CTF || level.gametype == GT_CTY)
+	if (JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 	{
 		CommanderBotCTFAI(bs);
 	}
@@ -31573,7 +31573,7 @@ qboolean NewBotAI_CapRoute(bot_state_t *bs, float thinktime)
 	int activeCapRoute, activeCapRouteSequence; //sequence,
 	vec3_t newSpot = { 0 };
 
-	if (level.gametype != GT_CTF || !g_entities[bs->client].client || !g_entities[bs->client].client->pers.activeCapRoute)
+	if (!JVM_IsCTFMode(level.gametype) || !g_entities[bs->client].client || !g_entities[bs->client].client->pers.activeCapRoute)
 		return qfalse;
 
 	if (level.clients[bs->client].sess.sessionTeam == TEAM_RED) {
@@ -32753,7 +32753,7 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		}
 	}
 
-	if ((level.gametype == GT_CTF || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
 		BotSFJ_SetTravelGoal(bs, &bs->cur_ps, BotSFJ_ClientCarriesFlag(g_entities[bs->client].client));
 
 	// Route runners and defensive flag objectives navigate instead of hunting opponents.

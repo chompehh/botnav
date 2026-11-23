@@ -187,7 +187,7 @@ void G_InitSessionData( gclient_t *client, char *userinfo, qboolean isBot ) {
 	const char		*value;
 
 	sess = &client->sess;
-	if (level.gametype == GT_JOM) {
+	if (level.gametype == GT_JOM || level.gametype == GT_CTFC) {
 		value = Info_ValueForKey(userinfo, "class");
 		sess->jvmClass = !Q_stricmp(value, "jedi") ? JVM_JEDI :
 			!Q_stricmp(value, "merc") ? JVM_MERC :

@@ -904,7 +904,7 @@ void CheckAlmostCapture( gentity_t *self, gentity_t *attacker ) {
 		self->client->ps.powerups[PW_BLUEFLAG] ||
 		self->client->ps.powerups[PW_NEUTRALFLAG] ) {
 		// get the goal flag this player should have been going for
-		if ( level.gametype == GT_CTF || level.gametype == GT_CTY ) {
+		if ( JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY ) {
 			if ( self->client->sess.sessionTeam == TEAM_BLUE ) {
 				classname = "team_CTF_blueflag";
 			}
@@ -2801,7 +2801,7 @@ extern void RunEmplacedWeapon( gentity_t *ent, usercmd_t **ucmd );
 								attacker->client->pers.stats.teamKills++;
 						}
 					}
-					else if (level.gametype != GT_FFA && (level.gametype != GT_CTF || !g_fixCTFScores.integer)) {//we selfkilled
+					else if (level.gametype != GT_FFA && (!JVM_IsCTFMode(level.gametype) || !g_fixCTFScores.integer)) {//we selfkilled
 						if (!attacker->client->sess.raceMode)
 							AddScore( attacker, self->r.currentOrigin, -1 ); //Only take away a point if its not FFA or CTF i guess, sure
 					}
@@ -2956,7 +2956,7 @@ extern void RunEmplacedWeapon( gentity_t *ent, usercmd_t **ucmd );
 	}
 
 	// Add team bonuses
-	if (level.gametype == GT_CTF)//Rabbit, meh
+	if (JVM_IsCTFMode(level.gametype))//Rabbit, meh
 		Team_FragBonuses(self, inflictor, attacker);
 
 	// if I committed suicide, the flag does not fall, it returns.
@@ -5983,7 +5983,7 @@ void G_Damage( gentity_t *targ, gentity_t *inflictor, gentity_t *attacker, vec3_
 	if (attacker && attacker->client && attacker->client->ps.duelInProgress && targ && targ->client && targ->client->ps.duelInProgress) {
 			attacker->client->pers.stats.duelDamageGiven += (((take + asave) > (targ->health + targ->client->ps.stats[STAT_ARMOR])) ? (targ->health + targ->client->ps.stats[STAT_ARMOR]) : take + asave);//Cap damage given e.g. if you do 99 dmg to someone with 1hp, its really only 1hp dmg.
 	}
-	else if (level.gametype == GT_TEAM || level.gametype == GT_CTF || g_gunGame.integer) {//JAPRO STATS
+	else if (level.gametype == GT_TEAM || JVM_IsCTFMode(level.gametype) || g_gunGame.integer) {//JAPRO STATS
 		if (attacker && attacker->client && targ && targ->client) {
 			if (OnSameTeam(targ, attacker)) //Subtract damage given for teamkills? or just ignore it..
 				attacker->client->pers.stats.teamDamageGiven += (((take + asave) > (targ->health + targ->client->ps.stats[STAT_ARMOR])) ? (targ->health + targ->client->ps.stats[STAT_ARMOR]) : take + asave);
@@ -6027,7 +6027,7 @@ void G_Damage( gentity_t *targ, gentity_t *inflictor, gentity_t *attacker, vec3_
 	}
 
 	// See if it's the player hurting the emeny flag carrier
-	if( level.gametype == GT_CTF || level.gametype == GT_CTY) {
+	if( JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) {
 		Team_CheckHurtCarrier(targ, attacker);
 	}
 

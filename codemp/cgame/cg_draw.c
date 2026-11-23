@@ -3862,7 +3862,7 @@ void CG_DrawTeamHUD(rectDef_t background, float xOffset) {
 	rectDef_t redBackground, blueBackground;
 	const qboolean drawScores = cg_drawScores.integer == 3;
 	const qboolean drawCTF = (cg_drawStatus.integer == 2 || cg_drawStatus.integer == 3) &&
-							 (cgs.gametype == GT_CTF || cgs.gametype == GT_CTY);
+							 (JVM_IsCTFMode(cgs.gametype) || cgs.gametype == GT_CTY);
 
 	if (drawScores) {
 		char temp[4];
@@ -6932,7 +6932,7 @@ static void CG_DrawUpperRight( void ) {
 			y = CG_DrawTimer( y );
 		}
 
-        if((cg_drawScores.integer == 3 || ((cg_drawStatus.integer == 2 || cg_drawStatus.integer == 3) && (cgs.gametype == GT_CTF || cgs.gametype == GT_CTY))) && cg_drawTimer.integer != 7){
+        if((cg_drawScores.integer == 3 || ((cg_drawStatus.integer == 2 || cg_drawStatus.integer == 3) && (JVM_IsCTFMode(cgs.gametype) || cgs.gametype == GT_CTY))) && cg_drawTimer.integer != 7){
             CG_DrawTaystHUD("");
         }
 
@@ -10088,7 +10088,7 @@ static void CG_DrawWarmup( void ) {
 		else if ( cgs.gametype == GT_JEDIMASTER )		s = "Jedi Master";
 		else if ( cgs.gametype == GT_TEAM )				s = CG_GetStringEdString("MENUS", "TEAM_FFA");//"Team FFA";
 		else if ( cgs.gametype == GT_SIEGE )			s = CG_GetStringEdString("MENUS", "SIEGE");//"Siege";
-		else if ( cgs.gametype == GT_CTF )				s = CG_GetStringEdString("MENUS", "CAPTURE_THE_FLAG");//"Capture the Flag";
+		else if ( JVM_IsCTFMode(cgs.gametype) )				s = CG_GetStringEdString("MENUS", "CAPTURE_THE_FLAG");//"Capture the Flag";
 		else if ( cgs.gametype == GT_CTY )				s = CG_GetStringEdString("MENUS", "CAPTURE_THE_YSALIMARI");//"Capture the Ysalamiri";
 		else if ( cgs.gametype == GT_SINGLE_PLAYER )	s = "Cooperative";
 		else if ( JVM_IsMode(cgs.gametype) )			s = BG_GetGametypeString(cgs.gametype);
@@ -10176,7 +10176,7 @@ void CG_DrawFlagStatus()
 		return;
 	}
 
-	if (cgs.gametype != GT_CTF && cgs.gametype != GT_CTY)
+	if (!JVM_IsCTFMode(cgs.gametype) && cgs.gametype != GT_CTY)
 	{
 		return;
 	}

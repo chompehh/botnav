@@ -1758,6 +1758,30 @@ Class persists across reconnects/map restarts and is replicated without changing
 the player-state layout. Bots default to a mix of JoM classes; `class` userinfo
 can select Merc or Tank. In JvM, Blue always uses Merc; Red can select Jedi or Tank.
 
+### CTF+Classes (`g_gametype 13`, `ctfc`)
+
+CTF+Classes is Capture the Flag with the Jedi, Merc and Tank classes. Flags, captures,
+`capturelimit`, team spawns and the CTF bot logic all work as in CTF (8). The class rules,
+loadouts and `merc_*` / `tank_*` cvars work as in JvM/JoM. Any class can join either team
+and carry a flag. It uses CTF maps: entities tagged `gametype "ctf"` spawn unless they are
+tagged `ctfc` specifically.
+
+- `/team <red|blue|1|2> <jedi|merc|tank|1|2|3>` joins a team with a class, for example
+  `/team blue merc` or `/team 2 2`.
+- `/team red` keeps your current class.
+- `/team merc` or `/class merc` changes class on your current team. As in JoM, a class change
+  kills and respawns you and has a five-second cooldown.
+- Bots get a mix of classes; the `class` userinfo key can select one.
+- Joins are announced as "<name> joined the Red team as a Merc".
+
+On their first `ClientBegin` in JvM, JoM or CTF+Classes, players get a console print with the
+join commands for that mode.
+
+Stock or third-party cgames only know gametypes 0–9 and show "Unknown Gametype" on the
+loading screen. For Arcade, JvM, JoM and CTF+Classes, the server therefore appends the mode
+name to the map message (`CS_MESSAGE`, for example "Bespin Streets - CTF+Classes"), which every
+cgame draws. This repo's cgame skips its own duplicate gametype line in that case.
+
 | Cvar | Default | Meaning (only in JvM/JoM) |
 |---|---:|---|
 | `g_jediVmerc` | 0 | Legacy JA "Jedi vs Merc" modifiers for non-JvM gametypes (latched). In JvM/JoM the class rules below replace these bonuses instead of stacking. |

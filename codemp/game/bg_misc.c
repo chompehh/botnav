@@ -2434,7 +2434,7 @@ qboolean BG_CanItemBeGrabbed( int gametype, const entityState_t *ent, const play
 		return qtrue;	// powerups are always picked up
 
 	case IT_TEAM: // team items, such as flags
-		if( gametype == GT_CTF || gametype == GT_CTY)
+		if( JVM_IsCTFMode(gametype) || gametype == GT_CTY)
 		{//JAPRO RABBIT
 			// ent->modelindex2 is non-zero on items if they are dropped
 			// we need to know this because we can pick up our dropped flag (and return it)
@@ -3470,7 +3470,8 @@ const char *gametypeStringShort[GT_MAX_GAME_TYPE] = {
 	"CTY",
 	"ARCADE",
 	"JvM",
-	"JoM"
+	"JoM",
+	"CTF+C"
 };
 
 const char *BG_GetGametypeString( int gametype )
@@ -3504,6 +3505,8 @@ const char *BG_GetGametypeString( int gametype )
 		return "Jedi vs Merc";
 	case GT_JOM:
 		return "Jedi or Merc";
+	case GT_CTFC:
+		return "CTF+Classes";
 
 	default:
 		return "Unknown Gametype";
@@ -3529,5 +3532,7 @@ int BG_GetGametypeForString( const char *gametype )
 	else if ( !Q_stricmp( gametype, "arcade" ) )		return GT_ARCADE;
 	else if ( !Q_stricmp( gametype, "jvm" ) )			return GT_JVM;
 	else if ( !Q_stricmp( gametype, "jom" ) )			return GT_JOM;
+	else if ( !Q_stricmp( gametype, "ctfc" )
+			||!Q_stricmp( gametype, "ctfclasses" ) )	return GT_CTFC;
 	else												return -1;
 }
