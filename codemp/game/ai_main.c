@@ -334,6 +334,9 @@ static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
+static qboolean BotCombat_GunMoveFire(bot_state_t *bs);
+static qboolean BotCombat_ShouldKite(bot_state_t *bs);
+static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
 	const vec3_t end);
 static qboolean NewBotAI_ShouldConserveForce(bot_state_t *bs);
@@ -1370,6 +1373,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 		NewBotAI_FilterWeakVerticalAttack(bs, &bs->lastucmd, time);
 	if (!holdCombat)
 		NewBotAI_ApplyJumpSwing(bs, &bs->lastucmd, time);
+	BotCombat_ApplyDisruptorSnipe(bs, &bs->lastucmd, time, holdCombat);
 	if (bs->sfjOwnsInput)
 	{
 		if (bs->lastucmd.upmove >= 10)
@@ -1382,6 +1386,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 		bs->lastucmd.weapon, bs->cur_ps.weapon, WP_NUM_WEAPONS, WP_MELEE, WP_SABER) &&
 		g_entities[bs->client].client &&
 		g_entities[bs->client].health > 0 &&
+		bs->snipeStage == BOTCOMBAT_SNIPE_OFF &&
 		(bs->lastucmd.buttons & (BUTTON_ATTACK | BUTTON_ALT_ATTACK))) {
 		gclient_t *client = g_entities[bs->client].client;
 		int interval = Com_Clampi(0, 2000, merc_botfloodprotect.integer);
@@ -4575,7 +4580,8 @@ static bot_sfj_conflict_t BotSFJ_GetInputConflict(bot_state_t *bs, playerState_t
 
 	if (BG_InRoll(ps, ps->legsAnim) && BotSFJ_RouteEntryKind(bs) != STRAFE_ROUTE_ENTRY_ROLL)
 		BOT_SFJ_SOFT("roll in progress (pausing strafe)");
-	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs))
+	if ((bi->actionflags & (ACTION_ATTACK | ACTION_ALT_ATTACK)) && !BotNav_ShouldHoldCombat(bs) &&
+		!BotCombat_GunMoveFire(bs))
 		BOT_SFJ_SOFT("queued attack");
 	if (!ignoreNavigation && (bi->actionflags & (softActions & ~(ACTION_ATTACK | ACTION_ALT_ATTACK))))
 		BOT_SFJ_SOFT("queued jump/crouch/walk");
@@ -11457,6 +11463,8 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
 			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
 		return qfalse;
+	if (BotCombat_GunMoveFire(bs))
+		return qfalse;
 	carrying = BotSFJ_ClientCarriesFlag(client);
 	attackingFlag = (bs->sfjTravelGoalValid && bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_ATTACK &&
 		!(bs->currentEnemy && BotSFJ_ClientCarriesFlag(bs->currentEnemy->client))) ? qtrue : qfalse;
@@ -11935,6 +11943,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	if (BotSFJ_DefensiveRouteEscape(aggression, enemyClient != NULL, carryingFlag,
 		enemyDistance, BotSFJ_EscapeStartDistance(minStrafe)))
 		retreating = qtrue;
+	if (enemyClient && BotCombat_ShouldKite(bs))
+		retreating = qtrue;
 	if (enemyClient && !retreating && BotSFJ_CombatTravel(bs, ps))
 		bs->sfjPursuitLatched = qtrue;
 	if (!routeCommitted || carryingFlag != bs->sfjWasCarrying ||
@@ -12078,7 +12088,9 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 			(routeRetreat && bs->sfjRoute && !carryingFlag)) &&
 			enemyDistance >= BotSFJ_EscapeStartDistance(minStrafe))
 		{
-			if (!BotSFJ_EscapeFacingAllows(BotSFJ_EscapeBackwardAvailable(bs),
+			/* Gun bots aim at the enemy through the escape, so they never turn away. */
+			if (!BotSFJ_EscapeFacingAllows(BotSFJ_EscapeBackwardAvailable(bs) ||
+				BotCombat_GunMoveFire(bs),
 				bs->frame_Enemy_Vis, enemyDistance, minStrafe))
 			{
 				BotSFJ_Reject(bs, "escape would turn the bot's back on a close visible enemy");
@@ -12899,7 +12911,7 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		candidate.actionflags |= ACTION_MOVELEFT;
 	else if (rightMove > 0)
 		candidate.actionflags |= ACTION_MOVERIGHT;
-	routeCombatAim = routeCommitted && !holdCombat &&
+	routeCombatAim = (routeCommitted || BotCombat_GunMoveFire(bs)) && !holdCombat &&
 		bs->currentEnemy && bs->currentEnemy->client && bs->frame_Enemy_Vis ? qtrue : qfalse;
 	if (routeCombatAim)
 	{
@@ -15155,6 +15167,182 @@ static qboolean BotCombat_HasRangedAmmo(bot_state_t *bs)
 	return qfalse;
 }
 
+static qboolean BotCombat_GunMoveFire(bot_state_t *bs)
+{
+	const gentity_t *enemy;
+	int weapon;
+
+	if (!bs || !(enemy = bs->currentEnemy) || !enemy->client)
+		return qfalse;
+	weapon = bs->cur_ps.weapon;
+	return BotCombat_GunMoveFireAllowed(bot_route_gunfire.integer,
+		weapon > WP_SABER && weapon <= LAST_USEABLE_WEAPON,
+		BotCombat_ModeAvailable(bs, weapon, 0) || BotCombat_ModeAvailable(bs, weapon, 1),
+		bs->frame_Enemy_Vis, enemy->health > 0, bs->frame_Enemy_Len) ? qtrue : qfalse;
+}
+
+static qboolean BotCombat_EnemyMeleeThreat(const gentity_t *enemy)
+{
+	static const int powers[] = { FP_PUSH, FP_PULL, FP_GRIP, FP_LIGHTNING, FP_DRAIN };
+	const playerState_t *eps;
+	int i;
+
+	if (!enemy || !enemy->client)
+		return qfalse;
+	eps = &enemy->client->ps;
+	if (eps->weapon == WP_SABER)
+		return qtrue;
+	for (i = 0; i < (int)ARRAY_LEN(powers); i++)
+	{
+		if (!(g_forcePowerDisable.integer & (1 << powers[i])) &&
+			eps->fd.forcePowerLevel[powers[i]] > FORCE_LEVEL_0 &&
+			(eps->fd.forcePowersKnown & (1 << powers[i])))
+			return qtrue;
+	}
+	return qfalse;
+}
+
+static qboolean BotCombat_ShouldKite(bot_state_t *bs)
+{
+	if (!bs || BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+		return qfalse;
+	return BotCombat_GunKiteWanted(bot_gun_kitedistance.value, BotCombat_GunMoveFire(bs),
+		BotCombat_EnemyMeleeThreat(bs->currentEnemy), bs->frame_Enemy_Len) ? qtrue : qfalse;
+}
+
+static void BotCombat_SetSnipeStage(bot_state_t *bs, int stage, int time)
+{
+	bs->snipeStage = stage;
+	bs->snipeStageTime = time;
+}
+
+/*
+==============
+BotCombat_ApplyDisruptorSnipe
+
+At range a disruptor bot taps alt to zoom, lets the zoom lock, then holds attack while
+standing still (the engine only charges a zoomed shot without movement input). A fully
+charged shot is released once the aim trace is on the enemy's head, or at the timeout.
+It unzooms when the enemy is lost, closes in, or movement is needed.
+==============
+*/
+static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat)
+{
+	const playerState_t *ps;
+	gentity_t *enemy;
+	qboolean want;
+	int fullMs;
+
+	if (!bs || !ucmd || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	enemy = bs->currentEnemy;
+	if (ps->weapon != WP_DISRUPTOR || g_entities[bs->client].health <= 0)
+	{
+		bs->snipeStage = BOTCOMBAT_SNIPE_OFF;
+		return;
+	}
+	want = BotCombat_SnipeWanted(bot_disruptor_sniperange.value, qtrue,
+		ps->ammo[weaponData[WP_DISRUPTOR].ammoIndex] >= weaponData[WP_DISRUPTOR].altEnergyPerShot,
+		enemy && enemy->client && enemy->health > 0 && bs->frame_Enemy_Vis,
+		ps->groundEntityNum != ENTITYNUM_NONE,
+		bs->sfjOwnsInput || holdCombat || bs->navWallJumpUntil > time,
+		bs->frame_Enemy_Len) ? qtrue : qfalse;
+	if (bs->snipeStage == BOTCOMBAT_SNIPE_OFF)
+	{
+		if (want && ps->zoomMode == 0 && ps->weaponstate == WEAPON_READY && ps->weaponTime <= 0)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_ZOOM, time);
+		else if (!want && ps->zoomMode == 1 && ps->zoomLocked)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+		else
+			return;
+	}
+	if (bs->snipeStage != BOTCOMBAT_SNIPE_UNZOOM && bs->snipeStage != BOTCOMBAT_SNIPE_CHARGE && !want)
+		BotCombat_SetSnipeStage(bs, ps->zoomMode == 1 ? BOTCOMBAT_SNIPE_UNZOOM : BOTCOMBAT_SNIPE_OFF, time);
+
+	ucmd->buttons &= ~(BUTTON_ATTACK | BUTTON_ALT_ATTACK);
+	switch (bs->snipeStage)
+	{
+	case BOTCOMBAT_SNIPE_ZOOM:
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		ucmd->buttons |= BUTTON_ALT_ATTACK;
+		if (ps->zoomMode == 1 && time - bs->snipeStageTime >= BOTCOMBAT_SNIPE_ZOOM_PRESS_MS)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_LOCK, time);
+		else if (time - bs->snipeStageTime > 1000)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+		break;
+	case BOTCOMBAT_SNIPE_LOCK:
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		if (ps->zoomMode == 1 && ps->zoomLocked)
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_CHARGE, time);
+		else if (ps->zoomMode != 1 || time - bs->snipeStageTime > 500)
+			BotCombat_SetSnipeStage(bs, ps->zoomMode == 1 ? BOTCOMBAT_SNIPE_UNZOOM : BOTCOMBAT_SNIPE_OFF, time);
+		break;
+	case BOTCOMBAT_SNIPE_CHARGE:
+	{
+		trace_t tr;
+		vec3_t eye, fwd, end;
+		qboolean charged, onTarget = qfalse;
+		float headZ = 0.0f, hitZ = 0.0f;
+
+		if (ps->zoomMode != 1)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+			break;
+		}
+		if (!want)
+		{
+			// Releasing attack fires whatever charge is held; then leave the scope.
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+			break;
+		}
+		ucmd->forwardmove = ucmd->rightmove = ucmd->upmove = 0;
+		fullMs = BotCombat_DisruptorFullChargeMs((g_tweakWeapons.integer & WT_TRIBES) ? 1 : 0,
+			(g_tweakWeapons.integer & WT_DISRUPTOR_DAM) ? 1 : 0);
+		charged = (ps->weaponstate == WEAPON_CHARGING_ALT || ps->weaponstate == WEAPON_CHARGING) &&
+			level.time - ps->weaponChargeTime >= fullMs ? qtrue : qfalse;
+		if (charged)
+		{
+			VectorCopy(ps->origin, eye);
+			eye[2] += ps->viewheight;
+			AngleVectors(ps->viewangles, fwd, NULL, NULL);
+			VectorMA(eye, 8192.0f, fwd, end);
+			JP_Trace(&tr, eye, NULL, NULL, end, bs->client, MASK_SHOT, qfalse, 0, 0);
+			onTarget = (tr.entityNum == enemy->s.number) ? qtrue : qfalse;
+			hitZ = tr.endpos[2];
+			headZ = enemy->client->ps.origin[2] + enemy->client->ps.viewheight;
+		}
+		if (BotCombat_SnipeRelease(charged, onTarget, hitZ, headZ,
+			time - bs->snipeStageTime) && charged)
+		{
+			// One released frame fires the shot; the zoom stays locked for the next charge.
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_LOCK, time);
+			break;
+		}
+		if (time - bs->snipeStageTime >= BOTCOMBAT_SNIPE_TIMEOUT_MS + 2000)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_UNZOOM, time);
+			break;
+		}
+		ucmd->buttons |= BUTTON_ATTACK;
+		break;
+	}
+	case BOTCOMBAT_SNIPE_UNZOOM:
+		if (ps->zoomMode != 1 || time - bs->snipeStageTime > 1500)
+		{
+			BotCombat_SetSnipeStage(bs, BOTCOMBAT_SNIPE_OFF, time);
+			break;
+		}
+		if (ps->weaponstate == WEAPON_READY && ps->zoomLockTime < ucmd->serverTime &&
+			!(ps->eFlags & EF_ALT_FIRING))
+			ucmd->buttons |= BUTTON_ALT_ATTACK;
+		break;
+	default:
+		bs->snipeStage = BOTCOMBAT_SNIPE_OFF;
+		break;
+	}
+}
+
 static int BotCombat_SplashRadius(int weapon, int alt)
 {
 	switch (weapon)
@@ -15189,7 +15377,11 @@ static int BotCombat_SelectRanged(bot_state_t *bs, int *altOut)
 			case WP_BRYAR_PISTOL:
 			case WP_BRYAR_OLD: damage = alt ? 30.0f : 10.0f; break;
 			case WP_BLASTER: damage = 20.0f; break;
-			case WP_DISRUPTOR: damage = 30.0f; break;
+			case WP_DISRUPTOR:
+				damage = 30.0f;
+				if (bot_disruptor_sniperange.value > 0.0f && distance >= bot_disruptor_sniperange.value)
+					damage = 100.0f;
+				break;
 			case WP_BOWCASTER: damage = 50.0f; break;
 			case WP_REPEATER: damage = alt ? 60.0f : 14.0f; break;
 			case WP_DEMP2: damage = alt ? 36.0f : 35.0f; break;
@@ -15206,6 +15398,9 @@ static int BotCombat_SelectRanged(bot_state_t *bs, int *altOut)
 				interval += 1400;
 			if (weapon == WP_THERMAL)
 				interval += 1250;
+			if (weapon == WP_DISRUPTOR && damage > 30.0f)
+				interval += BotCombat_DisruptorFullChargeMs((g_tweakWeapons.integer & WT_TRIBES) ? 1 : 0,
+					(g_tweakWeapons.integer & WT_DISRUPTOR_DAM) ? 1 : 0);
 			dps = damage * 1000.0f / (interval > 0 ? interval : 1000);
 			effectiveness = 1.0f;
 			if (distance > 600.0f && weapon == WP_FLECHETTE && !alt)
@@ -18622,6 +18817,8 @@ void NewBotAI_GetAim(bot_state_t *bs)
 
 		if (lightningAim)
 			headlevel[2] += NewBotAI_LightningAimHeight(bs->currentEnemy->client->ps.viewheight);
+		else if (bs->snipeStage != BOTCOMBAT_SNIPE_OFF && bs->cur_ps.weapon == WP_DISRUPTOR)
+			headlevel[2] += bs->currentEnemy->client->ps.viewheight;
 		else if (bs->currentEnemy && bs->currentEnemy->client)
 			headlevel[2] += bs->currentEnemy->client->ps.viewheight - 16;//aim at chest?
 		if (bs->cur_ps.saberInFlight)
@@ -18633,9 +18830,9 @@ void NewBotAI_GetAim(bot_state_t *bs)
 		{
 			NewBotAI_AdjustSaberThrowLead(bs);
 		}
-		else if (lightningAim)
+		else if (lightningAim || bs->cur_ps.weapon > WP_SABER)
 		{
-			// Keep the bolt line on the target; no swing/sweep yaw offsets.
+			// Keep the bolt/shot line on the target; no swing/sweep yaw offsets.
 		}
 		else if (bs->saberTechniqueCandidate || bs->saberDefenseActive ||
 			bs->cur_ps.saberBlocked == BLOCKED_PARRY_BROKEN ||

@@ -2562,6 +2562,64 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 	return (mistakeChance > 0 && roll > 0 && roll <= mistakeChance) ? 1 : 0;
 }
 
+// Gun bots fire while their movement is owned by a route or strafe jump: shots do not
+// change the world-space wish, which is kept through the aim turn.
+#define BOTCOMBAT_GUN_MOVEFIRE_MAX_RANGE 2048.0f
+
+static inline int BotCombat_GunMoveFireAllowed(int enabled, int holdingGun, int hasAmmo,
+	int enemyVisible, int enemyAlive, float enemyDistance)
+{
+	return enabled && holdingGun && hasAmmo && enemyVisible && enemyAlive &&
+		enemyDistance < BOTCOMBAT_GUN_MOVEFIRE_MAX_RANGE;
+}
+
+// Kite saber and force users: keep out of saber and short force range while shooting.
+static inline int BotCombat_GunKiteWanted(float kiteDistance, int gunMoveFire,
+	int enemyMeleeThreat, float enemyDistance)
+{
+	return kiteDistance > 0.0f && gunMoveFire && enemyMeleeThreat &&
+		enemyDistance < kiteDistance;
+}
+
+// Disruptor sniping: zoom (alt tap), then hold attack still to charge. A full charge is
+// maxCount/2 * 50ms (1500ms by default). Release on a head trace, or at the timeout.
+#define BOTCOMBAT_SNIPE_TIMEOUT_MS 4000
+#define BOTCOMBAT_SNIPE_ZOOM_PRESS_MS 150
+#define BOTCOMBAT_SNIPE_HEAD_BAND 14.0f
+
+typedef enum
+{
+	BOTCOMBAT_SNIPE_OFF = 0,
+	BOTCOMBAT_SNIPE_ZOOM,	// alt held to zoom in
+	BOTCOMBAT_SNIPE_LOCK,	// alt released so the zoom locks
+	BOTCOMBAT_SNIPE_CHARGE,	// attack held, standing still
+	BOTCOMBAT_SNIPE_UNZOOM	// alt tap to leave the scope
+} botcombat_snipe_stage_t;
+
+static inline int BotCombat_SnipeWanted(float sniperange, int holdingDisruptor, int hasAltAmmo,
+	int enemyVisible, int grounded, int movementOwned, float enemyDistance)
+{
+	return sniperange > 0.0f && holdingDisruptor && hasAltAmmo && enemyVisible && grounded &&
+		!movementOwned && enemyDistance >= sniperange;
+}
+
+static inline int BotCombat_DisruptorFullChargeMs(int tribes, int damageTweak)
+{
+	const int maxCount = tribes ? 50 : (damageTweak ? 40 : 60);
+	return (maxCount / 2) * 50;
+}
+
+// Release the charged shot when the aim trace ends within the head band (top of the hull).
+static inline int BotCombat_SnipeRelease(int charged, int traceHitsEnemy, float hitZ,
+	float enemyHeadZ, int heldMs)
+{
+	if (heldMs >= BOTCOMBAT_SNIPE_TIMEOUT_MS)
+		return 1;
+	if (!charged || !traceHitsEnemy)
+		return 0;
+	return hitZ >= enemyHeadZ - BOTCOMBAT_SNIPE_HEAD_BAND;
+}
+
 // Human jump attacks (dueltracks, swing_start with grounded=0 joined to damage_dealt in the
 // swing window): airborne L2R hit 75.6% (n=496), R2L 73.8% (n=435) vs bots 64.5%/61.6%;
 // most at 128-384u (73%). Bots never DFA: every DFA variant needs forward with no strafe

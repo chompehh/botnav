@@ -2875,6 +2875,33 @@ BOOST_AUTO_TEST_CASE( saber_idle_footing_responds_to_strafe_controls_without_cha
 		NewBotAI_SaberFootingStrafeMs( 10, 100, 900, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( gun_bots_fire_on_the_move_and_kite_melee_threats )
+{
+	BOOST_CHECK( BotCombat_GunMoveFireAllowed( 1, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 0, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 1, 1, 0, 1, 1, 900.0f ) );
+	BOOST_CHECK( !BotCombat_GunMoveFireAllowed( 1, 1, 1, 0, 1, 900.0f ) );
+	BOOST_CHECK( BotCombat_GunKiteWanted( 600.0f, 1, 1, 400.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 600.0f, 1, 0, 400.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 600.0f, 1, 1, 700.0f ) );
+	BOOST_CHECK( !BotCombat_GunKiteWanted( 0.0f, 1, 1, 100.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( disruptor_snipes_only_still_at_range_and_waits_for_the_head )
+{
+	BOOST_CHECK( BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 0, 900.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 0, 300.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 0, 0, 900.0f ) );
+	BOOST_CHECK( !BotCombat_SnipeWanted( 512.0f, 1, 1, 1, 1, 1, 900.0f ) );
+	BOOST_CHECK_EQUAL( BotCombat_DisruptorFullChargeMs( 0, 0 ), 1500 );
+	BOOST_CHECK_EQUAL( BotCombat_DisruptorFullChargeMs( 0, 1 ), 1000 );
+	// Charged and on the head: fire. Charged on the body: keep holding until the timeout.
+	BOOST_CHECK( BotCombat_SnipeRelease( 1, 1, 60.0f, 64.0f, 2000 ) );
+	BOOST_CHECK( !BotCombat_SnipeRelease( 1, 1, 30.0f, 64.0f, 2000 ) );
+	BOOST_CHECK( !BotCombat_SnipeRelease( 0, 1, 60.0f, 64.0f, 900 ) );
+	BOOST_CHECK( BotCombat_SnipeRelease( 1, 0, 0.0f, 64.0f, BOTCOMBAT_SNIPE_TIMEOUT_MS ) );
+}
+
 BOOST_AUTO_TEST_CASE( jump_swings_never_use_dfa_input )
 {
 	// Strong stance, forward, no strafe, attack while airborne is the DFA trigger.
