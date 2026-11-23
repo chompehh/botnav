@@ -266,6 +266,7 @@ static void NewBotAI_ClearLostSightCombatInput(bot_state_t *bs);
 static void NewBotAI_PrepareWaypointHandoff(bot_state_t *bs, qboolean clearEnemyLock);
 static qboolean NewBotAI_ShouldForceLostSightWaypointReset(bot_state_t *bs);
 static void NewBotAI_ClearLightningBurst(bot_state_t *bs);
+static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyGetupPushWindow(bot_state_t *bs);
 static qboolean NewBotAI_IsEnemyPreGetupKnockdownState(bot_state_t *bs);
 static qboolean NewBotAI_ShouldAbortChargedThrowForGetupPush(bot_state_t *bs);
@@ -6637,6 +6638,47 @@ static int BotSFJ_EditRouteColor(int direction, int neutral)
 	return direction < 0 ? 0x000000ff : direction > 0 ? 0x00ff8000 : neutral;
 }
 
+#define BOT_SFJ_EDIT_PROBLEM_COLOR 0x00ff00ff
+
+static qboolean BotSFJ_EditRouteProblematic(const bot_sfj_track_route_t *route)
+{
+	int context, node, deaths = 0, unsafe = 0, successes = 0, failures = 0, untrusted = 0;
+	int hopFailures[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopPasses[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+	int hopDeaths[BOT_SFJ_TRACK_MAX_NODES] = { 0 };
+
+	for (context = 0; context < 4; context++)
+	{
+		const int index = route->stat[context];
+		const bot_sfj_route_stat_t *stat;
+
+		if (index < 0 || index >= g_botSfjRouteStatCount)
+			continue;
+		stat = &g_botSfjRouteStats[index];
+		deaths += stat->deaths;
+		unsafe += stat->unsafe;
+		successes += stat->completions;
+		failures += stat->stalls;
+		for (node = 0; node < route->nodeCount; node++)
+		{
+			hopFailures[node] += stat->hopFailures[node];
+			hopPasses[node] += stat->hopPasses[node];
+			hopDeaths[node] += stat->hopDeaths[node];
+		}
+	}
+	for (node = 0; node < route->nodeCount; node++)
+		untrusted += !BotSFJ_TrackHopTrusted(hopDeaths[node], hopFailures[node], hopPasses[node]);
+	return BotSFJ_RouteIsProblematic(deaths, unsafe, successes, failures, untrusted) ?
+		qtrue : qfalse;
+}
+
+static int BotSFJ_EditRouteDrawColor(const bot_sfj_track_route_t *route, int neutral)
+{
+	if (BotSFJ_EditRouteProblematic(route))
+		return BOT_SFJ_EDIT_PROBLEM_COLOR;
+	return BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), neutral);
+}
+
 static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *route,
 	int direction, qboolean print)
 {
@@ -6676,9 +6718,10 @@ static void BotSFJ_EditRouteInfo(int clientNum, const bot_sfj_track_route_t *rou
 	else
 		Q_strncpyz(problem, "No recorded hop failures", sizeof(problem));
 	Com_sprintf(summary, sizeof(summary),
-		"^5Route ID %d^7: %d landings | recorded max %.0f ups%s\n"
+		"%s^5Route ID %d^7: %d landings | recorded max %.0f ups%s\n"
 		"Bot results (%d/4 speed contexts)\n%d successes / %d failed or stalled / %d interrupted\n"
 		"%s\nLanding numbers = hop numbers; per-hop results in console",
+		BotSFJ_EditRouteProblematic(route) ? "^6PROBLEM ROUTE^7 (deaths, unsafe or failing hops)\n" : "",
 		route->routeId, route->nodeCount, route->maxSpeed,
 		direction < 0 ? " | ^1toward red flag^7" : direction > 0 ? " | ^4toward blue flag^7" : "",
 		4 - missing, successes, failures, interrupted, problem);
@@ -6741,7 +6784,7 @@ static void BotSFJ_EditFrame(void)
 		if (!viewers[clientNum].notified)
 		{
 			trap->SendServerCommand(clientNum,
-				va("print \"[bot_editmode] %d loaded routes. Red/blue = toward that flag base; neutral routes have green starts and cyan landings. Stand near a numbered start to inspect it; face its direction to separate overlapping starts.\n\"",
+				va("print \"[bot_editmode] %d loaded routes. Red/blue = toward that flag base; neutral routes have green starts and cyan landings; purple = problem route (deaths, unsafe or failing hops). Stand near a numbered start to inspect it; face its direction to separate overlapping starts.\n\"",
 					g_botSfjTrackRouteCount));
 			if (!g_botSfjTrackRouteCount)
 				trap->SendServerCommand(clientNum,
@@ -6773,7 +6816,7 @@ static void BotSFJ_EditFrame(void)
 			if (DistanceSquared(viewer->client->ps.origin, route->start) > 2048.0f * 2048.0f)
 				continue;
 			BotSFJ_EditMarker(clientNum, route->start, route->routeId,
-				BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x0000ff00));
+				BotSFJ_EditRouteDrawColor(route, 0x0000ff00));
 			drawn++;
 		}
 		if (best < 0)
@@ -6800,7 +6843,7 @@ static void BotSFJ_EditFrame(void)
 		for (i = 0; i < route->nodeCount && i < 2; i++)
 		{
 			const int node = viewers[clientNum].hopCursor++ % route->nodeCount;
-			const int color = BotSFJ_EditRouteColor(BotSFJ_EditRouteDirection(route), 0x00ffff00);
+			const int color = BotSFJ_EditRouteDrawColor(route, 0x00ffff00);
 			vec3_t from, to;
 
 			VectorCopy(node ? route->node[node - 1] : route->start, from);
@@ -17041,6 +17084,19 @@ int BotTryAnotherWeapon(bot_state_t *bs)
 		}
 	}
 
+	// Out of ammo: the saber beats the stun baton/fists that the index scan would reach first.
+	if ((bs->cur_ps.stats[STAT_WEAPONS] & (1 << WP_SABER)) && !bs->cur_ps.saberInFlight)
+	{
+		bs->doAltAttack = 0;
+		bs->virtualWeapon = WP_SABER;
+		if (bs->cur_ps.weapon != WP_SABER)
+		{
+			BotSelectWeapon(bs->client, WP_SABER);
+			return 1;
+		}
+		return 0;
+	}
+
 	i = 1;
 
 	while (i < WP_NUM_WEAPONS)
@@ -21081,13 +21137,31 @@ static qboolean NewBotAI_UpdateSaberThrowPass(bot_state_t *bs, qboolean *heading
 	return bs->saberThrowPassedTarget;
 }
 
+static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs)
+{
+	const playerState_t *ps;
+	int start;
+
+	if (!bs || !g_entities[bs->client].client)
+		return;
+	ps = &g_entities[bs->client].client->ps;
+	start = NewBotAI_SaberThrowSyncedStart(ps->saberInFlight ? 1 : 0, bs->saberThrowStartTime,
+		ps->saberDidThrowTime, level.time);
+	if (start == bs->saberThrowStartTime)
+		return;
+	bs->saberThrowStartTime = start;
+	bs->saberThrowLastVisibleTime = 0;
+	bs->saberThrowPassedTarget = qfalse;
+	bs->saberThrowPhase = NEWBOTAI_THROW_LAUNCH;
+	bs->saberThrowPhaseTime = 0;
+	bs->saberThrowSteerTime = 0;
+}
+
 void NewBotAI_SaberThrowing(bot_state_t* bs)
 {
 	if (NewBotAI_HasDroppedOwnSaber(bs))
 		return;
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = bs->cur_ps.saberDidThrowTime > 0 ?
-			bs->cur_ps.saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 
 	if (!NewBotAI_SaberThrowShouldHold(bs, level.time - bs->saberThrowStartTime, qfalse))
 	{
@@ -26220,8 +26294,7 @@ static void NewBotAI_AdjustSaberThrowLead(bot_state_t *bs)
 		ps->saberEntityNum <= 0 || ps->saberEntityNum >= ENTITYNUM_WORLD)
 		return;
 	saber = &g_entities[ps->saberEntityNum];
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = ps->saberDidThrowTime > 0 ? ps->saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 	if (!saber->inuse || saber->think == saberBackToOwner)
 	{
 		if (bs->saberThrowPhase != NEWBOTAI_THROW_RECALL)
@@ -26562,8 +26635,7 @@ static void NewBotAI_ApplySaberThrowInput(bot_state_t *bs, bot_input_t *bi)
 		}
 		return;
 	}
-	if (bs->saberThrowStartTime <= 0)
-		bs->saberThrowStartTime = ps->saberDidThrowTime > 0 ? ps->saberDidThrowTime : level.time;
+	NewBotAI_SyncSaberThrowStart(bs);
 	if (!bs->frame_Enemy_Vis)
 		NewBotAI_AdjustSaberThrowLead(bs);
 	hardRecall = !bs->currentEnemy || !bs->currentEnemy->client ||
@@ -32112,6 +32184,7 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		return;
 
 	NewBotAI_ConfigureSaberThrow(bs);
+	NewBotAI_SyncSaberThrowStart(bs);
 
 	targetMode = BotGetNewBotAITargetMode();
 	someonesHere = BotHasActiveHumanPlayers();
@@ -32574,6 +32647,17 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		NewBotAI_Tribes(bs, thinktime);
 		NewBotAI_ApplyRandomStrafeOverlay(bs);
 		return;
+	}
+
+	// A fully holstered saber makes every attack gate treat the saber as unusable, so the
+	// bot would never press attack (which also ignites it). Ignite it explicitly in combat.
+	if (NewBotAI_ShouldIgniteSaberForCombat(bs->cur_ps.weapon == WP_SABER,
+		bs->cur_ps.saberHolstered, bs->cur_ps.saberInFlight ? 1 : 0, bs->frame_Enemy_Vis,
+		bs->frame_Enemy_Len, g_entities[bs->client].client->ps.weaponTime,
+		bs->duelOfferHoldUntil > level.time, level.time - bs->saberIgniteRetryTime))
+	{
+		bs->saberIgniteRetryTime = level.time;
+		Cmd_ToggleSaber_f(&g_entities[bs->client]);
 	}
 
 	bs->saberTechniqueCandidate = bs->cur_ps.weapon == WP_SABER &&
@@ -33757,9 +33841,7 @@ void StandardBotAI(bot_state_t *bs, float thinktime)
 
 	if (bs->cur_ps.saberInFlight)
 	{
-		if (bs->saberThrowStartTime <= 0)
-			bs->saberThrowStartTime = bs->cur_ps.saberDidThrowTime > 0 ?
-				bs->cur_ps.saberDidThrowTime : level.time;
+		NewBotAI_SyncSaberThrowStart(bs);
 		bs->saberThrowTime = level.time + Q_irand(4000, 10000);
 	}
 

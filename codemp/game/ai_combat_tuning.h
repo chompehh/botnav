@@ -949,6 +949,18 @@ static inline int NewBotAI_SaberCanOwnInputs(int holdingSaber, int visibleEnemy,
 	return holdingSaber && visibleEnemy && !engineBusy && !forceMovement && !navigationMovement;
 }
 
+#define NEWBOTAI_SABER_IGNITE_RANGE 768.0f
+#define NEWBOTAI_SABER_IGNITE_RETRY_MS 750
+
+static inline int NewBotAI_ShouldIgniteSaberForCombat(int holdingSaber, int holstered,
+	int inFlight, int enemyVisible, float enemyDistance, int weaponTime, int offeringDuel,
+	int msSinceLastIgnite)
+{
+	return holdingSaber && holstered >= 2 && !inFlight && enemyVisible &&
+		enemyDistance < NEWBOTAI_SABER_IGNITE_RANGE && weaponTime < 1 && !offeringDuel &&
+		msSinceLastIgnite >= NEWBOTAI_SABER_IGNITE_RETRY_MS;
+}
+
 static inline int NewBotAI_SaberPrimaryBladeAvailable(int holstered)
 {
 	// Staff/dual partial holster (1) disables the second blade, not primary attacks.
@@ -2832,17 +2844,40 @@ static inline newbotai_throw_phase_t NewBotAI_SaberThrowNextPhase(newbotai_throw
 	return phase;
 }
 
+// Dueltracks throw_start/throw_end pairs: humans held a median 990ms (p90 2930ms) and hit
+// 59.7%; long human throws (1.5s+) still hit 54-56%. Bots held a median 759ms (p90 1075ms)
+// partly because a stale start time from a previous throw recalled the next one at once.
+#define NEWBOTAI_SABER_THROW_HOLD_MAX_MS 2200
+#define NEWBOTAI_SABER_THROW_HOLD_L1_MS 750
+#define NEWBOTAI_SABER_THROW_EXTEND_L3_MS 3200
+#define NEWBOTAI_SABER_THROW_EXTEND_L2_MS 2800
+
 static inline int NewBotAI_SaberThrowRecallDue(int throwLevel, int heldMs, int unsafe,
 	int returning, int forceAllowed)
 {
-	const int maximum = throwLevel >= 3 ? 1500 : throwLevel == 2 ? 1800 : 750;
+	const int maximum = throwLevel >= 2 ? NEWBOTAI_SABER_THROW_HOLD_MAX_MS :
+		NEWBOTAI_SABER_THROW_HOLD_L1_MS;
 	return unsafe || returning || !forceAllowed || heldMs < 0 || heldMs >= maximum;
 }
 
 static inline int NewBotAI_SaberThrowExtensionRecallDue(int throwLevel, int heldMs)
 {
-	const int maximum = throwLevel >= 3 ? 2800 : throwLevel == 2 ? 2400 : 750;
+	const int maximum = throwLevel >= 3 ? NEWBOTAI_SABER_THROW_EXTEND_L3_MS :
+		throwLevel == 2 ? NEWBOTAI_SABER_THROW_EXTEND_L2_MS : NEWBOTAI_SABER_THROW_HOLD_L1_MS;
 	return heldMs < 0 || heldMs >= maximum;
+}
+
+// Start time the throw controller should judge the current throw by: the engine stamps
+// saberDidThrowTime on every throw, so a tracked start from an earlier throw is replaced.
+// Returns 0 when no saber is in flight.
+static inline int NewBotAI_SaberThrowSyncedStart(int inFlight, int trackedStart,
+	int didThrowTime, int now)
+{
+	if (!inFlight)
+		return 0;
+	if (didThrowTime > 0)
+		return didThrowTime;
+	return trackedStart > 0 ? trackedStart : now;
 }
 
 static inline int NewBotAI_SaberThrowRoutingHold(int throwLevel, newbotai_throw_phase_t phase,

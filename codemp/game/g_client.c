@@ -3230,7 +3230,7 @@ void ClientBegin( int clientNum, qboolean allowTeamReset ) {
 	client->ps.persistant[PERS_CAMERA_SETTINGS] = client->pers.cameraSettings;
 
 	client->pers.noFollow = qfalse;
-	ent->r.svFlags &= ~SVF_SINGLECLIENT;
+	ent->r.svFlags &= ~(SVF_SINGLECLIENT | SVF_NOTSINGLECLIENT);
 
 	if ( ent->ghoul2 && ent->client )
 		ent->client->renderInfo.lastG2 = NULL; //update the renderinfo bolts next update.
@@ -4235,6 +4235,8 @@ void ClientSpawn(gentity_t *ent) {
 		}
 	}
 	client->pers.teamState.state = TEAM_ACTIVE;
+	// Never carry a duel anti-wallhack hide (G_UpdateClientBroadcasts) into a new life.
+	ent->r.svFlags &= ~SVF_NOTSINGLECLIENT;
 
 	// toggle the teleport bit so the client knows to not lerp
 	// and never clear the voted flag

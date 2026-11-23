@@ -354,6 +354,7 @@ typedef struct bot_state_s
 	int					saberThrowCompletionKey;
 	int					saberThrowCompletionMs;
 	qboolean			saberThrowPassedTarget; // current throw has flown past the target once
+	int					saberIgniteRetryTime; // last combat saber ignite attempt (level.time)
 	int					saberThrowPhase;
 	int					saberThrowPhaseTime;
 	int					saberThrowSteerTime;

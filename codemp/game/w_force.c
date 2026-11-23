@@ -2309,10 +2309,13 @@ void ForceDrainDamage( gentity_t *self, gentity_t *traceEnt, vec3_t dir, vec3_t 
 				if (self->client->ps.stats[STAT_HEALTH] < self->client->ps.stats[STAT_MAX_HEALTH] &&
 					self->health > 0 && self->client->ps.stats[STAT_HEALTH] > 0)
 				{
-					if (healthoverride)
-						self->health += healthoverride;
-					else
-						self->health += dmg;
+					int gain = healthoverride ? healthoverride : dmg;
+					if (JVM_IsMode(level.gametype) &&
+						(traceEnt->client->ps.stats[STAT_RESTRICTIONS] & JVM_ACTIVE))
+						gain = JVM_DrainHealthGain(
+							JVM_ReplicatedClass(traceEnt->client->ps.stats[STAT_RESTRICTIONS]),
+							gain, merc_nerfdrain.value);
+					self->health += gain;
 					if (self->health > self->client->ps.stats[STAT_MAX_HEALTH])
 					{
 						self->health = self->client->ps.stats[STAT_MAX_HEALTH];

@@ -352,6 +352,11 @@ BOOST_AUTO_TEST_CASE(jedi_and_merc_gripkick_reductions_are_independent_inputs)
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_TANK, .25f, .75f), .25f);
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_JEDI, .25f, .75f), .25f);
 	BOOST_CHECK_EQUAL(JVM_GripkickReduction(JVM_MERC, .25f, .75f), .75f);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, .5f), 5);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, 0.0f), 10);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_MERC, 10, 2.0f), 0);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_JEDI, 10, .5f), 10);
+	BOOST_CHECK_EQUAL(JVM_DrainHealthGain(JVM_TANK, 10, 1.0f), 10);
 	BOOST_CHECK_CLOSE(JVM_DamageScale(JVM_JEDI, JVM_MERC, 0, 1, .5f, 2, .25f), .75f, .001f);
 	BOOST_CHECK_CLOSE(JVM_DamageScale(JVM_MERC, JVM_JEDI, 0, 1, .5f, 2, .75f), .25f, .001f);
 	BOOST_CHECK_EQUAL(JVM_DamageScale(JVM_JEDI, JVM_MERC, 0, 0, .5f, 2, 1), 1);

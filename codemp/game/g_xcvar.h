@@ -118,6 +118,8 @@ XCVAR_DEF( merc_botfloodprotect, "100", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_flipkick, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_countergrip, "1", NULL, CVAR_ARCHIVE, qtrue )
 XCVAR_DEF( merc_dropchance, "50", NULL, CVAR_ARCHIVE, qtrue )
+// Fraction (0-1) of Force Drain health gain removed when the drained player is a Merc.
+XCVAR_DEF( merc_nerfdrain, "0.5", NULL, CVAR_ARCHIVE, qtrue )
 // Merc spawn loadout bitmasks (same layout as g_startingWeapons / g_startingItems).
 // Default 102384: pistol..rocket launcher, concussion, old bryar; never the saber.
 XCVAR_DEF( merc_startingweapons, "102384", NULL, CVAR_ARCHIVE, qtrue )

@@ -2733,8 +2733,8 @@ BOOST_AUTO_TEST_CASE( saber_throw_routing_hold_survives_lateral_motion_but_is_bo
 	BOOST_CHECK( NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 800 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 800 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 1, NEWBOTAI_THROW_BYPASS, 600 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 1800 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 1500 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 2, NEWBOTAI_THROW_BYPASS, 2200 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, 2200 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_REAR, -1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_LAUNCH, 800 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowRoutingHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 800 ) );
@@ -2758,10 +2758,10 @@ BOOST_AUTO_TEST_CASE( saber_throw_recall_request_is_level_bounded_and_safety_sen
 {
 	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 1, 749, 0, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 1, 750, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 2, 1799, 0, 0, 1 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 2, 1800, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 3, 1499, 0, 0, 1 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 1500, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 2, 2199, 0, 0, 1 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 2, 2200, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowRecallDue( 3, 2199, 0, 0, 1 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 2200, 0, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 1, 0, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 0, 1, 1 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 50, 0, 0, 0 ) );
@@ -2933,14 +2933,26 @@ BOOST_AUTO_TEST_CASE( saber_only_counterpressure_waits_out_early_sweep_but_does_
 	BOOST_CHECK( !NewBotAI_SaberPressureCounterReady( context ) );
 }
 
+BOOST_AUTO_TEST_CASE( holstered_saber_is_ignited_for_visible_close_enemies )
+{
+	BOOST_CHECK( NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 1, 0, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 1, 1, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 0, 200.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 900.0f, 0, 0, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 1, 1000 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 1, 2, 0, 1, 200.0f, 0, 0, 100 ) );
+	BOOST_CHECK( !NewBotAI_ShouldIgniteSaberForCombat( 0, 2, 0, 1, 200.0f, 0, 0, 1000 ) );
+}
+
 BOOST_AUTO_TEST_CASE( saber_throw_shared_policy_keeps_soft_recall_out_of_protected_routes )
 {
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 599, 1, 0, 0, 1, -30, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_CUT_THROUGH, 1000, 0, 1, 0, 1, 0, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 1000, 1, 0, 0, 1, -30, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 1799, 1, 0, 0, 1, 0, 0 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 1800, 1, 0, 0, 0, 30, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 1500, 0, 1, 0, 0, 30, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 2, NEWBOTAI_THROW_REAR, 2200, 1, 0, 0, 0, 30, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, 2200, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 1, NEWBOTAI_THROW_LAUNCH, 750, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_RECALL, 50, 0, 1, 0, 0, 30, 1 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowWantsHold( 3, NEWBOTAI_THROW_BYPASS, -1, 0, 1, 0, 0, 30, 1 ) );
@@ -3032,15 +3044,21 @@ BOOST_AUTO_TEST_CASE( contextual_throw_extensions_never_shorten_legacy_protectio
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_CUT_THROUGH,
 		1600, 0, 1, 0, 1, 600, 40, 0, 0, 0 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
-		1799, 1, 0, 0, 1, 800, 10, 0, 0, 0 ) );
+		2199, 1, 0, 0, 1, 800, 10, 0, 0, 0 ) );
 	BOOST_CHECK( !NewBotAI_SaberThrowContextHold( 2, NEWBOTAI_THROW_REAR,
-		1800, 1, 0, 0, 1, 800, 10, 0, 0, 30 ) );
+		2200, 1, 0, 0, 1, 800, 10, 0, 0, 30 ) );
 	BOOST_CHECK( NewBotAI_SaberThrowContextHold( 3, NEWBOTAI_THROW_REAR,
 		2200, 1, 0, 0, 1, 800, 60, 0, 0, 0 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 1500, 0, 0, 1 ) );
-	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 1500 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 3, 2800 ) );
-	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 2, 2400 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowRecallDue( 3, 2200, 0, 0, 1 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 2200 ) );
+	BOOST_CHECK( !NewBotAI_SaberThrowExtensionRecallDue( 3, 3199 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 3, 3200 ) );
+	BOOST_CHECK( NewBotAI_SaberThrowExtensionRecallDue( 2, 2800 ) );
+	// A start stamped by an earlier throw is replaced by the engine's new throw time.
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 1000, 5000, 5200 ), 5000 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 1000, 0, 5200 ), 1000 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 1, 0, 0, 5200 ), 5200 );
+	BOOST_CHECK_EQUAL( NewBotAI_SaberThrowSyncedStart( 0, 1000, 5000, 5200 ), 0 );
 }
 
 BOOST_AUTO_TEST_CASE( contextual_throw_never_overrides_hard_recalls )
@@ -5515,6 +5533,17 @@ BOOST_AUTO_TEST_CASE( route_failure_attribution_covers_unlaunched_and_interrupte
 	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2500, 0, 1, 1) );
 	BOOST_CHECK( !BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 1) );
 	BOOST_CHECK( BotSFJ_PendingDeathAllows(1000, 2501, 0, 1, 0) );
+}
+
+BOOST_AUTO_TEST_CASE( editmode_flags_problem_routes )
+{
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 0, 0, 0) );
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 0, 2, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 0, 1, 2, 0) );
+	BOOST_CHECK( !BotSFJ_RouteIsProblematic(0, 0, 2, 2, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(1, 0, 10, 0, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 1, 10, 0, 0) );
+	BOOST_CHECK( BotSFJ_RouteIsProblematic(0, 0, 10, 0, 1) );
 }
 
 BOOST_AUTO_TEST_CASE( speed_hops_lose_trust_sooner_and_recover_with_success )

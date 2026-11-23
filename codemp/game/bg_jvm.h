@@ -244,6 +244,16 @@ static inline float JVM_GripkickReduction(int targetClass, float jediReduction, 
 	return targetClass == JVM_MERC ? mercReduction : jediReduction;
 }
 
+/* merc_nerfdrain: fraction (0-1) of Force Drain health gain removed when the drained
+ * player is a Merc. The drained target still loses the full amount. */
+static inline int JVM_DrainHealthGain(int targetClass, int gain, float mercNerf) {
+	float kept;
+	if (gain <= 0 || targetClass != JVM_MERC)
+		return gain;
+	kept = 1.0f - JVM_ClampScale(mercNerf, 1.0f);
+	return (int)(gain * kept + 0.5f);
+}
+
 static inline int JVM_GrappleDrain(float *fraction, int elapsed, float rate) {
 	int whole;
 	if (elapsed <= 0)
