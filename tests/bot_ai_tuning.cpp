@@ -2875,6 +2875,27 @@ BOOST_AUTO_TEST_CASE( saber_idle_footing_responds_to_strafe_controls_without_cha
 		NewBotAI_SaberFootingStrafeMs( 10, 100, 900, 0 ) );
 }
 
+BOOST_AUTO_TEST_CASE( descending_movers_threaten_only_players_beneath_them )
+{
+	const float mins[3] = { 0.0f, 0.0f, 200.0f };
+	const float maxs[3] = { 128.0f, 128.0f, 216.0f };
+	const float under[3] = { 64.0f, 64.0f, 0.0f };
+	const float beside[3] = { 200.0f, 64.0f, 0.0f };
+	const float above[3] = { 64.0f, 64.0f, 216.0f };
+
+	// Travelling 200u down brings the underside to z=0, below the 40u-tall hull.
+	BOOST_CHECK( BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	// Stopping 64u down leaves a 136u gap: no crush.
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 64.0f ) );
+	// Not activated (no travel), outside the footprint, or standing on top: no threat.
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 0.0f ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( beside, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	BOOST_CHECK( !BotNav_CrusherThreatensPoint( above, 15.0f, 40.0f, mins, maxs, 200.0f ) );
+	BOOST_CHECK( BotNav_CrusherLethal( 2, 1 ) );
+	BOOST_CHECK( !BotNav_CrusherLethal( 2, 0 ) );
+	BOOST_CHECK( BotNav_CrusherLethal( 50, 0 ) );
+}
+
 BOOST_AUTO_TEST_CASE( gun_bots_fire_on_the_move_and_kite_melee_threats )
 {
 	BOOST_CHECK( BotCombat_GunMoveFireAllowed( 1, 1, 1, 1, 1, 900.0f ) );

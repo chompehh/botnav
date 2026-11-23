@@ -2562,6 +2562,33 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 	return (mistakeChance > 0 && roll > 0 && roll <= mistakeChance) ? 1 : 0;
 }
 
+// Elevators and crushers. A mover only threatens while it is moving down (activated):
+// a player hull overlapping its footprint, currently below it, is crushed if the mover's
+// remaining travel brings its underside below the top of that hull.
+#define BOTNAV_CRUSHER_LETHAL_DAMAGE 20
+#define BOTNAV_CRUSHER_MAX_GAP 768.0f
+
+static inline int BotNav_CrusherThreatensPoint(const float point[3], float halfWidth,
+	float height, const float moverMins[3], const float moverMaxs[3], float travelDown)
+{
+	const float top = point[2] + height;
+
+	if (travelDown <= 0.0f || point[0] + halfWidth <= moverMins[0] ||
+		point[0] - halfWidth >= moverMaxs[0] || point[1] + halfWidth <= moverMins[1] ||
+		point[1] - halfWidth >= moverMaxs[1])
+		return 0;
+	if (moverMins[2] < top - 8.0f || moverMins[2] - top > BOTNAV_CRUSHER_MAX_GAP)
+		return 0;
+	return moverMins[2] - travelDown < top;
+}
+
+// Offensive use needs a mover that kills (crusher flag or heavy damage), not a 2-damage plat
+// that just reverses.
+static inline int BotNav_CrusherLethal(int damage, int crusherFlag)
+{
+	return damage > 0 && (crusherFlag || damage >= BOTNAV_CRUSHER_LETHAL_DAMAGE);
+}
+
 // Gun bots fire while their movement is owned by a route or strafe jump: shots do not
 // change the world-space wish, which is kept through the aim turn.
 #define BOTCOMBAT_GUN_MOVEFIRE_MAX_RANGE 2048.0f

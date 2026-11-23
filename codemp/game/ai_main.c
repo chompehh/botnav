@@ -335,6 +335,8 @@ static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
 static qboolean BotCombat_GunMoveFire(bot_state_t *bs);
+static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly);
+static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time);
 static qboolean BotCombat_ShouldKite(bot_state_t *bs);
 static void BotCombat_ApplyDisruptorSnipe(bot_state_t *bs, usercmd_t *ucmd, int time, qboolean holdCombat);
 static qboolean BotSFJ_TriggerAlongSegment(bot_state_t *bs, const vec3_t start,
@@ -1357,6 +1359,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	BotCombat_FilterRangedInput(bs, &bi);
 	BotNav_FilterGapInput(bs, &bi, time);
 	BotNav_FilterCombatHazardInput(bs, &bi, time);
+	BotNav_ApplyCrusherEscape(bs, &bi, time);
 	//respawn hack
 	if (bi.actionflags & ACTION_RESPAWN) {
 		if (bs->lastucmd.buttons & BUTTON_ATTACK) bi.actionflags &= ~(ACTION_RESPAWN|ACTION_ATTACK);
@@ -3575,6 +3578,9 @@ static qboolean BotNav_DisplacementReachesHazard(bot_state_t *bs, gentity_t *tar
 		end, target->s.number, MASK_PLAYERSOLID | hazards, qfalse, 0, 0);
 	if (tr.startsolid || tr.allsolid)
 		return qfalse;
+	/* Displaced under an activated lift or crusher: the same push/pull logic as ledges. */
+	if (BotNav_ActiveCrusherAt(tr.endpos, qtrue))
+		return qtrue;
 	if (tr.fraction < 1.0f)
 	{
 		/* A lethal volume hit before a wall is itself a reachable hazard. */
@@ -3583,6 +3589,113 @@ static qboolean BotNav_DisplacementReachesHazard(bot_state_t *bs, gentity_t *tar
 	}
 	return BotNav_PointLeadsToDeath(bs, target->client->ps.origin, direction,
 		distance, 1024.0f);
+}
+
+/*
+ * Activated (descending) movers that can crush, rebuilt once per frame. Movers that are
+ * not moving yet are ignored, so bots never set up a crush before the lift is triggered.
+ */
+#define BOTNAV_MAX_CRUSHERS 16
+static int botNavCrusherFrame = -1;
+static int botNavCrusherCount;
+static int botNavCrusherEnts[BOTNAV_MAX_CRUSHERS];
+static float botNavCrusherTravel[BOTNAV_MAX_CRUSHERS];
+
+static void BotNav_RefreshCrushers(void)
+{
+	int i;
+
+	if (botNavCrusherFrame == level.framenum)
+		return;
+	botNavCrusherFrame = level.framenum;
+	botNavCrusherCount = 0;
+	for (i = MAX_CLIENTS; i < level.num_entities && botNavCrusherCount < BOTNAV_MAX_CRUSHERS; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+		float travel;
+		int remaining;
+
+		if (!ent->inuse || ent->s.eType != ET_MOVER || ent->damage <= 0 ||
+			(ent->moverState != MOVER_1TO2 && ent->moverState != MOVER_2TO1) ||
+			ent->s.pos.trType != TR_LINEAR_STOP || ent->s.pos.trDelta[2] >= -1.0f)
+			continue;
+		remaining = ent->s.pos.trTime + ent->s.pos.trDuration - level.time;
+		if (remaining <= 0)
+			continue;
+		travel = -ent->s.pos.trDelta[2] * remaining * 0.001f;
+		botNavCrusherEnts[botNavCrusherCount] = i;
+		botNavCrusherTravel[botNavCrusherCount] = travel;
+		botNavCrusherCount++;
+	}
+}
+
+/* Returns the crusher entity that would crush a player standing at point, or NULL. */
+static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly)
+{
+	int i;
+
+	BotNav_RefreshCrushers();
+	for (i = 0; i < botNavCrusherCount; i++)
+	{
+		gentity_t *mover = &g_entities[botNavCrusherEnts[i]];
+
+		if (lethalOnly && !BotNav_CrusherLethal(mover->damage,
+			(mover->spawnflags & 4) ? 1 : 0))
+			continue;
+		if (BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f, mover->r.absmin, mover->r.absmax,
+			botNavCrusherTravel[i]))
+			return mover;
+	}
+	return NULL;
+}
+
+/*
+ * A bot standing under a descending mover steps out of its footprint before it arrives.
+ * Grounded only; picks the shortest clear, hazard-free exit.
+ */
+static void BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time)
+{
+	gentity_t *mover;
+	vec3_t dir, best, angles, point;
+	float bestDist = 1.0e9f;
+	int i;
+
+	if (!bs || g_entities[bs->client].health <= 0 || bs->cur_ps.pm_type != PM_NORMAL ||
+		bs->cur_ps.groundEntityNum == ENTITYNUM_NONE ||
+		!(mover = BotNav_ActiveCrusherAt(bs->cur_ps.origin, qfalse)))
+		return;
+	VectorClear(best);
+	for (i = 0; i < 8; i++)
+	{
+		float step;
+
+		VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
+		AngleVectors(angles, dir, NULL, NULL);
+		if (!BotNav_CombatCandidateClear(bs, dir))
+			continue;
+		for (step = 32.0f; step <= 512.0f; step += 32.0f)
+		{
+			VectorMA(bs->cur_ps.origin, step, dir, point);
+			if (!BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f, mover->r.absmin,
+				mover->r.absmax, 1.0e6f))
+				break;
+		}
+		if (step < bestDist)
+		{
+			bestDist = step;
+			VectorCopy(dir, best);
+		}
+	}
+	if (VectorLengthSquared(best) <= 0.0f)
+		return;
+	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK);
+	VectorCopy(best, bi->dir);
+	bi->speed = 400.0f;
+	NewBotAI_CombatDecision(bs, "EDGE: crusher escape", 1000,
+		"under a descending mover (%s); leaving its footprint %.0fu away",
+		mover->classname ? mover->classname : "mover", bestDist);
+	(void)time;
 }
 
 static void BotNav_SelectHazardForce(bot_state_t *bs, bot_input_t *bi,
