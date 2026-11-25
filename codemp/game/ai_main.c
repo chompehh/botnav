@@ -115,7 +115,7 @@ void saberBackToOwner(gentity_t *saberent);
 extern const float pm_airaccelerate;
 static qboolean BotTargetModeAllowsBotEnemies(int targetMode);
 static qboolean BotTargetModePassesScanFilter(int targetMode, gentity_t *ent, qboolean preferredHumansOnly);
-static qboolean BotTargetModeIsForceDuelOnly(int targetMode);
+static qboolean BotTargetModeIsDuelOnly(int targetMode);
 static qboolean NewBotAI_InFFAExploreWindow(bot_state_t *bs, int targetMode);
 static void NewBotAI_RunNavigationOrAlone(bot_state_t *bs, float thinktime);
 static qboolean NewBotAI_ClassifyForwardObstacle(bot_state_t *bs, const vec3_t moveDir, qboolean *requiresHopOut, int *hitEntityOut);
@@ -3618,16 +3618,24 @@ static void BotNav_RefreshCrushers(void)
 	{
 		gentity_t *ent = &g_entities[i];
 		float travel;
-		int remaining;
+		qboolean platform, train, door;
 
 		if (!ent->inuse || ent->s.eType != ET_MOVER || ent->damage <= 0 ||
+			!ent->r.linked || !(ent->r.contents & CONTENTS_SOLID) || !ent->classname ||
 			(ent->moverState != MOVER_1TO2 && ent->moverState != MOVER_2TO1) ||
-			ent->s.pos.trType != TR_LINEAR_STOP || ent->s.pos.trDelta[2] >= -1.0f)
+			(ent->s.pos.trType != TR_LINEAR_STOP && ent->s.pos.trType != TR_NONLINEAR_STOP) ||
+			ent->s.pos.trDelta[2] >= -1.0f ||
+			ent->s.pos.trTime + ent->s.pos.trDuration <= level.time)
 			continue;
-		remaining = ent->s.pos.trTime + ent->s.pos.trDuration - level.time;
-		if (remaining <= 0)
+		platform = !Q_stricmp(ent->classname, "func_plat");
+		train = !Q_stricmp(ent->classname, "func_train");
+		door = !Q_stricmp(ent->classname, "func_door");
+		if (!BotNav_ElevatorMover(platform, train, door, door && (ent->spawnflags & 4)))
 			continue;
-		travel = -ent->s.pos.trDelta[2] * remaining * 0.001f;
+		travel = BotNav_RemainingDownTravel(ent->r.currentOrigin[2],
+			ent->moverState == MOVER_1TO2 ? ent->pos2[2] : ent->pos1[2]);
+		if (travel <= 0.0f)
+			continue;
 		botNavCrusherEnts[botNavCrusherCount] = i;
 		botNavCrusherTravel[botNavCrusherCount] = travel;
 		botNavCrusherCount++;
@@ -3645,7 +3653,7 @@ static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly
 		gentity_t *mover = &g_entities[botNavCrusherEnts[i]];
 
 		if (lethalOnly && !BotNav_CrusherLethal(mover->damage,
-			(mover->spawnflags & 4) ? 1 : 0))
+			!Q_stricmp(mover->classname, "func_door") && (mover->spawnflags & 4)))
 			continue;
 		if (BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f, mover->r.absmin, mover->r.absmax,
 			botNavCrusherTravel[i]))
@@ -3654,7 +3662,7 @@ static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly
 	return NULL;
 }
 
-/* Include resting and rising vertical lifts, independently of offensive crusher detection. */
+/* Also leave a platform whose low position reaches the bot, before it descends. */
 static gentity_t *BotNav_ElevatorAbove(const vec3_t point)
 {
 	int i;
@@ -3665,21 +3673,16 @@ static gentity_t *BotNav_ElevatorAbove(const vec3_t point)
 	for (i = MAX_CLIENTS; i < level.num_entities; i++)
 	{
 		gentity_t *ent = &g_entities[i];
-		qboolean platform, door, train;
-		float nextTravelZ = 0.0f;
+		float travel;
 
 		if (!ent->inuse || !ent->r.linked || ent->s.eType != ET_MOVER ||
 			!(ent->r.contents & CONTENTS_SOLID) || !ent->classname)
 			continue;
-		platform = !Q_stricmp(ent->classname, "func_plat");
-		door = !Q_stricmp(ent->classname, "func_door");
-		train = !Q_stricmp(ent->classname, "func_train");
-		if (train && ent->nextTrain && ent->nextTrain->nextTrain)
-			nextTravelZ = ent->nextTrain->nextTrain->s.origin[2] - ent->nextTrain->s.origin[2];
-		if (!BotNav_VerticalElevator(platform, door || train,
-			ent->pos2[2] - ent->pos1[2], nextTravelZ))
+		if (Q_stricmp(ent->classname, "func_plat"))
 			continue;
-		if (BotNav_BeneathElevator(point, 15.0f, 40.0f, ent->r.absmin, ent->r.absmax))
+		travel = BotNav_RemainingDownTravel(ent->r.currentOrigin[2], ent->pos1[2]);
+		if (BotNav_CrusherThreatensPoint(point, 15.0f, 40.0f,
+			ent->r.absmin, ent->r.absmax, travel))
 			return ent;
 	}
 	return NULL;
@@ -3689,8 +3692,9 @@ static gentity_t *BotNav_ElevatorAbove(const vec3_t point)
 static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int time)
 {
 	gentity_t *mover;
-	vec3_t dir, best, angles, point;
+	vec3_t dir, best, partial, angles, point;
 	float bestDist = 1.0e9f;
+	float initialExit, bestProgress = 0.0f;
 	int i;
 
 	if (!bs || g_entities[bs->client].health <= 0 || bs->cur_ps.pm_type != PM_NORMAL ||
@@ -3698,40 +3702,11 @@ static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int 
 		return qfalse;
 	mover = BotNav_ElevatorAbove(bs->cur_ps.origin);
 	if (!mover)
-	{
-		vec3_t intended;
-		float bestAlignment = -2.0f;
-
-		if (bs->sfjOwnsInput || bs->navWallJumpUntil > time ||
-			(bi->actionflags & (ACTION_JUMP | ACTION_DELAYEDJUMP)) ||
-			!BotSFJ_EffectiveInputDirection(bi, intended))
-			return qfalse;
-		VectorMA(bs->cur_ps.origin, 64.0f, intended, point);
-		if (!BotNav_ElevatorAbove(point))
-			return qfalse;
-		VectorClear(best);
-		for (i = 0; i < 8; i++)
-		{
-			float alignment;
-
-			VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
-			AngleVectors(angles, dir, NULL, NULL);
-			VectorMA(bs->cur_ps.origin, 64.0f, dir, point);
-			alignment = DotProduct(dir, intended);
-			if (alignment > bestAlignment && !BotNav_ElevatorAbove(point) &&
-				BotNav_CombatCandidateClear(bs, dir))
-			{
-				bestAlignment = alignment;
-				VectorCopy(dir, best);
-			}
-		}
-		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
-			ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK);
-		VectorCopy(best, bi->dir);
-		bi->speed = bestAlignment > -2.0f ? 400.0f : 0.0f;
-		return qtrue;
-	}
+		return qfalse;
 	VectorClear(best);
+	VectorClear(partial);
+	initialExit = BotNav_ElevatorExitDistance(bs->cur_ps.origin, 15.0f,
+		mover->r.absmin, mover->r.absmax);
 	for (i = 0; i < 8; i++)
 	{
 		float step;
@@ -3739,10 +3714,9 @@ static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int 
 
 		VectorSet(angles, 0.0f, i * 45.0f, 0.0f);
 		AngleVectors(angles, dir, NULL, NULL);
-		if (!BotNav_CombatCandidateClear(bs, dir))
-			continue;
 		for (step = 32.0f; step <= 512.0f; step += 32.0f)
 		{
+			float progress;
 			VectorMA(bs->cur_ps.origin, step, dir, point);
 			JP_Trace(&tr, bs->cur_ps.origin, g_entities[bs->client].r.mins,
 				g_entities[bs->client].r.maxs, point, bs->client, MASK_PLAYERSOLID, qfalse, 0, 0);
@@ -3750,6 +3724,13 @@ static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int 
 				BotNav_PointLeadsToDeath(bs, bs->cur_ps.origin, dir, step, 1024.0f) ||
 				BotNav_CombatLandingUnsafe(bs, dir, step))
 				break;
+			progress = initialExit - BotNav_ElevatorExitDistance(point, 15.0f,
+				mover->r.absmin, mover->r.absmax);
+			if (progress > bestProgress)
+			{
+				bestProgress = progress;
+				VectorCopy(dir, partial);
+			}
 			if (!BotNav_BeneathElevator(point, 15.0f, 40.0f, mover->r.absmin,
 				mover->r.absmax))
 			{
@@ -3763,9 +3744,15 @@ static qboolean BotNav_ApplyCrusherEscape(bot_state_t *bs, bot_input_t *bi, int 
 		}
 	}
 	if (VectorLengthSquared(best) <= 0.0f)
-		return qfalse;
+	{
+		if (VectorLengthSquared(partial) <= 0.0f)
+			return qfalse;
+		VectorCopy(partial, best);
+		bestDist = initialExit;
+	}
 	bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
-		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK | ACTION_JUMP | ACTION_DELAYEDJUMP);
+		ACTION_MOVERIGHT | ACTION_CROUCH | ACTION_WALK | ACTION_JUMP | ACTION_DELAYEDJUMP |
+		ACTION_ATTACK | ACTION_ALT_ATTACK);
 	VectorCopy(best, bi->dir);
 	bi->speed = 400.0f;
 	NewBotAI_CombatDecision(bs, "EDGE: crusher escape", 1000,
@@ -24943,46 +24930,21 @@ static void NewBotAI_ClearCurrentEnemyLock(bot_state_t *bs)
 	bs->enemyWaypointFallbackEnemyNum = -1;
 }
 
-enum
-{
-	NEWBOTAI_TARGET_DEFAULT = -1,
-	NEWBOTAI_TARGET_HUMANS_ONLY = -2,
-	NEWBOTAI_TARGET_PREFER_HUMANS = -3,
-	NEWBOTAI_TARGET_PREFER_HUMANS_DUEL = -4
-};
-
 static int BotGetNewBotAITargetMode(void)
 {
-	switch (g_newBotAITarget.integer)
-	{
-	case NEWBOTAI_TARGET_DEFAULT:
-	case NEWBOTAI_TARGET_HUMANS_ONLY:
-	case NEWBOTAI_TARGET_PREFER_HUMANS:
-	case NEWBOTAI_TARGET_PREFER_HUMANS_DUEL:
-		return g_newBotAITarget.integer;
-	default:
-		break;
-	}
-
-	if (g_newBotAITarget.integer < NEWBOTAI_TARGET_PREFER_HUMANS_DUEL)
-	{
-		return NEWBOTAI_TARGET_HUMANS_ONLY;
-	}
-
-	return g_newBotAITarget.integer;
+	return NewBotAI_TargetMode(g_newBotAITarget.integer);
 }
 
-//-3 and -4 both prefer human targets first, then fall back to allowing bot-vs-bot
-//targeting once no humans are active; only -4 stays force-duel-only while searching.
+// Duel modes prefer human targets first, then fall back to bots.
 static qboolean BotTargetModePrefersHumansThenBots(int targetMode)
 {
-	return (targetMode == NEWBOTAI_TARGET_PREFER_HUMANS || targetMode == NEWBOTAI_TARGET_PREFER_HUMANS_DUEL);
+	return (targetMode == NEWBOTAI_TARGET_PREFER_HUMANS || BotTargetModeIsDuelOnly(targetMode));
 }
 
 static qboolean BotTargetModeAllowsBotDuelChallenges(int targetMode)
 {
 	return (targetMode == NEWBOTAI_TARGET_PREFER_HUMANS ||
-		targetMode == NEWBOTAI_TARGET_PREFER_HUMANS_DUEL);
+		BotTargetModeIsDuelOnly(targetMode));
 }
 
 //The long bot-vs-bot cooldown only exists to keep bots available for humans; with no
@@ -24993,9 +24955,9 @@ static qboolean BotTargetModeUsesExtendedBotDuelCooldown(int targetMode)
 		BotHasActiveHumanPlayers()) ? qtrue : qfalse;
 }
 
-static qboolean BotTargetModeIsForceDuelOnly(int targetMode)
+static qboolean BotTargetModeIsDuelOnly(int targetMode)
 {
-	return (targetMode == NEWBOTAI_TARGET_PREFER_HUMANS_DUEL);
+	return NewBotAI_TargetModeDuelOnly(targetMode) ? qtrue : qfalse;
 }
 
 static qboolean BotTargetModeAllowsBotEnemies(int targetMode)
@@ -25049,7 +25011,7 @@ static qboolean BotHasActiveHumanPlayers(void)
 	return qfalse;
 }
 
-//After bot_duelcountmax completed duels, -3/-4 bots return to FFA: they stop issuing
+//After bot_duelcountmax completed duels, -3/-4/-5 bots return to FFA: they stop issuing
 //and accepting duel challenges while they explore for a new opponent (tracked in
 //NewBotAI via duelCompletedCount/ffaExploreUntil).
 static qboolean NewBotAI_InFFAExploreWindow(bot_state_t *bs, int targetMode)
@@ -25068,7 +25030,7 @@ static qboolean NewBotAI_InFFAExploreWindow(bot_state_t *bs, int targetMode)
 }
 
 //Bots may only request a duel once every 7 seconds by default; bot-initiated bot-vs-bot
-//offers are throttled much harder (2 minutes) in -3/-4 target modes so human duel
+//offers are throttled much harder (2 minutes) in -3/-4/-5 target modes so human duel
 //opportunities are not crowded out by rapid bot challenge loops.
 #define NEWBOTAI_DUEL_REQUEST_COOLDOWN_MS 7000
 #define NEWBOTAI_DUEL_REQUEST_BOT_VS_BOT_COOLDOWN_MS 120000
@@ -25132,14 +25094,8 @@ static qboolean NewBotAI_TryIssueBotDuelChallenge(bot_state_t *bs, int targetMod
 	VectorCopy(toEnemy, g_entities[bs->client].client->ps.viewangles);
 	VectorCopy(toEnemy, bs->ideal_viewangles);
 
-	// Bot-vs-bot offers in -3/-4 are always full-force duels so the force Elo keeps
-	// building. Offers to humans use the last duel type a human offered this bot
-	// (saber or force), defaulting to force.
-	duelType = 1;
-	if (!(bs->currentEnemy->r.svFlags & SVF_BOT) && bs->humanDuelTypePref == 1)
-	{
-		duelType = 0;
-	}
+	duelType = NewBotAI_DuelOfferType(targetMode,
+		(bs->currentEnemy->r.svFlags & SVF_BOT) != 0, bs->humanDuelTypePref);
 	Cmd_EngageDuel_f(&g_entities[bs->client], duelType);
 
 	VectorCopy(oldViewAngles, g_entities[bs->client].client->ps.viewangles);
@@ -32287,8 +32243,8 @@ int NewBotAI_ScanForEnemies(bot_state_t* bs) {
 //Returns a client currently challenging this bot. Human challenges win over bot
 //challenges and use the engine's full acceptance window (the challenger's duelTime
 //plus 2s, see Cmd_EngageDuel_f); they also ignore the request throttle and the FFA
-//explore window so a human offer is never missed. Bot challenges in -3/-4 must be
-//force duels.
+//explore window so a human offer is never missed. Bot challenges must match the
+//default mode's saber or force duel type.
 static gentity_t *NewBotAI_GetPendingDuelChallenger(bot_state_t *bs, int targetMode, int *duelTypeOut)
 {
 	gentity_t *botChallenger = NULL;
@@ -32328,7 +32284,7 @@ static gentity_t *NewBotAI_GetPendingDuelChallenger(bot_state_t *bs, int targetM
 			continue;
 		if (!BotTargetModeAllowsBotDuelChallenges(targetMode))
 			continue;
-		if (duelType != 1)
+		if (duelType != NewBotAI_DuelOfferType(targetMode, 1, 0))
 			continue;
 		botChallenger = challenger;
 		botChallengerType = duelType;
@@ -32495,7 +32451,7 @@ static qboolean NewBotAI_IsUnavailableDuelBot(bot_state_t *bs, gentity_t *ent, i
 {
 	bot_state_t *otherBS;
 
-	if (!BotTargetModeIsForceDuelOnly(targetMode) || !ent || !ent->client ||
+	if (!BotTargetModeIsDuelOnly(targetMode) || !ent || !ent->client ||
 		!(ent->r.svFlags & SVF_BOT) || ent->s.number < 0 || ent->s.number >= MAX_CLIENTS)
 		return qfalse;
 	if (ent->client->ps.duelInProgress)
@@ -32509,7 +32465,7 @@ static qboolean NewBotAI_IsUnavailableDuelBot(bot_state_t *bs, gentity_t *ent, i
 		!NewBotAI_BotCanChallengeNow(otherBS, targetMode)) ? qtrue : qfalse;
 }
 
-//-4 stalemate watchdog: two bots idling next to each other without a duel or offer
+//Duel-only stalemate watchdog: two bots idling next to each other without a duel or offer
 //for NEWBOTAI_DUEL_STALEMATE_MS blacklist each other and roam apart.
 static void NewBotAI_UpdateDuelStalemate(bot_state_t *bs, int targetMode)
 {
@@ -32517,7 +32473,7 @@ static void NewBotAI_UpdateDuelStalemate(bot_state_t *bs, int targetMode)
 	bot_state_t *otherBS;
 	qboolean pending;
 
-	if (!BotTargetModeIsForceDuelOnly(targetMode) || bs->cur_ps.duelInProgress ||
+	if (!BotTargetModeIsDuelOnly(targetMode) || bs->cur_ps.duelInProgress ||
 		!enemy || !enemy->client || !(enemy->r.svFlags & SVF_BOT) ||
 		bs->frame_Enemy_Len > NEWBOTAI_DUEL_STALEMATE_RADIUS ||
 		enemy->s.number < 0 || enemy->s.number >= MAX_CLIENTS)
@@ -33127,7 +33083,7 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 	{
 		return;
 	}
-	if (BotTargetModeIsForceDuelOnly(targetMode) && !bs->cur_ps.duelInProgress)
+	if (BotTargetModeIsDuelOnly(targetMode) && !bs->cur_ps.duelInProgress)
 	{
 		//Exploring for a new partner, or breaking up a stalemate: roam instead of
 		//walking up to the current target and idling in front of it.

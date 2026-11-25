@@ -35,7 +35,7 @@ static struct botSpawnQueue_s {
 	int		spawnTime;
 } botSpawnQueue[BOT_SPAWN_QUEUE_DEPTH];
 
-static void G_AddBot( const char *name, float skill, const char *team, int delay, char *altname, qboolean arcadeManaged );
+static void G_AddBot( const char *name, float skill, const char *team, int delay, char *altname, qboolean arcadeManaged, int playerClass );
 
 vmCvar_t bot_minplayers;
 
@@ -566,7 +566,7 @@ static void G_AddRandomBotInternal( int team, qboolean arcadeManaged ) {
 				Q_strncpyz(netname, value, sizeof(netname));
 				Q_CleanStr(netname);
 				if (arcadeManaged)
-					G_AddBot(netname, skill, (teamstr[0] ? teamstr : "free"), 0, "", qtrue);
+					G_AddBot(netname, skill, (teamstr[0] ? teamstr : "free"), 0, "", qtrue, -1);
 				else
 					trap->SendConsoleCommand( EXEC_INSERT, va("addbot \"%s\" %.2f %s %i\n", netname, skill, teamstr, 0) );
 				return;
@@ -929,7 +929,7 @@ qboolean G_BotConnect( int clientNum, qboolean restart ) {
 G_AddBot
 ===============
 */
-static void G_AddBot( const char *name, float skill, const char *team, int delay, char *altname, qboolean arcadeManaged) {
+static void G_AddBot( const char *name, float skill, const char *team, int delay, char *altname, qboolean arcadeManaged, int playerClass) {
 	gentity_t		*bot = NULL;
 	int				clientNum, preTeam = TEAM_FREE;
 	char			userinfo[MAX_INFO_STRING] = {0},
@@ -974,6 +974,11 @@ static void G_AddBot( const char *name, float skill, const char *team, int delay
 	Info_SetValueForKey( userinfo, "snaps", "20" );
 	Info_SetValueForKey( userinfo, "ip", "localhost" );
 	Info_SetValueForKey( userinfo, "skill", va("%.2f", skill) );
+	if (JVM_CyclesLoadout(level.gametype)) {
+		int initialClass = JVM_InitialBotClass(playerClass, level.jvmNextBotClass);
+		Info_SetValueForKey(userinfo, "class", initialClass == JVM_MERC ? "merc" :
+			initialClass == JVM_TANK ? "tank" : "jedi");
+	}
 
 		 if ( skill >= 1 && skill < 2 )		Info_SetValueForKey( userinfo, "handicap", "50" );
 	else if ( skill >= 2 && skill < 3 )		Info_SetValueForKey( userinfo, "handicap", "70" );
@@ -1113,6 +1118,8 @@ static void G_AddBot( const char *name, float skill, const char *team, int delay
 			level.arcadeManagedBot[clientNum] = qfalse;
 		return;
 	}
+	if (JVM_CyclesLoadout(level.gametype) && playerClass < 0)
+		level.jvmNextBotClass = JVM_NextClass(level.jvmNextBotClass);
 
 	if ( bot->client->sess.sessionTeam != preTeam )
 	{
@@ -1192,6 +1199,7 @@ void Svcmd_AddBot_f( void ) {
 	char			string[MAX_TOKEN_CHARS];
 	char			team[MAX_TOKEN_CHARS];
 	int				botplayers;
+	int				playerClass = -1;
 
 	// are bots enabled?
 	if ( !trap->Cvar_VariableIntegerValue( "bot_enable" ) ) {
@@ -1201,7 +1209,7 @@ void Svcmd_AddBot_f( void ) {
 	// name
 	trap->Argv( 1, name, sizeof( name ) );
 	if ( !name[0] ) {
-		trap->Print( "Usage: Addbot <botname> [skill 1-5] [team] [msec delay] [altname] [arcademanaged]\n" );
+		trap->Print( "Usage: Addbot <botname> [skill 1-5] [team] [msec delay] [altname] [arcademanaged] [jedi|merc|tank]\n" );
 		return;
 	}
 
@@ -1236,8 +1244,16 @@ void Svcmd_AddBot_f( void ) {
 	trap->Argv( 5, altname, sizeof( altname ) );
 	trap->Argv( 6, string, sizeof( string ) );
 	arcadeManaged = string[0] ? atoi( string ) != 0 : qfalse;
+	trap->Argv( 7, string, sizeof( string ) );
+	if (string[0]) {
+		playerClass = JVM_ClassArg(string);
+		if (!JVM_CyclesLoadout(level.gametype) || playerClass < 0) {
+			trap->Print("addbot: class must be jedi, merc or tank in JoM or CTF+Classes\n");
+			return;
+		}
+	}
 
-	G_AddBot( name, skill, team, delay, altname, arcadeManaged );
+	G_AddBot( name, skill, team, delay, altname, arcadeManaged, playerClass );
 
 	// if this was issued during gameplay and we are playing locally,
 	// go ahead and load the bot's media immediately

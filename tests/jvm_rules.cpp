@@ -457,19 +457,33 @@ BOOST_AUTO_TEST_CASE(weapon_denial_preserves_nonweapon_and_protected_touches)
 
 BOOST_AUTO_TEST_CASE(cycle_only_schedules_an_actual_death_not_class_or_team_changes)
 {
-	for (int mode = GT_FFA; mode <= GT_JOM; ++mode) {
+	for (int mode = GT_FFA; mode <= GT_CTFC; ++mode) {
 		for (int playerClass = JVM_JEDI; playerClass <= JVM_TANK; ++playerClass) {
-			for (int flags = 0; flags < 32; ++flags) {
-				const bool enabled = flags & 1;
-				const bool dead = flags & 2;
-				const bool spectator = flags & 4;
-				const bool classChanging = flags & 8;
-				const bool teamChanging = flags & 16;
-				BOOST_CHECK_EQUAL(JVM_DeathNextClass(mode, playerClass, enabled, dead,
-					spectator, classChanging, teamChanging),
-					mode == GT_JOM && flags == 3 ? JVM_NextClass(playerClass) + 1 : 0);
+			for (int setting = 0; setting <= 2; ++setting) {
+				for (int flags = 0; flags < 32; ++flags) {
+					const bool dead = flags & 1;
+					const bool spectator = flags & 2;
+					const bool classChanging = flags & 4;
+					const bool teamChanging = flags & 8;
+					const bool bot = flags & 16;
+					BOOST_CHECK_EQUAL(JVM_DeathNextClass(mode, playerClass, setting, bot, dead,
+						spectator, classChanging, teamChanging),
+						(mode == GT_JOM || mode == GT_CTFC) && setting &&
+						(setting != 2 || bot) && (flags & 15) == 1 ?
+						JVM_NextClass(playerClass) + 1 : 0);
+				}
 			}
 		}
+	}
+}
+
+BOOST_AUTO_TEST_CASE(initial_bot_classes_rotate_independently_of_explicit_choices)
+{
+	int next = JVM_JEDI;
+	for (int i = 0; i < 6; ++i) {
+		BOOST_CHECK_EQUAL(JVM_InitialBotClass(-1, next), i % 3);
+		BOOST_CHECK_EQUAL(JVM_InitialBotClass(JVM_TANK, next), JVM_TANK);
+		next = JVM_NextClass(next);
 	}
 }
 
@@ -477,7 +491,7 @@ BOOST_AUTO_TEST_CASE(cycled_classes_keep_joining_without_a_force_profile)
 {
 	int playerClass = JVM_JEDI;
 	for (int death = 0; death < 6; ++death) {
-		const int next = JVM_DeathNextClass(GT_JOM, playerClass, 1, 1, 0, 0, 0);
+		const int next = JVM_DeathNextClass(GT_JOM, playerClass, 1, 0, 1, 0, 0, 0);
 		BOOST_REQUIRE_NE(next, 0);
 		playerClass = JVM_Class(GT_JOM, TEAM_FREE, next - 1);
 		BOOST_CHECK_EQUAL(playerClass, (death + 1) % 3);
@@ -514,7 +528,8 @@ BOOST_AUTO_TEST_CASE(ctf_classes_plays_as_ctf_with_selected_classes)
 	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 2, JVM_JEDI), JVM_JEDI);
 	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 1, JVM_MERC), JVM_MERC);
 	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, 2, JVM_TANK), JVM_TANK);
-	BOOST_CHECK_EQUAL(JVM_DeathNextClass(GT_CTFC, JVM_JEDI, 1, 1, 0, 0, 0), 0);
+	BOOST_CHECK_EQUAL(JVM_Class(GT_CTFC, TEAM_BLUE,
+		JVM_DeathNextClass(GT_CTFC, JVM_JEDI, 1, 0, 1, 0, 0, 0) - 1), JVM_MERC);
 }
 
 BOOST_AUTO_TEST_CASE(ctf_classes_team_command_arguments)

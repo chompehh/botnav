@@ -2903,15 +2903,37 @@ BOOST_AUTO_TEST_CASE( stationary_elevator_avoidance_does_not_change_crush_target
 	const float under[3] = { 64.0f, 64.0f, 0.0f };
 	const float beside[3] = { 150.0f, 64.0f, 0.0f };
 	const float onTop[3] = { 64.0f, 64.0f, 216.0f };
-	BOOST_CHECK( BotNav_VerticalElevator( 1, 0, 0.0f, 0.0f ) );
-	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, -128.0f, 0.0f ) );
-	BOOST_CHECK( BotNav_VerticalElevator( 0, 1, 0.0f, 128.0f ) );
-	BOOST_CHECK( !BotNav_VerticalElevator( 0, 1, 0.0f, 0.0f ) );
-	BOOST_CHECK( !BotNav_VerticalElevator( 0, 0, 128.0f, 0.0f ) );
+	BOOST_CHECK( BotNav_ElevatorMover( 1, 0, 0, 0 ) );
+	BOOST_CHECK( BotNav_ElevatorMover( 0, 1, 0, 0 ) );
+	BOOST_CHECK( BotNav_ElevatorMover( 0, 0, 1, 1 ) );
+	BOOST_CHECK( !BotNav_ElevatorMover( 0, 0, 1, 0 ) );
+	BOOST_CHECK( !BotNav_ElevatorMover( 0, 0, 0, 0 ) );
+	BOOST_CHECK_EQUAL( BotNav_RemainingDownTravel( 200.0f, 50.0f ), 150.0f );
+	BOOST_CHECK_EQUAL( BotNav_RemainingDownTravel( 50.0f, 200.0f ), 0.0f );
 	BOOST_CHECK( BotNav_BeneathElevator( under, 15.0f, 40.0f, mins, maxs ) );
 	BOOST_CHECK( !BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, mins, maxs, 0.0f ) );
 	BOOST_CHECK( !BotNav_BeneathElevator( beside, 15.0f, 40.0f, mins, maxs ) );
 	BOOST_CHECK( !BotNav_BeneathElevator( onTop, 15.0f, 40.0f, mins, maxs ) );
+	BOOST_CHECK_EQUAL( BotNav_ElevatorExitDistance( under, 15.0f, mins, maxs ), 79.0f );
+	BOOST_CHECK_LT( BotNav_ElevatorExitDistance( beside, 15.0f, mins, maxs ), 0.0f );
+	const float lowMins[3] = { 0.0f, 0.0f, 20.0f };
+	BOOST_CHECK( BotNav_CrusherThreatensPoint( under, 15.0f, 40.0f, lowMins, maxs, 1.0f ) );
+}
+
+BOOST_AUTO_TEST_CASE( saber_duel_mode_preserves_force_mode_behavior_and_preferences )
+{
+	BOOST_CHECK_EQUAL( NewBotAI_TargetMode(-5), -5 );
+	BOOST_CHECK_EQUAL( NewBotAI_TargetMode(-6), -2 );
+	BOOST_CHECK( NewBotAI_TargetModeDuelOnly(-5) );
+	BOOST_CHECK( NewBotAI_TargetModeDuelOnly(-4) );
+	BOOST_CHECK( !NewBotAI_TargetModeDuelOnly(-3) );
+	for (int bot = 0; bot <= 1; ++bot) {
+		BOOST_CHECK_EQUAL( NewBotAI_DuelOfferType(-5, bot, 0), 0 );
+		BOOST_CHECK_EQUAL( NewBotAI_DuelOfferType(-4, bot, 0), 1 );
+	}
+	BOOST_CHECK_EQUAL( NewBotAI_DuelOfferType(-5, 0, 2), 1 );
+	BOOST_CHECK_EQUAL( NewBotAI_DuelOfferType(-4, 0, 1), 0 );
+	BOOST_CHECK_EQUAL( NewBotAI_DuelOfferType(-5, 1, 2), 0 );
 }
 
 BOOST_AUTO_TEST_CASE( airborne_sniping_starts_at_apex_and_preserves_safety )

@@ -3271,7 +3271,8 @@ extern void RunEmplacedWeapon( gentity_t *ent, usercmd_t **ucmd );
 	if (self->s.number < MAX_CLIENTS) {
 		int nextClass = JVM_DeathNextClass(level.gametype,
 			JVM_ReplicatedClass(self->client->ps.stats[STAT_RESTRICTIONS]),
-			jom_cycleloadout.integer, self->client->ps.pm_type == PM_DEAD,
+			jom_cycleloadout.integer, (self->r.svFlags & SVF_BOT) != 0,
+			self->client->ps.pm_type == PM_DEAD,
 			self->client->sess.sessionTeam == TEAM_SPECTATOR, self->client->jvmClassChanging,
 			g_dontPenalizeTeam || meansOfDeath == MOD_TEAM_CHANGE);
 		if (nextClass)
