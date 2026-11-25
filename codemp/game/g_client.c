@@ -4091,9 +4091,9 @@ void ClientSpawn(gentity_t *ent) {
 	client = ent->client;
 	client->forceGripCheckValid = qfalse;
 	client->forceInputDebugTime = 0;
-	if (level.gametype == GT_JOM && client->jvmNextClass &&
+	if (JVM_CyclesLoadout(level.gametype) && client->jvmNextClass &&
 		client->sess.sessionTeam != TEAM_SPECTATOR) {
-		client->sess.jvmClass = JVM_Class(GT_JOM, TEAM_FREE, client->jvmNextClass - 1);
+		client->sess.jvmClass = JVM_Class(level.gametype, client->sess.sessionTeam, client->jvmNextClass - 1);
 		client->jvmNextClass = 0;
 		client->ps.fd.forceDoInit = 1;
 		ClientUserinfoChanged(index);

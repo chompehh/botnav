@@ -81,10 +81,19 @@ static inline int JVM_NextClass(int playerClass) {
 	return playerClass == JVM_JEDI ? JVM_MERC : playerClass == JVM_MERC ? JVM_TANK : JVM_JEDI;
 }
 
+static inline int JVM_CyclesLoadout(int gametype) {
+	return gametype == 12 || gametype == 13;
+}
+
+static inline int JVM_InitialBotClass(int selected, int nextClass) {
+	return selected >= JVM_JEDI && selected <= JVM_TANK ? selected : nextClass;
+}
+
 /* Returns a next-spawn class plus one; zero means no transition. */
-static inline int JVM_DeathNextClass(int gametype, int playerClass, int enabled,
+static inline int JVM_DeathNextClass(int gametype, int playerClass, int setting, int isBot,
 	int dead, int spectator, int classChanging, int teamChanging) {
-	return gametype == 12 && enabled && dead && !spectator && !classChanging && !teamChanging ?
+	return JVM_CyclesLoadout(gametype) && setting > 0 && (setting != 2 || isBot) &&
+		dead && !spectator && !classChanging && !teamChanging ?
 		JVM_NextClass(playerClass) + 1 : 0;
 }
 

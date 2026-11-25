@@ -524,7 +524,7 @@ typedef struct bot_state_s
 	int					ffaExploreUntil; // while > level.time, -3/-4 bots skip duel issue/accept and explore for a new opponent - see bot_ffaexploretime
 	int					duelBlacklistIndex; // recently-finished duel target to avoid reacquiring immediately during post-duel exploration
 	int					duelBlacklistUntil; // cooldown expiry for duelBlacklistIndex
-	int					duelOfferHoldUntil; // -3/-4: stay passive while a bot-issued duel offer is pending
+	int					duelOfferHoldUntil; // -3/-4/-5: stay passive while a bot-issued duel offer is pending
 	int					duelOfferTargetNum; // client the pending offer was made to
 	int					duelOfferHoldHealth; // health when the offer was made (heavy damage cancels the hold)
 	int					humanDuelTypePref; // last duel type a human offered this bot: 0 none, 1 saber, 2 force

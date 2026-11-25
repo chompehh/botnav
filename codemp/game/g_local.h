@@ -1596,6 +1596,7 @@ typedef struct level_locals_s {
 	qboolean	arcadeGameOverComplete;
 	qboolean	arcadeGameOverCenterReplaySent;
 	qboolean	arcadeInitialized;
+	int			jvmNextBotClass;
 } level_locals_t;
 
 

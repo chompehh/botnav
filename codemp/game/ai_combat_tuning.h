@@ -2562,17 +2562,47 @@ static inline int NewBotAI_AllowAirborneSwingStart(int enemyKnockedOrRecovering,
 	return (mistakeChance > 0 && roll > 0 && roll <= mistakeChance) ? 1 : 0;
 }
 
+enum {
+	NEWBOTAI_TARGET_DEFAULT = -1,
+	NEWBOTAI_TARGET_HUMANS_ONLY = -2,
+	NEWBOTAI_TARGET_PREFER_HUMANS = -3,
+	NEWBOTAI_TARGET_PREFER_HUMANS_DUEL = -4,
+	NEWBOTAI_TARGET_PREFER_HUMANS_SABER_DUEL = -5
+};
+
+static inline int NewBotAI_TargetMode(int mode)
+{
+	return mode < NEWBOTAI_TARGET_PREFER_HUMANS_SABER_DUEL ?
+		NEWBOTAI_TARGET_HUMANS_ONLY : mode;
+}
+
+static inline int NewBotAI_TargetModeDuelOnly(int mode)
+{
+	return mode == NEWBOTAI_TARGET_PREFER_HUMANS_DUEL ||
+		mode == NEWBOTAI_TARGET_PREFER_HUMANS_SABER_DUEL;
+}
+
+static inline int NewBotAI_DuelOfferType(int targetMode, int targetIsBot, int humanPreference)
+{
+	if (!targetIsBot && humanPreference)
+		return humanPreference == 1 ? 0 : 1;
+	return targetMode == NEWBOTAI_TARGET_PREFER_HUMANS_SABER_DUEL ? 0 : 1;
+}
+
 // Elevators and crushers. A mover only threatens while it is moving down (activated):
 // a player hull overlapping its footprint, currently below it, is crushed if the mover's
 // remaining travel brings its underside below the top of that hull.
 #define BOTNAV_CRUSHER_LETHAL_DAMAGE 20
 #define BOTNAV_CRUSHER_MAX_GAP 768.0f
 
-static inline int BotNav_VerticalElevator(int platform, int doorOrTrain,
-	float travelZ, float nextTravelZ)
+static inline int BotNav_ElevatorMover(int platform, int train, int door, int crusher)
 {
-	return platform || (doorOrTrain &&
-		(travelZ >= 1.0f || travelZ <= -1.0f || nextTravelZ >= 1.0f || nextTravelZ <= -1.0f));
+	return platform || train || (door && crusher);
+}
+
+static inline float BotNav_RemainingDownTravel(float currentZ, float destinationZ)
+{
+	return currentZ > destinationZ ? currentZ - destinationZ : 0.0f;
 }
 
 static inline int BotNav_BeneathElevator(const float point[3], float halfWidth,
@@ -2581,7 +2611,8 @@ static inline int BotNav_BeneathElevator(const float point[3], float halfWidth,
 	const float top = point[2] + height;
 	return point[0] + halfWidth > moverMins[0] && point[0] - halfWidth < moverMaxs[0] &&
 		point[1] + halfWidth > moverMins[1] && point[1] - halfWidth < moverMaxs[1] &&
-		moverMins[2] >= top - 8.0f && moverMins[2] - top <= BOTNAV_CRUSHER_MAX_GAP;
+		point[2] < moverMaxs[2] && moverMins[2] >= point[2] - 24.0f &&
+		moverMins[2] - top <= BOTNAV_CRUSHER_MAX_GAP;
 }
 
 static inline int BotNav_CrusherThreatensPoint(const float point[3], float halfWidth,
@@ -2592,6 +2623,19 @@ static inline int BotNav_CrusherThreatensPoint(const float point[3], float halfW
 	if (travelDown <= 0.0f || !BotNav_BeneathElevator(point, halfWidth, height, moverMins, moverMaxs))
 		return 0;
 	return moverMins[2] - travelDown < top;
+}
+
+static inline float BotNav_ElevatorExitDistance(const float point[3], float halfWidth,
+	const float moverMins[3], const float moverMaxs[3])
+{
+	float distance = point[0] + halfWidth - moverMins[0];
+	float candidate = moverMaxs[0] - point[0] + halfWidth;
+	if (candidate < distance) distance = candidate;
+	candidate = point[1] + halfWidth - moverMins[1];
+	if (candidate < distance) distance = candidate;
+	candidate = moverMaxs[1] - point[1] + halfWidth;
+	if (candidate < distance) distance = candidate;
+	return distance;
 }
 
 // Offensive use needs a mover that kills (crusher flag or heavy damage), not a 2-damage plat
