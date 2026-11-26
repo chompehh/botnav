@@ -19,6 +19,7 @@ typedef struct
 	int saberDuels, saberReminderSent;
 	int flipkick;
 	int opponent;
+	int pendingForceLoss, welcomeComplete, nextWelcomeCheck;
 } duel_tutorial_session_t;
 
 static inline int G_DuelTutorialPreferBasics(const duel_tutorial_session_t *session,
@@ -33,6 +34,13 @@ static inline int G_DuelTutorialPreferBasics(const duel_tutorial_session_t *sess
 	return signals > 0;
 }
 
+static inline int G_DuelTutorialWelcomeEligible(const duel_tutorial_session_t *session,
+	int push, int pull, int lightning, int mindtrick, int introCursor)
+{
+	return !session->welcomeComplete && introCursor < 2 &&
+		G_DuelTutorialPreferBasics(session, push, pull, lightning, mindtrick);
+}
+
 static inline int G_DuelTutorialSessionFinish(duel_tutorial_session_t *session,
 	int duelType, int won, int draw)
 {
@@ -44,7 +52,10 @@ static inline int G_DuelTutorialSessionFinish(duel_tutorial_session_t *session,
 			if (won)
 				session->forceWins++;
 			else
+			{
 				session->forceLosses++;
+				session->pendingForceLoss = 1;
+			}
 		}
 	}
 	else if (duelType == 0)

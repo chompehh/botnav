@@ -20,9 +20,11 @@ prove the opponent predicted it. Missing or incomplete evidence never becomes
 a diagnosis.
 
 Personalized evidence needs three complete informative Force-duel captures,
-each with at least 10 events and 12 seconds. After three completed Force duels
-in a session, bots can also offer stock lessons when captures are short or
-incomplete. Related lessons can be batched with length-dependent delays.
+each with at least 10 events and 12 seconds. Bots automatically offer the
+first two unheard introductory lessons to active beginners, and can offer stock
+lessons after a human's first Force-duel loss even when captures are short or
+incomplete or the opponent was human. Related lessons can be batched with
+length-dependent delays.
 Winning players can receive bot-specific acknowledgments: repetition is
 observed, not proof the habit works against humans. Busy queues are left alone.
 Saber duels and arcade do not trigger coaching; after ten saber duels a bot
@@ -58,9 +60,7 @@ up to 100 recent version-14-or-newer captures only when explicit diagnostics
 and retained events prove completeness. Existing histories cannot safely be
 backfilled without a double-counting boundary.
 
-Arcade retains basic non-diagnostic teaching after three complete informative
-rounds; interrupted and short rounds do not count. It does not infer duel combo
-efficiency from unrelated arcade fights.
+Arcade fights do not trigger duel coaching or infer duel combo efficiency.
 
 ## Routes and flags
 

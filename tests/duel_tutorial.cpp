@@ -24,6 +24,34 @@ BOOST_AUTO_TEST_CASE(skill_signals_and_results_choose_beginner_advice)
 	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 3, 0, 0));
 }
 
+BOOST_AUTO_TEST_CASE(welcome_is_for_beginner_signals_and_only_the_unheard_opening)
+{
+	duel_tutorial_session_t session = {};
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 3, 3, 0, 0, 0));
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 3, 3, 0, 0, 1));
+	BOOST_CHECK(!G_DuelTutorialWelcomeEligible(&session, 3, 3, 0, 0, 2));
+	session.flipkick = 1;
+	BOOST_CHECK(!G_DuelTutorialWelcomeEligible(&session, 3, 3, 0, 0, 0));
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 2, 3, 0, 0, 0));
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 3, 2, 0, 0, 0));
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 3, 3, 3, 0, 0));
+	BOOST_CHECK(G_DuelTutorialWelcomeEligible(&session, 3, 3, 0, 2, 0));
+	session.welcomeComplete = 1;
+	BOOST_CHECK(!G_DuelTutorialWelcomeEligible(&session, 2, 3, 0, 0, 0));
+}
+
+BOOST_AUTO_TEST_CASE(first_force_loss_requests_advice_but_other_outcomes_do_not)
+{
+	duel_tutorial_session_t session = {};
+	G_DuelTutorialSessionFinish(&session, 0, 0, 0);
+	G_DuelTutorialSessionFinish(&session, 1, 0, 1);
+	G_DuelTutorialSessionFinish(&session, 1, 1, 0);
+	BOOST_CHECK_EQUAL(session.pendingForceLoss, 0);
+	G_DuelTutorialSessionFinish(&session, 1, 0, 0);
+	BOOST_CHECK_EQUAL(session.pendingForceLoss, 1);
+	BOOST_CHECK_EQUAL(session.forceLosses, 1);
+}
+
 BOOST_AUTO_TEST_CASE(beginner_cursor_persists_per_identity)
 {
 	sqlite3 *db = NULL;

@@ -413,6 +413,7 @@ typedef struct
 	int lessonIdentityKind;
 	char lessonIdentity[64];
 	qboolean publicBroadcast;
+	qboolean clearsPendingLoss;
 	char messages[TRACKED_DUEL_TUTORIAL_MAX_MESSAGES][MAX_SAY_TEXT];
 } bot_tutorial_queue_t;
 
@@ -3116,8 +3117,9 @@ static void G_QueueBasicForceTutorial(gentity_t *player, gentity_t *bot)
 	char batch[TRACKED_DUEL_TUTORIAL_MAX_MESSAGES][MAX_SAY_TEXT];
 	int kind, rc, cursor = 0, batchCount = 0, cursorKind = 1;
 	int indices[TRACKED_DUEL_TUTORIAL_MAX_MESSAGES];
+	qboolean preferBasics;
 
-	if (session->forceDuels < 3 || !bot_tutorial.integer ||
+	if (!session->pendingForceLoss || !bot_tutorial.integer ||
 		bot_nochat.integer || queue->queuedCount > queue->nextMessageIndex ||
 		G_TutorialTargetHasQueuedMessage(player->s.number))
 		return;
@@ -3130,16 +3132,21 @@ static void G_QueueBasicForceTutorial(gentity_t *player, gentity_t *bot)
 		return;
 	}
 	G_TutorialCurriculumInputs(player, &inputs, &available);
+	preferBasics = G_DuelTutorialPreferBasics(session,
+		player->client->ps.fd.forcePowerLevel[FP_PUSH],
+		player->client->ps.fd.forcePowerLevel[FP_PULL],
+		player->client->ps.fd.forcePowerLevel[FP_LIGHTNING],
+		player->client->ps.fd.forcePowerLevel[FP_TELEPATHY]) ? qtrue : qfalse;
 	rc = G_DuelTutorialIntroCursor(db, identity, kind, 0, &cursor);
 	message[0] = '\0';
-	if (rc == SQLITE_OK && cursor < DUEL_CURRICULUM_INTRO_COUNT)
+	if (rc == SQLITE_OK && preferBasics && cursor < DUEL_CURRICULUM_INTRO_COUNT)
 	{
 		rc = G_TutorialIntroBatch(db, player, identity, kind, available, &inputs,
 			&cursor, batch, indices, &batchCount);
 		if (batchCount)
 			Q_strncpyz(message, batch[0], sizeof(message));
 	}
-	if (rc == SQLITE_OK && !message[0])
+	if (rc == SQLITE_OK && preferBasics && !message[0])
 	{
 		cursorKind = 2;
 		rc = G_TutorialBasicBatch(db, player, identity, kind, available, &inputs,
@@ -3147,18 +3154,118 @@ static void G_QueueBasicForceTutorial(gentity_t *player, gentity_t *bot)
 		if (batchCount)
 			Q_strncpyz(message, batch[0], sizeof(message));
 	}
+	if (rc == SQLITE_OK && !message[0])
+		G_TutorialCurriculumMessage(player, qtrue,
+			DUEL_CURRICULUM_INTRO_COUNT + 2 * session->forceLosses + 2, qfalse,
+			message, sizeof(message), NULL);
 	if (rc != SQLITE_OK)
 		G_TrackedDBError("advance beginner tutorial", db, rc);
 	sqlite3_close(db);
-	if (rc != SQLITE_OK || !message[0])
+	if (rc != SQLITE_OK)
 		return;
-	G_TutorialQueueBatch(queue, bot->s.number, player->s.number, identity, kind,
-		cursorKind, batch, indices, batchCount);
+	if (!message[0])
+	{
+		session->pendingForceLoss = 0;
+		return;
+	}
+	if (batchCount)
+		G_TutorialQueueBatch(queue, bot->s.number, player->s.number, identity, kind,
+			cursorKind, batch, indices, batchCount);
+	else
+		G_QueueBotTutorialMessage(bot->s.number, player->s.number, message);
 	if (queue->queuedCount > queue->nextMessageIndex)
 	{
+		queue->clearsPendingLoss = qtrue;
 		queue->publicBroadcast = bot_tutorial.integer >= 2 ? qtrue : qfalse;
 		G_SetBotTutorialInitialDelay(queue);
 	}
+}
+
+static gentity_t *G_FindTutorialSpeaker(void)
+{
+	int i;
+	for (i = 0; i < level.maxclients; i++)
+	{
+		gentity_t *bot = &g_entities[i];
+		bot_tutorial_queue_t *queue = &g_botTutorialQueues[i];
+		if (bot->inuse && bot->client && (bot->r.svFlags & SVF_BOT) &&
+			bot->client->pers.connected == CON_CONNECTED &&
+			bot->client->sess.sessionTeam != TEAM_SPECTATOR &&
+			queue->queuedCount <= queue->nextMessageIndex)
+			return bot;
+	}
+	return NULL;
+}
+
+static void G_UpdateTutorialWelcome(gentity_t *player)
+{
+	duel_tutorial_session_t *session = &g_tutorialSessions[player->s.number];
+	gentity_t *speaker;
+	bot_tutorial_queue_t *queue;
+	duel_curriculum_inputs_t inputs;
+	unsigned int available;
+	sqlite3 *db = NULL;
+	char identity[64], label[MAX_NETNAME];
+	char batch[TRACKED_DUEL_TUTORIAL_MAX_MESSAGES][MAX_SAY_TEXT];
+	int indices[TRACKED_DUEL_TUTORIAL_MAX_MESSAGES];
+	int kind, cursor = 0, count = 0, rc;
+
+	if (!bot_tutorial.integer || bot_nochat.integer || level.intermissiontime ||
+		player->client->pers.connected != CON_CONNECTED ||
+		player->client->sess.sessionTeam == TEAM_SPECTATOR ||
+		player->client->sess.raceMode || level.time < session->nextWelcomeCheck ||
+		level.time - player->client->pers.enterTime < 5000 ||
+		G_TutorialTargetHasQueuedMessage(player->s.number))
+		return;
+	session->nextWelcomeCheck = level.time + 2000;
+	speaker = G_FindTutorialSpeaker();
+	if (!speaker)
+		return;
+	if (!session->welcomeComplete && player->health > 0 &&
+		G_DuelTutorialPreferBasics(session, player->client->ps.fd.forcePowerLevel[FP_PUSH],
+			player->client->ps.fd.forcePowerLevel[FP_PULL],
+			player->client->ps.fd.forcePowerLevel[FP_LIGHTNING],
+			player->client->ps.fd.forcePowerLevel[FP_TELEPATHY]))
+	{
+		G_GetDuelTrackingIdentity(player, identity, sizeof(identity), label, sizeof(label), &kind);
+		if (!identity[0] || (kind != DUEL_TRACK_ID_LOGIN && kind != DUEL_TRACK_ID_IP))
+			return;
+		if (!G_OpenTrackedLocalDB(&db, NULL, 0))
+		{
+			trap->Print("Tutorial: unable to open coaching history; welcome deferred.\n");
+			return;
+		}
+		rc = G_DuelTutorialIntroCursor(db, identity, kind, 0, &cursor);
+		if (rc == SQLITE_OK && G_DuelTutorialWelcomeEligible(session,
+			player->client->ps.fd.forcePowerLevel[FP_PUSH],
+			player->client->ps.fd.forcePowerLevel[FP_PULL],
+			player->client->ps.fd.forcePowerLevel[FP_LIGHTNING],
+			player->client->ps.fd.forcePowerLevel[FP_TELEPATHY], cursor))
+		{
+			G_TutorialCurriculumInputs(player, &inputs, &available);
+			count = G_DuelCurriculumIntroBatch(cursor, available,
+				player->client->ps.fd.forcePowerLevel, &inputs, batch, indices,
+				TRACKED_DUEL_TUTORIAL_MAX_MESSAGES);
+		}
+		if (rc != SQLITE_OK)
+			G_TrackedDBError("read tutorial welcome", db, rc);
+		sqlite3_close(db);
+		if (rc != SQLITE_OK)
+			return;
+		if (cursor >= 2)
+			session->welcomeComplete = 1;
+		if (count)
+		{
+			queue = &g_botTutorialQueues[speaker->s.number];
+			G_TutorialQueueBatch(queue, speaker->s.number, player->s.number,
+				identity, kind, 1, batch, indices, count);
+			queue->publicBroadcast = bot_tutorial.integer >= 2 ? qtrue : qfalse;
+			G_SetBotTutorialInitialDelay(queue);
+			return;
+		}
+	}
+	if (session->pendingForceLoss)
+		G_QueueBasicForceTutorial(player, speaker);
 }
 
 void G_RecordTutorialHeal(gentity_t *self)
@@ -3323,7 +3430,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		G_DuelCaptureCanRankOutcomes(&runtime->capture));
 	if (!informative)
 	{
-		if (canCoach && (opponent->r.svFlags & SVF_BOT))
+		if (canCoach && !humanWon && (opponent->r.svFlags & SVF_BOT))
 			G_QueueBasicForceTutorial(player, opponent);
 		return;
 	}
@@ -3484,7 +3591,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	if (rc != SQLITE_OK || !canCoach || !G_DuelTutorialCanTeach(informative, history.modeDuels))
 	{
 		sqlite3_close(db);
-		if (rc == SQLITE_OK && canCoach)
+		if (rc == SQLITE_OK && canCoach && !humanWon)
 			G_QueueBasicForceTutorial(player, opponent);
 		return;
 	}
@@ -3617,7 +3724,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	}
 	else if (fullForce)
 		G_TutorialCurriculumMessage(player, fullForce,
-			DUEL_CURRICULUM_INTRO_COUNT + 2 * history.rotation + 1, qfalse,
+			DUEL_CURRICULUM_INTRO_COUNT + 2 * history.rotation + 2, qfalse,
 			message, sizeof(message), NULL);
 	sqlite3_close(db);
 	if (message[0])
@@ -3630,6 +3737,8 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	}
 	if (queue->queuedCount > queue->nextMessageIndex)
 	{
+		if (!humanWon)
+			queue->clearsPendingLoss = qtrue;
 		queue->publicBroadcast = bot_tutorial.integer >= 2 ? qtrue : qfalse;
 		G_SetBotTutorialInitialDelay(queue);
 	}
@@ -3642,8 +3751,13 @@ void G_ProcessBotTutorialQueue(gentity_t *ent)
 	int cooldown;
 	int sayMode;
 
-	if (!ent || !ent->client || !(ent->r.svFlags & SVF_BOT))
+	if (!ent || !ent->client)
 		return;
+	if (!(ent->r.svFlags & SVF_BOT))
+	{
+		G_UpdateTutorialWelcome(ent);
+		return;
+	}
 
 	queue = &g_botTutorialQueues[ent->s.number];
 	if (queue->queuedCount <= 0 || queue->nextMessageIndex >= queue->queuedCount)
@@ -3692,6 +3806,11 @@ void G_ProcessBotTutorialQueue(gentity_t *ent)
 	}
 	sayMode = queue->publicBroadcast && bot_tutorial.integer >= 2 ? SAY_ALL : SAY_TELL;
 	G_Say(ent, (sayMode == SAY_ALL) ? NULL : target, sayMode, queue->messages[queue->nextMessageIndex]);
+	if (queue->clearsPendingLoss)
+	{
+		g_tutorialSessions[queue->targetClientNum].pendingForceLoss = 0;
+		queue->clearsPendingLoss = qfalse;
+	}
 	queue->nextMessageIndex++;
 	if (queue->nextMessageIndex >= queue->queuedCount)
 	{
@@ -5917,8 +6036,6 @@ void G_FinishTrackedDuel(gentity_t *winner, gentity_t *loser, int duelType, qboo
 		{
 			if ((winner->r.svFlags & SVF_BOT) && !(loser->r.svFlags & SVF_BOT))
 				G_QueueBasicForceTutorial(loser, winner);
-			else if ((loser->r.svFlags & SVF_BOT) && !(winner->r.svFlags & SVF_BOT))
-				G_QueueBasicForceTutorial(winner, loser);
 		}
 		return;
 	}

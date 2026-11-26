@@ -13,9 +13,12 @@ Related introduction and adjacent same-power beginner lessons can be queued
 in batches of up to five. Messages are separated by seven seconds plus 30 ms
 per character of the longer adjacent message; personalized advice is individual.
 Session results and flipkick evidence reset when the player disconnects.
-After three completed Force duels, stock advice can be sent even when recordings
-are incomplete; personalized advice requires three informative tracked Force
-duels. After ten saber duels in a session, a bot may suggest a Force duel once.
+When coaching is enabled, a bot automatically sends the first two unheard
+introductory messages to an active player with beginner signals, without
+requiring a duel. After the first human loss in a Force duel, a bot can send
+stock advice even if the opponent was human or the capture was incomplete.
+Personalized advice requires three informative tracked Force duels. After ten
+saber duels in a session, a bot may suggest a Force duel once.
 Arcade and saber duels do not otherwise produce tutorial advice.
 
 ## Integration and safety
