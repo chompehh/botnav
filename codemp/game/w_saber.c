@@ -6117,7 +6117,6 @@ void WP_SaberStartMissileBlockCheck( gentity_t *self, usercmd_t *ucmd  )
 
 #define MIN_SABER_SLICE_RETURN_DISTANCE 30
 
-#define SABER_THROWN_HIT_DAMAGE 30
 #define SABER_THROWN_RETURN_HIT_DAMAGE 5
 
 void thrownSaberTouch (gentity_t *saberent, gentity_t *other, trace_t *trace);

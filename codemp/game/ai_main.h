@@ -370,6 +370,11 @@ typedef struct bot_state_s
 	vec3_t				saberThrowAim;
 	int					saberThrowClearSince;
 	int					saberThrowLastVisibleTime;
+	int					saberThrowStartHealthLead;
+	int					saberThrowStartForceLead;
+	int					saberThrowBaselineEnemy;
+	int					saberThrowProgressTime;
+	float				saberThrowProgressDistance;
 
 	qboolean			saberPower;
 	int					saberPowerTime;
@@ -417,6 +422,21 @@ typedef struct bot_state_s
 	int					enemySwingStartTime; // level.time the current enemy swing began
 	int					enemyAttackStartTime;
 	int					enemyAttackMove;
+	int					counterTrialSwing;
+	int					counterTrialEnemy;
+	int					counterTrialKey;
+	int					counterTrialChoice;
+	int					counterTrialPlanned;
+	int					counterTrialDuration;
+	int					counterTrialMove;
+	int					counterTrialPhase;
+	int					counterTrialMotor;
+	int					counterPhaseEnemy;
+	int					counterPhaseMove;
+	int					counterPhaseStart;
+	int					counterPhaseDuration;
+	int					counterMotorUntil;
+	int					counterMotorMode;
 	int					enemySwingEndTime; // level.time the last enemy swing ended
 	int					enemySwingChain; // enemy swings linked within NEWBOTAI_SWEEP_CHAIN_LINK_MS
 	int					swingDodgeRolledFor; // enemySwingStartTime the dodge/advance was rolled for

@@ -58,14 +58,57 @@ three positive-net examples from three distinct humans, and at least 60% positiv
 Exact/coarse context lookup retains force, mode, defense, footing, range and stance gates.
 All database work happens during cache refresh, not during combat.
 
+## Counter trials and throw continuation
+
+`LocalBotCounterV1` aggregates bot counter trials separately from human motor
+and coarse sequence evidence. Its version-3 keys separate start, active attack, return,
+and transition phases and include the observed directional move, both stances, chain,
+distance, closing-speed, and observed duration bands. Earlier keys remain stored but are
+not consumed. Transition direction is the engine's declared chained attack; return direction
+is the corresponding completed attack. The torso timer at first observation is only a
+bounded remaining-time estimate, particularly if observation began late.
+
+Grounded saber-only trials explore three entry delays per observed phase. Active-attack
+delays preserve the old early prior; starts and transitions allow later entries, and returns
+also try 35% and 70% of the observed remaining duration. Thirty percent of timing choices
+explore, including at skill 10. Four samples are required for an option to compete on
+observed net damage; among negative options the least-bad eligible one can win. Existing
+blocking, recovery, engine acceptance, attack restrictions and footing safety remain
+authoritative.
+
+The aggregate separately records each timing/family/poke-wiggle variant and complete
+engine-accepted three-swing recipes. Recipe outcomes bias existing legal recipe selection;
+two bounded motor variants scale the existing poke and wiggle by 75% or 100%, with 20%
+motor exploration. It does not replay inputs. Only requests surviving final input and footing
+checks start trials. Unaccepted requests count as failures; accepted attacks collect
+pairwise damage for two seconds or until the duel ends. Incomplete recipes are not scored;
+third-party damage invalidates affected samples. Scores are observational trades, not
+proof of interruption or causation.
+
+The bounded cache is flushed at tracked duel completion and loaded outside the frame loop;
+a failed database transaction retains pending samples for retry. A staged load preserves
+pending samples on failure, and cache-load or full-cache record failures are logged.
+The per-entry sample cap intentionally stops accepting further samples. `resetlearningtrack`
+deletes these aggregates, while `resetdueltrack` preserves them. Counter rows are not in the
+CSV export. `bot_learninghumansonly` disables bot trials. Raw commands, exact duration,
+opponent identity, and human counter trials are not captured; pooled samples do not establish
+independent-player confidence. Restart, in-game and replay validation remain necessary.
+
+In flight, throw continuation reserves one further force tick rather than charging the
+launch budget again. Active drain, escape reserve, lethal danger, invalid targets, return
+state and traces remain authoritative. A recently advancing target-relative trajectory
+or a newly completed bypass phase may extend a throw while its launch-relative health and
+force lead has not worsened substantially. This is bounded below the engine timeout; a
+geometric pass marker is not a confirmed hit. Trace and visibility failures still recall.
+
 ## Bounded live consumers
 
 `bot_learning` and `bot_learningstrength` control these preferences. Skill/category bias scale
 their influence; low-skill bots do not use them. With enough new human evidence:
 
 - Throw completion can extend the built-in completion window by at most 250ms, scaled by
-  preference strength. Existing recall limits, lethal threats, force budgets and drain-lock
-  rules still win.
+  preference strength. Hard threats and force safety still win; separately, observed safe
+  progress can extend continuation beyond the older completion limits.
 - Throw steering uses bounded learned yaw/pitch rate preferences. Every proposed aim is traced;
   an invalid preference falls back to the existing safe geometric route.
 - Saber sweep rate changes by at most 20%, within the existing animation-phase controller.

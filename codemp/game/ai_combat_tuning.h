@@ -3097,6 +3097,28 @@ static inline newbotai_throw_phase_t NewBotAI_SaberThrowNextPhase(newbotai_throw
 #define NEWBOTAI_SABER_THROW_EXTEND_L3_MS 3200
 #define NEWBOTAI_SABER_THROW_EXTEND_L2_MS 2800
 
+/* Launch budget is not charged a second time after launch. A live continuation
+ * reserves one more engine drain tick and an escape, unless absorb protects it. */
+static inline int NewBotAI_ThrowLiveDrainThreat(int capable, int inRange, int absorb,
+	int active, int enemyForce, int force, int nextTick)
+{
+	if (!capable || !inRange || absorb)
+		return 0;
+	if (active && force < 40)
+		return 1;
+	return enemyForce >= 25 && force - nextTick < 10;
+}
+
+static inline int NewBotAI_ThrowProgressHold(int level, int held, int safety,
+	int visible, int recentProgress, int startHealthLead, int healthLead,
+	int startForceLead, int forceLead)
+{
+	/* Below engine's six-second maximum; level 1 remains an unguided throw. */
+	return level >= 2 && held >= 0 && held < 5200 && !safety && visible &&
+		recentProgress && healthLead >= startHealthLead - 20 &&
+		forceLead >= startForceLead - 30;
+}
+
 static inline int NewBotAI_SaberThrowRecallDue(int throwLevel, int heldMs, int unsafe,
 	int returning, int forceAllowed)
 {

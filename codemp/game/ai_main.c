@@ -334,6 +334,13 @@ static qboolean BotSFJ_CurrentTakeoffIsSafe(bot_state_t *bs);
 static qboolean BotSFJ_TrustGroundInput(const bot_state_t *bs);
 static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client);
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs);
+static qboolean BotNav_OwnFlagPoint(bot_state_t *bs, vec3_t point);
+static qboolean BotNav_CarrierWaiting(bot_state_t *bs, const playerState_t *ps);
+static qboolean BotNav_HasFlagThreat(bot_state_t *bs, const playerState_t *ps);
+static qboolean BotNav_CombatPriority(bot_state_t *bs, const playerState_t *ps);
+static qboolean BotNav_TeammatesCanRecover(bot_state_t *bs);
+static qboolean BotSFJ_CombatTravel(const bot_state_t *bs, const playerState_t *ps);
+static void BotNav_FilterFlagInput(bot_state_t *bs, bot_input_t *bi);
 static qboolean BotCombat_GunMoveFire(bot_state_t *bs);
 static gentity_t *BotNav_ActiveCrusherAt(const vec3_t point, qboolean lethalOnly);
 static gentity_t *BotNav_ElevatorAbove(const vec3_t point);
@@ -1354,6 +1361,7 @@ void BotUpdateInput(bot_state_t *bs, int time, int elapsed_time) {
 	bi.actionflags = NewBotAI_SaberDuelActionFlags(bi.actionflags, ACTION_ALT_ATTACK,
 		NewBotAI_IsSaberOnlyDuel(bs));
 	BotSFJ_ApplyInput(bs, &bi, time, elapsed_time);
+	BotNav_FilterFlagInput(bs, &bi);
 	BotSFJ_ApplyRouteWallRun(bs, &bi, time);
 	BotSFJ_ApplyWallRun(bs, &bi, time);
 	BotNav_ApplyWallGrabRecovery(bs, &bi, time);
@@ -3571,6 +3579,64 @@ static qboolean BotNav_ForceTargetInAimArc(bot_state_t *bs, bot_input_t *bi,
 		qtrue : qfalse;
 }
 
+static void BotNav_FilterFlagInput(bot_state_t *bs, bot_input_t *bi)
+{
+	gentity_t *self = &g_entities[bs->client];
+	gentity_t *enemy = bs->currentEnemy;
+	playerState_t *ps = &self->client->ps;
+	vec3_t flag;
+	wpobject_t *base;
+	const float *waitPoint;
+	forcePowers_t power;
+	int choice, powerLevel, selected;
+
+	if (!BotNav_OwnFlagPoint(bs, flag) || ps->pm_type != PM_NORMAL)
+		return;
+	base = self->client->sess.sessionTeam == TEAM_RED ? oFlagRed : oFlagBlue;
+	waitPoint = base && base->inuse ? base->origin : flag;
+	if (BotNav_CarrierWaiting(bs, ps) && ps->groundEntityNum != ENTITYNUM_NONE &&
+		Distance(ps->origin, waitPoint) <= BASE_FLAGWAIT_DISTANCE &&
+		!BotNav_HasFlagThreat(bs, ps) && !bs->saberDefenseActive &&
+		!bs->runningLikeASissy && !bs->runningToEscapeThreat &&
+		ps->fd.forceGripBeingGripped <= level.time && ps->forceHandExtend == HANDEXTEND_NONE)
+	{
+		bi->actionflags &= ~(ACTION_MOVEFORWARD | ACTION_MOVEBACK | ACTION_MOVELEFT |
+			ACTION_MOVERIGHT | ACTION_JUMP | ACTION_DELAYEDJUMP | ACTION_WALK);
+		VectorClear(bi->dir);
+		bi->speed = 0.0f;
+	}
+	if (!bot_forcepowers.integer || !BotNav_HasFlagThreat(bs, ps) ||
+		!enemy || !enemy->client || !PassStandardEnemyChecks(bs, enemy) ||
+		(bi->actionflags & (ACTION_ALT_ATTACK | ACTION_USE)) ||
+		bs->sfjOwnsInput || bs->saberDefenseActive || bs->gripkickActive || bs->pullKickJumpTime ||
+		ps->saberInFlight || ps->fd.forceGripBeingGripped > level.time ||
+		ps->forceHandExtend != HANDEXTEND_NONE)
+		return;
+	selected = ps->fd.forcePowerSelected;
+	if ((bi->actionflags & ACTION_FORCEPOWER) &&
+		selected != FP_PUSH && selected != FP_PULL && selected != FP_GRIP &&
+		selected != FP_DRAIN && selected != FP_LIGHTNING && selected != FP_TELEPATHY)
+		return;
+	choice = BotNav_FlagForceChoice(ps->origin, enemy->client->ps.origin, flag);
+	if (!choice)
+		return;
+	power = choice == 1 ? FP_PUSH : FP_PULL;
+	powerLevel = ps->fd.forcePowerLevel[power];
+	if (powerLevel <= FORCE_LEVEL_0 || powerLevel > FORCE_LEVEL_3 ||
+		(g_forcePowerDisable.integer & (1 << power)) ||
+		!(ps->fd.forcePowersKnown & (1 << power)) ||
+		ps->fd.forcePower < forcePowerNeeded[powerLevel][power] ||
+		!WP_ForcePowerUsable(self, power) || !NewBotAI_CanUseForcePowerNow(bs, power) ||
+		!ForcePowerUsableOn(self, enemy, power) ||
+		!BotNav_ForceTargetInAimArc(bs, bi, enemy, power))
+		return;
+	ps->fd.forcePowerSelected = power;
+	bi->actionflags |= ACTION_FORCEPOWER;
+	NewBotAI_CombatDecision(bs, choice == 1 ? "FLAG DEFENSE: push" : "FLAG DEFENSE: pull",
+		1000, "%s", choice == 1 ? "flag between players; pushing opponent away" :
+		"opponent between bot and flag; pulling opponent away");
+}
+
 static qboolean BotNav_DisplacementReachesHazard(bot_state_t *bs, gentity_t *target,
 	const vec3_t direction, float distance)
 {
@@ -4576,6 +4642,25 @@ static void BotSFJ_Clear(bot_state_t *bs)
 	bs->sfjTrialForceNode = 0;
 	VectorClear(bs->sfjIntentDirection);
 	VectorClear(bs->sfjIntentDestination);
+}
+
+static void BotSFJ_YieldToCombat(bot_state_t *bs)
+{
+	vec3_t goal;
+	const qboolean keepGoal = bs->sfjTravelGoalValid && bs->sfjTravelGoalKind == 2;
+	const int goalType = bs->sfjTravelGoalType;
+	const int goalClient = bs->sfjTravelGoalClient;
+
+	VectorCopy(bs->sfjTravelGoal, goal);
+	BotSFJ_Clear(bs);
+	if (keepGoal)
+	{
+		VectorCopy(goal, bs->sfjTravelGoal);
+		bs->sfjTravelGoalValid = qtrue;
+		bs->sfjTravelGoalKind = 2;
+		bs->sfjTravelGoalType = goalType;
+		bs->sfjTravelGoalClient = goalClient;
+	}
 }
 
 static void BotSFJ_Abort(bot_state_t *bs, int time)
@@ -8176,6 +8261,7 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 		const int enemyPowerup = red ? PW_BLUEFLAG : PW_REDFLAG;
 		const float *ownGoal = own && own->inuse ? own->r.currentOrigin : NULL;
 		const float *enemyGoal = enemy && enemy->inuse ? enemy->r.currentOrigin : NULL;
+		const float *baseGoal = base && base->inuse ? base->origin : ownGoal;
 		float ownCost, enemyCost;
 		int ownCarrier = -1, enemyCarrier = -1, i;
 		qboolean ownUnsafe = qfalse;
@@ -8231,11 +8317,10 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 				enemyCost = cost + Distance(end, enemyGoal);
 		}
 		type = BotSFJ_FlagGoal(carryingFlag, ownUnsafe, ownCost, enemyCost);
-		/* Can't score while our flag is away: a carrier at base hunts it down instead of
-		 * running back and forth over the empty stand. */
+		/* With return support, keep the captured flag safe at home. */
 		if (BotSFJ_CarrierRecovers(carryingFlag, ownUnsafe,
-			base && base->inuse ? Distance(ps->origin, base->origin) : -1.0f, ownCost))
-			type = BOT_SFJ_GOAL_FLAG_RECOVER;
+			baseGoal ? Distance(ps->origin, baseGoal) : -1.0f, ownCost))
+			type = BotNav_TeammatesCanRecover(bs) ? BOT_SFJ_GOAL_FLAG_WAIT : BOT_SFJ_GOAL_FLAG_RECOVER;
 		if (!carryingFlag && bs->ctfState == CTFSTATE_DEFENDER)
 			type = BotSFJ_DefenderGoal(ownUnsafe,
 				ownGoal ? Distance(ps->origin, ownGoal) : -1.0f,
@@ -8249,7 +8334,12 @@ static void BotSFJ_SetTravelGoal(bot_state_t *bs, const playerState_t *ps,
 			if (defensiveGoal != BOT_SFJ_GOAL_NONE)
 				type = defensiveGoal;
 		}
-		if (type == BOT_SFJ_GOAL_FLAG_SCORE || type == BOT_SFJ_GOAL_FLAG_DEFEND)
+		if (BotSFJ_ReturnForWaitingCarrier(carryingFlag, ownUnsafe,
+			enemyCarrier >= 0 && baseGoal &&
+			Distance(enemyGoal, baseGoal) < BOT_CTF_CARRIER_BASE_RADIUS))
+			type = BOT_SFJ_GOAL_FLAG_RECOVER;
+		if (type == BOT_SFJ_GOAL_FLAG_SCORE || type == BOT_SFJ_GOAL_FLAG_DEFEND ||
+			type == BOT_SFJ_GOAL_FLAG_WAIT)
 			goal = base && base->inuse ? base->origin : own && own->inuse ?
 				own->r.currentOrigin : NULL;
 		else if (type == BOT_SFJ_GOAL_FLAG_RECOVER)
@@ -11591,6 +11681,117 @@ static qboolean BotSFJ_ClientCarriesFlag(const gclient_t *client)
 		client->ps.powerups[PW_BLUEFLAG] || client->ps.powerups[PW_NEUTRALFLAG]);
 }
 
+static qboolean BotNav_TeammatesCanRecover(bot_state_t *bs)
+{
+	int i;
+
+	for (i = 0; i < level.maxclients; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+
+		if (i != bs->client && ent->inuse && ent->client && ent->health > 0 &&
+			ent->client->pers.connected == CON_CONNECTED &&
+			ent->client->ps.pm_type == PM_NORMAL &&
+			!(ent->client->ps.pm_flags & PMF_FOLLOW) &&
+			ent->client->sess.sessionTeam != TEAM_SPECTATOR &&
+			OnSameTeam(&g_entities[bs->client], ent) && !BotSFJ_ClientCarriesFlag(ent->client))
+			return qtrue;
+	}
+	return qfalse;
+}
+
+static qboolean BotNav_OwnFlagPoint(bot_state_t *bs, vec3_t point)
+{
+	team_t team;
+	gentity_t *flag, *drop;
+	wpobject_t *base;
+
+	if (!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY)
+		return qfalse;
+	team = level.clients[bs->client].sess.sessionTeam;
+	if (team != TEAM_RED && team != TEAM_BLUE)
+		return qfalse;
+	flag = team == TEAM_RED ? eFlagRed : eFlagBlue;
+	drop = team == TEAM_RED ? droppedRedFlag : droppedBlueFlag;
+	base = team == TEAM_RED ? oFlagRed : oFlagBlue;
+	if (drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM))
+		VectorCopy(drop->r.currentOrigin, point);
+	else if (base && base->inuse)
+		VectorCopy(base->origin, point);
+	else if (flag && flag->inuse)
+		VectorCopy(flag->r.currentOrigin, point);
+	else
+		return qfalse;
+	return qtrue;
+}
+
+static qboolean BotNav_CarrierWaiting(bot_state_t *bs, const playerState_t *ps)
+{
+	team_t team;
+	wpobject_t *base;
+	gentity_t *flag, *drop;
+	const float *home;
+	int powerup, i;
+	qboolean unsafe;
+
+	if ((!JVM_IsCTFMode(level.gametype) && level.gametype != GT_CTY) ||
+		!BotSFJ_ClientCarriesFlag(g_entities[bs->client].client))
+		return qfalse;
+	team = level.clients[bs->client].sess.sessionTeam;
+	if (team != TEAM_RED && team != TEAM_BLUE)
+		return qfalse;
+	base = team == TEAM_RED ? oFlagRed : oFlagBlue;
+	flag = team == TEAM_RED ? eFlagRed : eFlagBlue;
+	drop = team == TEAM_RED ? droppedRedFlag : droppedBlueFlag;
+	home = base && base->inuse ? base->origin : flag && flag->inuse ? flag->r.currentOrigin : NULL;
+	if (!home)
+		return qfalse;
+	powerup = team == TEAM_RED ? PW_REDFLAG : PW_BLUEFLAG;
+	unsafe = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM);
+	for (i = 0; i < level.maxclients && !unsafe; i++)
+	{
+		gentity_t *ent = &g_entities[i];
+
+		if (ent->inuse && ent->client && ent->health > 0 &&
+			ent->client->pers.connected == CON_CONNECTED &&
+			ent->client->ps.powerups[powerup] && !OnSameTeam(&g_entities[bs->client], ent))
+			unsafe = qtrue;
+	}
+	return BotSFJ_CarrierWaits(1, unsafe, Distance(ps->origin, home),
+		BotNav_TeammatesCanRecover(bs)) ? qtrue : qfalse;
+}
+
+static qboolean BotNav_HasFlagThreat(bot_state_t *bs, const playerState_t *ps)
+{
+	vec3_t flag;
+	gentity_t *enemy = bs->currentEnemy;
+
+	if (!enemy || !enemy->client || enemy->health <= 0 || !bs->frame_Enemy_Vis ||
+		!BotNav_OwnFlagPoint(bs, flag))
+		return qfalse;
+	return BotNav_FlagThreat(1, Distance(ps->origin, flag),
+		Distance(enemy->client->ps.origin, flag)) ? qtrue : qfalse;
+}
+
+static qboolean BotNav_CombatPriority(bot_state_t *bs, const playerState_t *ps)
+{
+	gentity_t *enemy = bs->currentEnemy;
+	qboolean flagThreat;
+
+	if (!enemy || !enemy->client || enemy->health <= 0 ||
+		!PassStandardEnemyChecks(bs, enemy))
+		return qfalse;
+	flagThreat = BotNav_HasFlagThreat(bs, ps);
+	if (bs->sfjTravelGoalValid && bs->sfjTravelGoalType == BOT_SFJ_GOAL_FLAG_DEFEND &&
+		!flagThreat && Distance(ps->origin, enemy->client->ps.origin) > 256.0f)
+		return qfalse;
+	return BotNav_RouteCombatPriority(ps->groundEntityNum != ENTITYNUM_NONE,
+		bs->frame_Enemy_Vis, Distance(ps->origin, enemy->client->ps.origin),
+		bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps),
+		BotSFJ_ClientCarriesFlag(g_entities[bs->client].client),
+		flagThreat) ? qtrue : qfalse;
+}
+
 static qboolean BotSFJ_CombatTravel(const bot_state_t *bs, const playerState_t *ps)
 {
 	const gentity_t *enemy = bs->currentEnemy;
@@ -11615,8 +11816,7 @@ static qboolean BotSFJ_CombatTravel(const bot_state_t *bs, const playerState_t *
 }
 
 /*
- * A selected route owns movement until its usable endpoint or FFA landing handoff. Outside routes,
- * carriers fight after a hard hit and attackers after damage or meeting a carrier.
+ * Finish airborne hops safely, but nearby opponents take priority at a landing.
  */
 static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 {
@@ -11633,12 +11833,9 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 	ps = &client->ps;
 	if (ps->duelInProgress)
 		return qfalse;
-	if (level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps))
+	if (BotNav_CombatPriority(bs, ps) || BotNav_CarrierWaiting(bs, ps))
 		return qfalse;
-	if (bs->currentEnemy && bs->currentEnemy->client &&
-		BotSFJ_FFACombatPriority(level.gametype == GT_FFA, ps->groundEntityNum != ENTITYNUM_NONE,
-			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
-			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
+	if (level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps))
 		return qfalse;
 	if (BotCombat_GunMoveFire(bs))
 		return qfalse;
@@ -11655,7 +11852,8 @@ static qboolean BotNav_ShouldHoldCombat(bot_state_t *bs)
 		const gentity_t *enemy = bs->currentEnemy;
 		const qboolean hasEnemy = enemy && enemy->client && enemy->health > 0;
 
-		if (BotNav_DefensiveFlagCombatHold(BotGetAggressionBias(bs), bs->sfjTravelGoalType,
+		if (BotNav_DefensiveFlagCombatHold(bs->ctfState == CTFSTATE_DEFENDER ? -1.0f :
+			BotGetAggressionBias(bs), bs->sfjTravelGoalType,
 			hasEnemy && bs->frame_Enemy_Vis,
 			hasEnemy ? Distance(ps->origin, enemy->client->ps.origin) : 0.0f,
 			hasEnemy ? Distance(bs->sfjTravelGoal, enemy->client->ps.origin) : 0.0f,
@@ -12026,13 +12224,11 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	airborneJump = BotSFJ_PhaseInProgress(bs->sfjPhase) &&
 		ps->groundEntityNum == ENTITYNUM_NONE;
 	BotSFJ_UpdatePursuit(bs);
-	if (bs->currentEnemy && bs->currentEnemy->client &&
-		BotSFJ_FFACombatPriority(level.gametype == GT_FFA, ps->groundEntityNum != ENTITYNUM_NONE,
-			bs->frame_Enemy_Vis, Distance(ps->origin, bs->currentEnemy->client->ps.origin),
-			bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps)))
+	if (BotNav_CombatPriority(bs, ps) ||
+		(ps->groundEntityNum != ENTITYNUM_NONE && BotNav_CarrierWaiting(bs, ps)))
 	{
-		BotSFJ_DebugReject(bs, "FFA opponent nearby: landing handoff to combat");
-		BotSFJ_Clear(bs);
+		BotSFJ_DebugReject(bs, "nearby combat or carrier waiting: no new route");
+		BotSFJ_YieldToCombat(bs);
 		return;
 	}
 	holdCombat = BotNav_ShouldHoldCombat(bs);
@@ -12125,7 +12321,8 @@ static void BotSFJ_SelectIntent(bot_state_t *bs)
 	if (enemyClient && !retreating && BotSFJ_CombatTravel(bs, ps))
 		bs->sfjPursuitLatched = qtrue;
 	if (!routeCommitted || carryingFlag != bs->sfjWasCarrying ||
-		(level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps)))
+		(level.gametype == GT_FFA && BotSFJ_CombatTravel(bs, ps)) ||
+		JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY)
 		BotSFJ_SetTravelGoal(bs, ps, retreating);
 	flagPickupPriority = bs->sfjTravelGoalValid &&
 		BotSFJ_FlagPickupPriority(bs->sfjTravelGoalType, carryingFlag,
@@ -12509,6 +12706,12 @@ static void BotSFJ_ApplyInput(bot_state_t *bs, bot_input_t *bi, int time, int el
 		return;
 	}
 	ps = &g_entities[bs->client].client->ps;
+	if (ps->groundEntityNum != ENTITYNUM_NONE &&
+		(BotNav_CombatPriority(bs, ps) || BotNav_CarrierWaiting(bs, ps)))
+	{
+		BotSFJ_YieldToCombat(bs);
+		return;
+	}
 	backward = (bs->sfjBackward && bs->sfjIntent == BOT_SFJ_INTENT_RETREAT) ? qtrue : qfalse;
 	grounded = ps->groundEntityNum != ENTITYNUM_NONE ? qtrue : qfalse;
 	holdCombat = BotNav_ShouldHoldCombat(bs);
@@ -14602,7 +14805,9 @@ int CTFTakesPriority(bot_state_t *bs)
 				ent->client->ps.powerups[ownPowerup] && !OnSameTeam(&g_entities[bs->client], ent))
 				stolen = qtrue;
 		}
-		/* At base with our flag away we cannot score: go get it back instead of pacing the stand. */
+		if (BotNav_CarrierWaiting(bs, &bs->cur_ps))
+			return BotGetFlagHome(bs);
+		/* Without return support, a carrier at base retrieves the missing flag. */
 		if (home && (stolen || dropped) &&
 			BotSFJ_CarrierRecovers(1, 1, Distance(bs->origin, home->origin), 0.0f))
 		{
@@ -14713,6 +14918,22 @@ int CTFTakesPriority(bot_state_t *bs)
 		i++;
 	}
 
+	{
+		const wpobject_t *home = myFlag == PW_REDFLAG ? oFlagRed : oFlagBlue;
+		const gentity_t *drop = myFlag == PW_REDFLAG ? droppedRedFlag : droppedBlueFlag;
+		const qboolean dropped = drop && drop->inuse && (drop->flags & FL_DROPPED_ITEM);
+
+		if (BotSFJ_ReturnForWaitingCarrier(0, ownCarrier >= 0 || dropped,
+			teammateCarrier >= 0 && home && home->inuse &&
+			Distance(g_entities[teammateCarrier].client->ps.origin, home->origin) <
+				BOT_CTF_CARRIER_BASE_RADIUS))
+		{
+			dosw = 0;
+			if ((ownCarrier >= 0 && BotGetFlagBack(bs)) || (dropped && BotDefendFlag(bs)))
+				goto success;
+		}
+	}
+
 	if (bs->state_Forced)
 	{
 		bs->ctfState = bs->state_Forced;
@@ -14789,7 +15010,7 @@ int CTFTakesPriority(bot_state_t *bs)
 			if (BotGuardFlagCarrier(bs))
 				goto success;
 		}
-		else if (BotGetEnemyFlag(bs))
+		else if (BotGetFlagHome(bs))
 			goto success;
 	}
 
@@ -21702,7 +21923,8 @@ static qboolean NewBotAI_UpdateSaberThrowPass(bot_state_t *bs, qboolean *heading
 		flight[2] = 0.0f;
 		if (DotProduct(flight, saberToEnemy) > 0.0f)
 			*headingToTarget = qtrue;
-		else if (bs->saberThrowStartTime > 0 &&
+		else if (VectorLengthSquared(saberToEnemy) <= 128.0f * 128.0f &&
+			bs->saberThrowStartTime > 0 &&
 			NewBotAI_SaberThrowMayMarkPass((newbotai_throw_phase_t)bs->saberThrowPhase,
 				level.time - bs->saberThrowStartTime, level.time - bs->saberThrowPhaseTime,
 				NewBotAI_SaberThrowSteerCadence(bs->cur_ps.fd.forcePowerLevel[FP_SABERTHROW])))
@@ -21729,6 +21951,14 @@ static void NewBotAI_SyncSaberThrowStart(bot_state_t *bs)
 	bs->saberThrowPhase = NEWBOTAI_THROW_LAUNCH;
 	bs->saberThrowPhaseTime = 0;
 	bs->saberThrowSteerTime = 0;
+	bs->saberThrowProgressTime = level.time;
+	bs->saberThrowProgressDistance = -1.0f;
+	bs->saberThrowStartHealthLead = bs->currentEnemy && bs->currentEnemy->client ?
+		NewBotAI_GetTotalHealthDelta(bs) : 0;
+	bs->saberThrowStartForceLead = bs->currentEnemy && bs->currentEnemy->client ?
+		ps->fd.forcePower - bs->currentEnemy->client->ps.fd.forcePower : 0;
+	bs->saberThrowBaselineEnemy = bs->currentEnemy && bs->currentEnemy->client ?
+		bs->currentEnemy->s.number : -1;
 }
 
 void NewBotAI_SaberThrowing(bot_state_t* bs)
@@ -27018,7 +27248,7 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 	playerState_t *enemy;
 	qboolean heading, passed;
 	int ourHealth, enemyHealth, safetyRecall, softRecall, learnedWeight = 0;
-	int drainlock, lethal, forceAllowed, returning, hold;
+	int drainlock, lethal, forceAllowed, returning, hold, progressHold;
 	int safeLearnedContext, knockedDown, committed, completion;
 	float aggression;
 	const char *reason;
@@ -27038,6 +27268,14 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 		return qfalse;
 	}
 	enemy = &bs->currentEnemy->client->ps;
+	if (bs->saberThrowBaselineEnemy != bs->currentEnemy->s.number)
+	{
+		bs->saberThrowBaselineEnemy = bs->currentEnemy->s.number;
+		bs->saberThrowStartHealthLead = NewBotAI_GetTotalHealthDelta(bs);
+		bs->saberThrowStartForceLead = ps->fd.forcePower - enemy->fd.forcePower;
+		bs->saberThrowProgressDistance = -1.0f;
+		bs->saberThrowProgressTime = level.time;
+	}
 	ourHealth = g_entities[bs->client].health;
 	enemyHealth = bs->currentEnemy->health;
 	aggression = BotGetAggressionBias(bs);
@@ -27046,7 +27284,13 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 		ps->fd.forcePowerLevel[FP_SABERTHROW] > 0 &&
 		NewBotAI_CanUseForcePowerNow(bs, FP_SABERTHROW);
 	returning = g_entities[ps->saberEntityNum].think == saberBackToOwner;
-	drainlock = NewBotAI_ShouldSuppressDrainlockSaberThrow(bs) || NewBotAI_WouldThrowInviteDrainlock(bs);
+	drainlock = NewBotAI_ThrowLiveDrainThreat(
+		(enemy->fd.forcePowersKnown & (1 << FP_DRAIN)) ||
+			(enemy->fd.forcePowersActive & (1 << FP_DRAIN)),
+		bs->frame_Enemy_Len <= MAX_DRAIN_DISTANCE,
+		ps->fd.forcePowersActive & (1 << FP_ABSORB),
+		enemy->fd.forcePowersActive & (1 << FP_DRAIN), enemy->fd.forcePower,
+		ps->fd.forcePower, forcePowerNeeded[ps->fd.forcePowerLevel[FP_SABERTHROW]][FP_SABERTHROW]);
 	lethal = NewBotAI_IsIncomingSaberThrowLethal(bs) || NewBotAI_IsLethalEnemySwingImminent(bs) ||
 		(ourHealth + ps->stats[STAT_ARMOR] <= NEWBOTAI_SABER_CRITICAL_TOTAL_HEALTH &&
 			enemyHealth > ourHealth);
@@ -27054,6 +27298,33 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 	softRecall = ourHealth < enemyHealth || aggression <= 0.0f ||
 		(enemyHealth > 30 && enemy->fd.forcePower >= ps->fd.forcePower + 50);
 	passed = NewBotAI_UpdateSaberThrowPass(bs, &heading);
+	if (bs->frame_Enemy_Vis)
+	{
+		vec3_t relative;
+		float distance;
+		VectorSubtract(enemy->origin, g_entities[ps->saberEntityNum].r.currentOrigin, relative);
+		distance = VectorLength(relative);
+		if (bs->saberThrowProgressDistance < 0.0f ||
+			distance < bs->saberThrowProgressDistance - 8.0f)
+		{
+			bs->saberThrowProgressDistance = distance;
+			bs->saberThrowProgressTime = level.time;
+		}
+		/* A deliberate bypass can temporarily move away from the target. Its
+		 * phase must advance, not merely orbit forever. */
+		if (bs->saberThrowPhaseTime > bs->saberThrowProgressTime &&
+			(bs->saberThrowPhase == NEWBOTAI_THROW_REAR ||
+			 bs->saberThrowPhase == NEWBOTAI_THROW_CUT_THROUGH))
+		{
+			bs->saberThrowProgressTime = bs->saberThrowPhaseTime;
+			bs->saberThrowProgressDistance = distance;
+		}
+	}
+	progressHold = NewBotAI_ThrowProgressHold(ps->fd.forcePowerLevel[FP_SABERTHROW],
+		heldMs, safetyRecall, bs->frame_Enemy_Vis,
+		level.time - bs->saberThrowProgressTime <= 900,
+		bs->saberThrowStartHealthLead, NewBotAI_GetTotalHealthDelta(bs),
+		bs->saberThrowStartForceLead, ps->fd.forcePower - enemy->fd.forcePower);
 	knockedDown = BG_InKnockDown(enemy->legsAnim) ||
 		enemy->forceHandExtend == HANDEXTEND_KNOCKDOWN;
 	committed = knockedDown || BG_SaberInAttack(enemy->saberMove) ||
@@ -27112,6 +27383,8 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 		(newbotai_throw_phase_t)bs->saberThrowPhase, heldMs, passed, heading,
 		safetyRecall, softRecall, bs->frame_Enemy_Len, ps->fd.forcePower,
 		knockedDown, committed, learnedWeight, bs->saberThrowCompletionMs);
+	if (progressHold)
+		hold = 1;
 	if (!bs->frame_Enemy_Vis && !safetyRecall && ps->fd.forcePower >= 30 &&
 		!NewBotAI_SaberThrowExtensionRecallDue(ps->fd.forcePowerLevel[FP_SABERTHROW], heldMs))
 		hold = 1;
@@ -27120,7 +27393,7 @@ static qboolean NewBotAI_SaberThrowShouldHold(bot_state_t *bs, int heldMs, qbool
 			lethal ? "lethal" : NewBotAI_SaberThrowRecallDue(ps->fd.forcePowerLevel[FP_SABERTHROW],
 				heldMs, 0, 0, 1) ? "limit" : "soft";
 	else
-		reason = !bs->frame_Enemy_Vis ? "reacquire" : heldMs < NEWBOTAI_THROW_MIN_HOLD_MS ? "min" :
+		reason = progressHold ? "progress" : !bs->frame_Enemy_Vis ? "reacquire" : heldMs < NEWBOTAI_THROW_MIN_HOLD_MS ? "min" :
 			NewBotAI_SaberThrowRoutingHold(ps->fd.forcePowerLevel[FP_SABERTHROW],
 				(newbotai_throw_phase_t)bs->saberThrowPhase, heldMs) ? "lane" :
 			NewBotAI_SaberThrowHoldProtected(heldMs, passed, heading) ? "pass" :
@@ -27160,9 +27433,11 @@ static void NewBotAI_RecordSaberThrowDecision(bot_state_t *bs, int heldMs, qbool
 		debugged[bs->client].at = level.time;
 		Q_strncpyz(debugged[bs->client].note, note, sizeof(debugged[bs->client].note));
 		NewBotAI_CombatDecision(bs, hold ? "SABERTHROW: hold" : "SABERTHROW: recall", 0,
-			"reason %s; held %dms, phase %d, enemy %s^7 at %.0fu",
+			"reason %s; held %dms, phase %d, enemy %s^7 at %.0fu, hp lead %d/%d fp lead %d/%d, progress %dms",
 			reason, heldMs, bs->saberThrowPhase, bs->currentEnemy->client->pers.netname,
-			bs->frame_Enemy_Len);
+			bs->frame_Enemy_Len, NewBotAI_GetTotalHealthDelta(bs), bs->saberThrowStartHealthLead,
+			bs->cur_ps.fd.forcePower - bs->currentEnemy->client->ps.fd.forcePower,
+			bs->saberThrowStartForceLead, level.time - bs->saberThrowProgressTime);
 	}
 	if (!NewBotAI_SaberThrowDecisionSampleDue(
 		recorded[bs->client].throwStart == bs->saberThrowStartTime &&
@@ -30630,6 +30905,14 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 			G_BotLearnSaberAccepted(&g_entities[bs->client], bs->currentEnemy,
 				NewBotAI_SaberSequenceId((newbotai_saber_family_t)bs->saberTechniqueFamily),
 				bs->saberTacticChainLength, ps->saberMove - LS_A_TL2BR);
+			{
+				int motor = G_BotCounterAccepted(&g_entities[bs->client], bs->currentEnemy);
+				if (motor >= 0)
+				{
+					bs->counterMotorMode = motor;
+					bs->counterMotorUntil = level.time + BOTLEARN_OUTCOME_WINDOW_MS;
+				}
+			}
 		}
 		bs->saberTacticChainLength++;
 		bs->saberTechniqueActualDir = NewBotAI_SaberHorizontalDirection(ps->saberMove, LS_A_L2R, LS_A_R2L);
@@ -30678,7 +30961,8 @@ static newbotai_saber_yaw_phase_t NewBotAI_ObserveSaberAnimation(bot_state_t *bs
 }
 
 static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
-	newbotai_saber_tactic_context_t context, newbotai_saber_family_t family)
+	newbotai_saber_tactic_context_t context, newbotai_saber_family_t family,
+	int counterKey, int counterTiming)
 {
 	static int printedAt[MAX_CLIENTS];
 	int weights[BOTLEARN_SABER_SEQUENCE_COUNT];
@@ -30699,6 +30983,9 @@ static newbotai_saber_family_t NewBotAI_SelectSaberSequence(bot_state_t *bs,
 		if (!NewBotAI_SaberSequenceAllowed(context, sequence))
 			continue;
 		learned = G_BotLearnSaberBonus(&g_entities[bs->client], bs->currentEnemy, sequence, bs->settings.skill);
+		if (counterKey >= 0)
+			learned = Com_Clampi(-BOTLEARN_BONUS_CAP, BOTLEARN_BONUS_CAP,
+				learned + G_BotCounterRecipeBonus(counterKey, counterTiming, sequence));
 		prior = BotLearn_SaberSequenceDirectionalPrior(sequence,
 			G_BotLearnDuelMode(&g_entities[bs->client]), ps->fd.saberAnimLevel,
 			bs->currentEnemy->client->ps.fd.saberAnimLevel, directionalEligible);
@@ -30832,9 +31119,13 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 	const int basicAttack = ps->saberMove >= LS_A_TL2BR && ps->saberMove <= LS_A_T2B;
 	int escapePhase;
 	int attackLegal;
+	int counterTrialReady = 0;
+	int counterTrialEligible = 0;
+	int counterPhase = -1, counterDirection = -1;
 	qboolean escapeJumpEager;
 	newbotai_saber_yaw_phase_t phase;
 
+	bs->counterTrialPlanned = 0;
 	NewBotAI_UpdateSaberDefense(bs, level.time);
 	if (!NewBotAI_CanControlSaber(bs))
 		return;
@@ -30916,6 +31207,68 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 			NEWBOTAI_SABER_STEP_IN_SWING_RANGE, NEWBOTAI_SABER_RANGE_HYSTERESIS, bs->saberTechniqueInReach);
 		bs->saberTechniqueInReach = context.enemyDistance <= NEWBOTAI_SABER_STEP_IN_SWING_RANGE;
 	}
+	if (enemy->saberMove >= LS_S_TL2BR && enemy->saberMove <= LS_S_T2B)
+	{
+		counterPhase = 0;
+		counterDirection = enemy->saberMove - LS_S_TL2BR;
+	}
+	else if (enemy->saberMove >= LS_A_TL2BR && enemy->saberMove <= LS_A_T2B)
+	{
+		counterPhase = 1;
+		counterDirection = enemy->saberMove - LS_A_TL2BR;
+	}
+	else if (enemy->saberMove >= LS_R_TL2BR && enemy->saberMove <= LS_R_T2B)
+	{
+		counterPhase = 2;
+		counterDirection = enemy->saberMove - LS_R_TL2BR;
+	}
+	else if (PM_SaberInTransition(enemy->saberMove))
+	{
+		counterDirection = saberMoveData[enemy->saberMove].chain_attack - LS_A_TL2BR;
+		if (counterDirection >= 0 && counterDirection < 7)
+			counterPhase = 3;
+	}
+	if (counterPhase < 0 || !bs->frame_Enemy_Vis || enemy->saberInFlight ||
+		enemy->weapon != WP_SABER)
+		bs->counterPhaseMove = LS_NONE;
+	else if (bs->counterPhaseMove != enemy->saberMove ||
+		bs->counterPhaseEnemy != bs->currentEnemy->s.number)
+	{
+		bs->counterPhaseMove = enemy->saberMove;
+		bs->counterPhaseEnemy = bs->currentEnemy->s.number;
+		bs->counterPhaseStart = level.time;
+		bs->counterPhaseDuration = enemy->torsoTimer;
+	}
+	if (context.saberOnlyDuel && counterPhase >= 0 && bs->frame_Enemy_Vis &&
+		!enemy->saberInFlight && enemy->weapon == WP_SABER && context.closingKnown &&
+		BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+			bot_learninghumansonly.integer))
+	{
+		if (bs->counterTrialSwing != bs->counterPhaseStart ||
+			bs->counterTrialMove != enemy->saberMove ||
+			bs->counterTrialEnemy != bs->currentEnemy->s.number ||
+			(bs->counterTrialKey < 0 && context.currentDistance <= NEWBOTAI_CHAIN_COUNTER_RANGE))
+		{
+			bs->counterTrialSwing = bs->counterPhaseStart;
+			bs->counterTrialEnemy = bs->currentEnemy->s.number;
+			bs->counterTrialMove = enemy->saberMove;
+			bs->counterTrialPhase = counterPhase;
+			bs->counterTrialDuration = bs->counterPhaseDuration;
+			bs->counterTrialMotor = -1;
+			bs->counterTrialKey = BotLearn_CounterKeyV3(counterDirection,
+				ps->fd.saberAnimLevel, enemy->fd.saberAnimLevel, bs->enemySwingChain,
+				context.currentDistance, context.closingSpeed, bs->counterTrialDuration, counterPhase);
+			bs->counterTrialChoice = G_BotCounterChoice(bs->counterTrialKey, Q_irand(0, 99));
+		}
+		counterTrialEligible = bs->counterTrialKey >= 0 &&
+			!NewBotAI_SaberNeedsSafetyExit(context) && context.counterReady &&
+			!context.selfAttacking && !context.selfBlocked && !bs->saberDefenseActive &&
+			context.currentDistance <= NEWBOTAI_CHAIN_COUNTER_RANGE &&
+			context.enemyDistance <= NEWBOTAI_SABER_SWING_START_MAX_RANGE;
+		counterTrialReady = counterTrialEligible &&
+			BotLearn_CounterPhaseWindow(level.time - bs->counterTrialSwing, bs->counterTrialChoice,
+				bs->counterTrialDuration, bs->counterTrialPhase);
+	}
 	//Hold the choice grade through the current swing instead of re-rolling mid-swing.
 	if (NewBotAI_SaberGradeShouldReroll(level.time, bs->saberTacticGradeUntil, context.selfAttacking))
 	{
@@ -30943,7 +31296,8 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 			(int)BotGetChanceBiasPercent(bot_fanbias.value), BotGetAggressionBias(bs),
 			learnedPreference, Q_irand(0, 999999));
 		bs->saberTechniqueFamily = NewBotAI_SelectSaberSequence(bs, context,
-			(newbotai_saber_family_t)bs->saberTechniqueFamily);
+			(newbotai_saber_family_t)bs->saberTechniqueFamily,
+			counterTrialEligible ? bs->counterTrialKey : -1, bs->counterTrialChoice);
 		bs->saberTechniqueFamilyUntil = bs->saberTechniqueAcceptedTime;
 	}
 	tactic = NewBotAI_GetCorrectSaberTactic(context);
@@ -31000,6 +31354,23 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 		NewBotAI_SaberOrdinaryAttackSafe(ps->pm_flags & PMF_DUCKED, ps->velocity[2] > 0, 0) &&
 		!NewBotAI_IsJumpAttackSuppressionWindowActive(level.time,
 			bs->jumpAttackGateTime, NEWBOTAI_JUMP_ATTACK_GATE_MS);
+	if (counterTrialEligible && attackLegal && ps->groundEntityNum != ENTITYNUM_NONE &&
+		(ps->saberMove == LS_NONE || ps->saberMove == LS_READY))
+	{
+		if (counterTrialReady)
+		{
+			tactic = NEWBOTAI_SABER_TACTIC_COUNTER;
+			escapePhase = 0;
+			bs->saberTacticUntil = 0;
+			bs->saberTechniqueReentryUntil = 0;
+		}
+		else if (level.time - bs->counterTrialSwing < BotLearn_CounterPhaseDelay(
+			bs->counterTrialChoice, bs->counterTrialDuration, bs->counterTrialPhase))
+		{
+			tactic = NEWBOTAI_SABER_TACTIC_REPOSITION;
+			escapePhase = 0;
+		}
+	}
 	bs->saberTechniqueCommand = NewBotAI_PlanSaberCommand(context, tactic,
 		(newbotai_saber_family_t)bs->saberTechniqueFamily, context.chainLength,
 		bs->saberTacticStrafeDir, ps->groundEntityNum != ENTITYNUM_NONE,
@@ -31121,6 +31492,14 @@ static void NewBotAI_RunSaberTechniques(bot_state_t *bs)
 		bs->jumpAttackGateTime = level.time;
 	}
 	NewBotAI_SaberPursuitAndStall(bs, ps, &context, escapePhase, attackLegal);
+	if (counterTrialReady && tactic == NEWBOTAI_SABER_TACTIC_COUNTER &&
+		bs->saberTechniqueCommand.attack)
+	{
+		if (bs->counterTrialMotor < 0)
+			bs->counterTrialMotor = G_BotCounterMotorChoice(bs->counterTrialKey,
+				bs->counterTrialChoice, bs->saberTechniqueFamily, Q_irand(0, 99));
+		bs->counterTrialPlanned = 1;
+	}
 	bs->saberTechniqueCommand.jump = bs->saberTechniqueJumpTime > level.time;
 	bs->saberTacticAction = tactic;
 	bs->combatAction = escapePhase < 0 ? BOT_COMBAT_ACTION_RETREAT_DEFENSE : BOT_COMBAT_ACTION_AGGRESSION;
@@ -31398,6 +31777,12 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 			ps->saberMove - LS_A_TL2BR, time - bs->saberTechniqueAcceptedTime,
 			Com_Clampi(0, 2000, bot_wobbledelay.integer), bot_wobbleyaw.value,
 			bot_wobblepitch.value, bot_wobblespeed.value, &wiggleYaw, &wigglePitch);
+		if (bs->counterMotorUntil > time && bs->counterMotorMode == 0)
+		{
+			pokeYaw *= 0.75f;
+			wiggleYaw *= 0.75f;
+			wigglePitch *= 0.75f;
+		}
 	}
 	if (!bs->saberDefenseActive && ps->saberBlocked == BLOCKED_NONE &&
 		ps->groundEntityNum != ENTITYNUM_NONE && actualDirection &&
@@ -31478,6 +31863,15 @@ static void NewBotAI_ApplySaberTechniqueInput(bot_state_t *bs, bot_input_t *bi, 
 	}
 	if (command.jump) plannedFlags |= ACTION_JUMP;
 	if (command.attack) plannedFlags |= ACTION_ATTACK;
+	if (command.attack && bs->counterTrialPlanned && bs->currentEnemy && bs->currentEnemy->client &&
+		bs->counterTrialEnemy == bs->currentEnemy->s.number &&
+		bs->currentEnemy->client->ps.saberMove == bs->counterTrialMove &&
+		ps->weaponTime <= 0 && (ps->saberMove == LS_NONE || ps->saberMove == LS_READY) &&
+		BotLearn_CounterPhaseWindow(level.time - bs->counterTrialSwing, bs->counterTrialChoice,
+			bs->counterTrialDuration, bs->counterTrialPhase))
+		G_BotCounterBegin(&g_entities[bs->client], bs->currentEnemy,
+			bs->counterTrialKey, bs->counterTrialChoice, bs->saberTechniqueFamily,
+			bs->counterTrialMotor);
 	// EA_Move(0) does not clear directional action bits; EA_ResetInput would also
 	// discard legal force/use inputs. Replace only the owned subset at the final boundary.
 	bi->actionflags = NewBotAI_SaberOwnedActionFlags(bi->actionflags, ownedMask, plannedFlags);
@@ -32061,6 +32455,43 @@ int NewBotAI_ScanForEnemies(bot_state_t* bs) {
 	allowLowHangingFruit = ((level.gametype == GT_FFA || level.gametype == GT_TEAM) &&
 		lowHangingFruitHP > 0 &&
 		lowHangingFruitDistance > 0.0f) ? qtrue : qfalse;
+
+	{
+		vec3_t flag;
+		float nearest = 1.0e9f;
+		int threat = -1;
+
+		if (BotNav_OwnFlagPoint(bs, flag) &&
+			Distance(bs->cur_ps.origin, flag) <= BOT_CTF_FLAG_GUARD_RADIUS &&
+			bs->cur_ps.fd.forceGripBeingGripped <= level.time)
+		{
+			for (i = 0; i < level.maxclients; i++)
+			{
+				gentity_t *ent = &g_entities[i];
+				float distance;
+
+				if (!ent->inuse || !ent->client ||
+					!PassStandardEnemyChecks(bs, ent) || !PassLovedOneCheck(bs, ent) ||
+					!BotTargetModePassesScanFilter(targetMode, ent, qfalse) ||
+					NewBotAI_IsUnavailableDuelBot(bs, ent, targetMode) ||
+					(bs->duelBlacklistUntil > level.time && i == bs->duelBlacklistIndex) ||
+					BotMindTricked(bs->client, i))
+					continue;
+				distance = Distance(bs->cur_ps.origin, ent->client->ps.origin);
+				if ((targetDistanceLimit > 0.0f && distance > targetDistanceLimit) ||
+					Distance(ent->client->ps.origin, flag) > BOT_CTF_FLAG_THREAT_RADIUS ||
+					!OrgVisible(bs->eye, ent->client->ps.origin, bs->client))
+					continue;
+				if (distance < nearest)
+				{
+					nearest = distance;
+					threat = i;
+				}
+			}
+			if (threat >= 0)
+				return threat;
+		}
+	}
 
 	//While actively engaged with a valid target, keep target commitment stable so
 	//close-range fights don't jitter between nearby candidates every few thinks.
@@ -32828,7 +33259,8 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		bot_soakmode.integer))
 		return;
 
-	if (level.gametype == GT_FFA && targetMode < 0 && (bs->sfjRoute || bs->sfjWalking))
+	if (targetMode < 0 && (bs->sfjRoute || bs->sfjWalking ||
+		JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY))
 	{
 		closestID = NewBotAI_ScanForEnemies(bs);
 		if (closestID >= 0 && OrgVisible(bs->eye, g_entities[closestID].client->ps.origin, bs->client))
@@ -32843,7 +33275,9 @@ void NewBotAI(bot_state_t *bs, float thinktime) //BOT START
 		}
 	}
 
-	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) && BotGetAggressionBias(bs) < 0.0f)
+	if ((JVM_IsCTFMode(level.gametype) || level.gametype == GT_CTY) &&
+		(BotGetAggressionBias(bs) < 0.0f || bs->ctfState == CTFSTATE_DEFENDER ||
+		 BotSFJ_ClientCarriesFlag(g_entities[bs->client].client)))
 		BotSFJ_SetTravelGoal(bs, &bs->cur_ps, BotSFJ_ClientCarriesFlag(g_entities[bs->client].client));
 
 	// Route runners and defensive flag objectives navigate instead of hunting opponents.

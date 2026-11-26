@@ -1272,6 +1272,7 @@ void ForceHeal( gentity_t *self )
 	*/
 	//NOTE: Decided to make all levels instant.
 
+	G_RecordTutorialHeal(self);
 	G_Sound( self, CHAN_ITEM, G_SoundIndex("sound/weapons/force/heal.wav") );
 }
 

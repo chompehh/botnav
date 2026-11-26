@@ -76,7 +76,8 @@ typedef enum
 	BOT_SFJ_GOAL_FLAG_SCORE,
 	BOT_SFJ_GOAL_ESCORT,
 	BOT_SFJ_GOAL_OBJECTIVE,
-	BOT_SFJ_GOAL_FLAG_DEFEND
+	BOT_SFJ_GOAL_FLAG_DEFEND,
+	BOT_SFJ_GOAL_FLAG_WAIT
 } bot_sfj_goal_t;
 
 static inline const char *BotSFJ_GoalName(int goal)
@@ -91,6 +92,7 @@ static inline const char *BotSFJ_GoalName(int goal)
 	case BOT_SFJ_GOAL_ESCORT: return "escort";
 	case BOT_SFJ_GOAL_OBJECTIVE: return "map-objective";
 	case BOT_SFJ_GOAL_FLAG_DEFEND: return "defend-base";
+	case BOT_SFJ_GOAL_FLAG_WAIT: return "wait-to-capture";
 	default: return "free-run";
 	}
 }
@@ -118,7 +120,7 @@ static inline int BotSFJ_DefenderGoal(int ownUnsafe, float ownCost, float teamma
 {
 	if (ownUnsafe && ownCost >= 0.0f && (teammateCost < 0.0f || ownCost <= teammateCost))
 		return BOT_SFJ_GOAL_FLAG_RECOVER;
-	return teammateCost >= 0.0f ? BOT_SFJ_GOAL_ESCORT : BOT_SFJ_GOAL_FLAG_ATTACK;
+	return teammateCost >= 0.0f ? BOT_SFJ_GOAL_ESCORT : BOT_SFJ_GOAL_FLAG_DEFEND;
 }
 
 static inline int BotSFJ_DefensiveFlagGoal(float aggression, int carrying,
@@ -3437,14 +3439,6 @@ static inline int BotSFJ_NavigationAwake(int humansActive, int humansOnly, int s
 	return humansActive || !humansOnly || soak;
 }
 
-static inline int BotSFJ_FFACombatPriority(int ffa, int grounded, int visible,
-	float distance, float targetDistance, int combatMovement)
-{
-	return ffa && grounded && visible && !combatMovement && isfinite(distance) &&
-		distance >= 0.0f && isfinite(targetDistance) &&
-		(targetDistance <= 0.0f || distance <= targetDistance * 0.5f);
-}
-
 static inline int BotSFJ_OpponentEscaping(float distance, float minStrafe,
 	float enemySpeed, float outwardSpeed)
 {
@@ -3938,8 +3932,67 @@ static inline int BotSFJ_ApproachPauseAllows(int route, int launched, int hardCo
 
 /* ---- CTF goals ---- */
 #define BOT_CTF_CARRIER_BASE_RADIUS 512.0f
+#define BOT_CTF_FLAG_GUARD_RADIUS 512.0f
+#define BOT_CTF_FLAG_THREAT_RADIUS 768.0f
 
-/* A carrier at its base cannot score while its own flag is away: go and get it back. */
+static inline int BotNav_FlagThreat(int visible, float selfDistance, float enemyDistance)
+{
+	return visible && isfinite(selfDistance) && isfinite(enemyDistance) &&
+		selfDistance >= 0.0f && enemyDistance >= 0.0f &&
+		selfDistance <= BOT_CTF_FLAG_GUARD_RADIUS && enemyDistance <= BOT_CTF_FLAG_THREAT_RADIUS;
+}
+
+static inline int BotNav_RouteCombatPriority(int grounded, int visible, float distance,
+	float targetDistance, int combatTravel, int carrying, int flagThreat)
+{
+	float radius;
+
+	if (!grounded || !visible || !isfinite(distance) || distance < 0.0f)
+		return 0;
+	if (flagThreat)
+		return 1;
+	if (carrying || combatTravel || !isfinite(targetDistance))
+		return 0;
+	radius = targetDistance > 0.0f ? targetDistance : 512.0f;
+	if (radius > 2048.0f)
+		radius = 2048.0f;
+	return distance <= radius;
+}
+
+static inline int BotSFJ_CarrierWaits(int carrying, int ownUnsafe, float baseDistance,
+	int teammatesCanRecover)
+{
+	return carrying && ownUnsafe && teammatesCanRecover && isfinite(baseDistance) &&
+		baseDistance >= 0.0f && baseDistance < BOT_CTF_CARRIER_BASE_RADIUS;
+}
+
+static inline int BotSFJ_ReturnForWaitingCarrier(int carrying, int ownUnsafe,
+	int teammateCarrierAtHome)
+{
+	return !carrying && ownUnsafe && teammateCarrierAtHome;
+}
+
+/* 1 = push away from a flag between the players; 2 = pull away from a flag behind the enemy. */
+static inline int BotNav_FlagForceChoice(const float *self, const float *enemy, const float *flag)
+{
+	float dx = enemy[0] - self[0], dy = enemy[1] - self[1];
+	float fx = flag[0] - self[0], fy = flag[1] - self[1];
+	float distance = sqrtf(dx * dx + dy * dy);
+	float along, across;
+
+	if (!isfinite(distance) || distance < 1.0f || distance > 512.0f ||
+		!isfinite(self[2]) || !isfinite(enemy[2]) || !isfinite(flag[2]) ||
+		fabsf(flag[2] - enemy[2]) > 96.0f)
+		return 0;
+	along = (fx * dx + fy * dy) / distance;
+	across = (fx * dy - fy * dx) / distance;
+	if (!isfinite(along) || !isfinite(across) || along <= 0.0f ||
+		fabsf(across) > 128.0f || fabsf(along - distance) > BOT_CTF_FLAG_GUARD_RADIUS)
+		return 0;
+	return along <= distance ? 1 : 2;
+}
+
+/* A lone carrier at its base cannot score while its own flag is away: go and get it back. */
 static inline int BotSFJ_CarrierRecovers(int carrying, int ownUnsafe, float baseDistance, float ownCost)
 {
 	return carrying && ownUnsafe && ownCost >= 0.0f && baseDistance >= 0.0f &&

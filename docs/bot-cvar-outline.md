@@ -212,7 +212,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_footing_debug` | `0` | `1` prints each bot's deferred direction reversals per second, to measure leg twitching. |
 | `bot_strafe_nodetimeout` | `5000` | Recorded-route node progress timeout, milliseconds, clamped 1000–15000. Increase for longer or slower segments; stalled routes still fall back to normal navigation. |
 | `bot_onlystrafes` | `0` | Test preference: starts eligible strafe navigation without the frequency wait and also considers safe direct enemy corridors without requiring increasing separation. Requires enabled strafe jumps and positive frequency. Does not force jumping: combat, required interactions, physics, proximity, collision and hazard checks still take priority, with ordinary navigation as fallback. |
-| `bot_minstrafe` | `320` | Minimum opponent distance before chase/escape strafe jumps; improvised jumps stop below 75% of this. Navigation strafes yield inside close-combat range (~384 units) or to a closing enemy. Recorded routes retain airborne input, but FFA hands off on landing within half `bot_targetdistance` unless deliberately chasing/escaping. |
+| `bot_minstrafe` | `320` | Minimum opponent distance before chase/escape strafe jumps; improvised jumps stop below 75% of this. Navigation strafes yield inside close-combat range (~384 units) or to a closing enemy. Recorded routes retain airborne input, but non-carriers in every mode hand off on landing to visible enemies within the bounded `bot_targetdistance` combat range unless deliberately chasing/escaping. Nearby flag threats take priority. |
 | `bot_strafetrack` | `1` | Records human routes beginning with a circle jump, a roll off a ledge, or a vertical wallrun. `0` off, `1` start/end messages, `2` also prints landings. Special starts need a recent grounded run-up and a real airborne-to-ground landing; an ordinary ground roll is not saved. Spectators are never recorded; bots only with `bot_strafetrack_bots`. |
 | `bot_strafetrack_bots` | `0` | Comparison mode: `1` also records bot strafe jumps (from the bot's own takeoff) into the same tables with `bot = 1` and the player name prefixed `[bot] `, so bot and human keys/yaw can be compared command by command after `exportStrafeTrack`. Bot recordings never go into `.botroute` files and are quiet unless `bot_strafetrack 2`. |
 | `bot_strafetrack_autoexport` | `1` | Automatically rewrites and reloads generated `.botroute` data after saved human routes or confirmed CTF objectives. `0` leaves database capture enabled but requires manual `exportStrafeTrack` to regenerate route files. |
@@ -220,7 +220,7 @@ During the temporary duel no-strafe gate, free selection boundaries deliberately
 | `bot_trackexport_partmb` | `2000` | Size in MB at which `exportDuelTrack` and `exportStrafeTrack` start a new `_partN` CSV. Values outside 1–2000 use 2000 (GitHub release assets must be under 2 GiB). Use `24` for repository uploads. |
 | `bot_strafe_trusthuman` | `1` | `1` skips predictive arc, flight and ground checks on trusted recorded hops (no recorded death, failures within bounds), including circle preparation, landing-release commands and rejumps. Drift changes steering but does not end a trusted hop by itself. Collision, landing and progress checks still use actual movement. Recorded deaths make the hop untrusted. `0` restores hazard prediction. Ordinary walking approaches/connections and improvised jumps always keep their hazard checks. |
 | `bot_strafetrial` | `1` | Explore underused/untried recordings while retaining success-weighted selection. Two uninterrupted attempts resolve an ordinary trial; high-priority recordings get a bounded boost through four resolved attempts. Direct highways and highway feeders receive trial credit. `0` and flag carriers favor proven routes; carriers do not receive novelty bonuses. Player contact/combat interference earns neither success nor failure. Bonuses never override progress, legality or safety. |
-| `bot_route_combathold` | `1` | Holds incidental combat during recorded travel. FFA exceptions: grounded bots yield to a visible opponent within half `bot_targetdistance`, and deliberate chase/escape travel allows combat. Airborne input is preserved until landing. Outside routes, carrier/flag-attacker rules remain. `0` permits combat without releasing recorded movement. Hard engine states and required interactions retain priority. |
+| `bot_route_combathold` | `1` | Holds incidental combat during recorded travel. In every mode, grounded non-carriers yield to a visible opponent within `bot_targetdistance` (capped at 2048 units; 512 when unlimited). Deliberate chase/escape travel can continue. Nearby flag threats take priority even for carriers. Airborne route input is preserved until landing. Waiting carriers do not start another route. `0` permits combat without releasing airborne recorded movement. Hard engine states and required interactions retain priority. |
 | `bot_route_gunfire` | `1` | Bots holding a gun with ammo keep aiming and firing at a visible enemy (within 2048 units) on recorded routes and during strafe jumps, including in mid-air. The view turns to the enemy while the movement keeps its planned world-space direction toward the landing. Queued gun fire no longer pauses strafe jumps. `0` restores `bot_route_combathold` behaviour for gun bots. |
 | `bot_gun_kitedistance` | `600` | Gun bots retreat (strafe-jumping away when a safe corridor exists) from enemies holding a saber or knowing push, pull, grip, lightning or drain, while closer than this many units, and keep shooting while they move. Flag carriers keep their own escape logic. `0` disables kiting. |
 | `bot_disruptor_sniperange` | `512` | At or beyond this range a disruptor bot not on a route taps alt-fire to zoom, waits for the zoom to lock, then holds attack without movement input (required by the engine) for a full charge (1500 ms by default). It can begin near a jump's apex with a target in view when its predicted ballistic path is safe; route and hazard movement take priority. It aims at head height and releases when its aim trace hits the enemy's head, or after 4 s. It unzooms when the enemy closes in, is lost, or it needs to move. The disruptor is also preferred at this range. `0` disables sniping. |
@@ -253,16 +253,25 @@ travel cost is no greater than the enemy flag's. A safe own flag selects enemy
 flag attack; an allied carrier selects escort. Nearby visible combat still takes
 input priority for non-carriers. Defenders pursue a stolen own flag (or recover
 its dropped location), unless a teammate carrying the enemy flag is closer to
-the bot; then they escort that teammate. Neutral/aggressive assigned defenders
-attack or escort when their own flag is safe. Bots with negative effective
+the bot; then they escort that teammate. Assigned defenders
+guard home or escort when their own flag is safe. Bots with negative effective
 aggression instead escort a teammate carrier or guard their home base, unless
 given an explicit non-defender role order. Base guards engage visible enemies
 within 512 units only while those enemies remain within 768 units of the base;
 hard hits still permit immediate self-defense. Defensive recovery/escort/capture
 runs ignore discretionary enemies beyond 256 units, but recovery may engage the
 flag thief. Carriers prioritize returning
-to the original home base over equipment gathering, forced roles or chasing the
-stolen own flag, including within 512 units of scoring. Other modes pursue the current visible/recently seen enemy, or
+to the original home base over equipment gathering and forced roles. Within 512
+units of home, a carrier whose own flag is missing waits near the stand if a live,
+connected, non-carrying teammate can retrieve it; without that support it can
+hunt the thief or recover the dropped flag. Waiting does not suppress self-defense.
+Non-carriers prioritize returning the missing flag when an allied carrier is
+waiting at home, rather than all choosing to escort it.
+Bots within 512 units of their flag prioritize visible opponents within 768 units
+of it over starting or continuing a grounded strafe route. In a valid force-use
+opportunity, they push when the flag lies between them and the opponent, or pull
+when the opponent lies between them and the flag. Costs, aim, power-disable bits
+and emergency defense still gate these actions. Other modes pursue the current visible/recently seen enemy, or
 use a map objective/free-run goal; defensive routes must increase separation.
 `bot_strafejumps_debug 2` names the goal and player, selected entry, next chain
 route, destination route, goal gain, travel cost, alternative, mean/peak/end speed,
@@ -744,8 +753,10 @@ Elevators: a bot standing on a rising mover (`ET_MOVER`, including one moving fr
 
 Selected recorded routes own movement through approaches, circle preparation,
 flight, landing release and rejumps. `bot_route_combathold 1` (default) suppresses
-incidental combat, except deliberate FFA chase/escape and grounded FFA handoffs
-to visible opponents within half `bot_targetdistance`. With `0`,
+incidental combat, except deliberate chase/escape and grounded handoffs in every
+mode to visible opponents within `bot_targetdistance`, capped at 2048 units
+(512 when unlimited). Nearby flag threats override carrier travel; carriers
+waiting for a teammate to return their flag do not initiate routes. With `0`,
 bots may face and react to enemies while preserving planned world-space input.
 Outside routes the existing carrier/flag-attacker damage rules still apply.
 Soft attack/weapon/defense conflicts cannot interrupt a selected route; genuine
@@ -758,8 +769,9 @@ Clean earlier hops keep already-earned evidence.
 
 FFA hunting: in FFA-style modes (not CTF/CTY/siege/duel) a bot with no other goal targets the nearest opponent's live position, refreshed every `bot_hunt_interval` ms (default `3000`, `0` disables), for both recorded-route goals and legacy waypoint destinations.
 
-FFA route runners also scan for visible opponents before the route combat hold.
-They finish an airborne hop before yielding at half `bot_targetdistance`.
+Route runners scan for visible opponents before the route combat hold, including
+CTF bots. They finish an airborne hop before yielding within the bounded target
+distance above. Flag guards prioritize nearby visible flag threats during scans.
 Intentional retreat and an aligned chase of a fast, separating opponent remain
 eligible for recorded or improvised strafe travel.
 
@@ -1130,7 +1142,7 @@ Notes:
 |------|---------|-------------|
 | `sv_dlRate` | `1024` | Dedicated server: per-client UDP download rate in KB/s (requires `sv_allowDownload 1`). Download-only packets are sent every server frame, separate from snapshots, with up to 48 blocks (96 KB) waiting for client acknowledgement. Legacy downloads were limited to `rate`/`sv_maxRate` per snapshot with an 8-block window. Set to `0` for legacy behaviour. Lower it on servers with limited upload bandwidth, because each downloading client can use this much. |
 | `bot_nochat` | `0` | Disable bot chat. |
-| `bot_tutorial` | `0` | Enable concise trainer tells from bots after tracked duels; at `1` tells are private, at `2+` tells may broadcast publicly. Messages are capped to 3 per burst with a 7s cooldown between sends, and unregistered reminders are sent once per session. |
+| `bot_tutorial` | `0` | Enable human-readable coaching after tracked losses to bots; `1` private, `2+` public. New identities need three complete informative duels (at least 10 events and 12s); short opening finishes and incomplete captures never trigger advice. One lesson per qualifying loss, drawn from 150 beginner, 150 advanced and 100 personalized long-chain messages or recurring resource evidence. Repeated human wins can prompt bot-specific habit acknowledgments, not claims of human-duel skill. Guests retain existing IP-hash history; accounts retain tracking identity history. Arcade teaching needs three complete informative rounds. Existing queue/cooldown and `bot_nochat` apply. See `docs/bot-improvements-review.md`, `docs/tutorial-curriculum.md` and `docs/tutorial-sequence-evidence.md` for messages and conditions. |
 | `bot_learninglog` | `0` | Opt-in recording of accepted public chat in the existing events export, independently of tutorial chat and learned weight consumption. Private tells, team, clan and admin chat are excluded. Human explanations remain untrusted annotations, not automatic behavior rules. |
 | `bot_dueltracking` | `1` | Record duel summaries, per-player force-spend stats, and sequential duel events for eligible human-vs-human and human-vs-bot duels (bot-vs-bot excluded). `0` disables this recording; it does not disable use of already stored learned preferences. |
 | `bot_dueltracking_geometry` | `2` | Optional geometry on tracked duel events. `0` disables geometry; `1` captures it for damage/range/air/knockdown, attack and swing, counter/punish/follow-up, input, throw, dodge, defense, attack-sample and decision events; `2` captures geometry for all tracked non-command-sample events. Geometry is supplementary to duel recording and does not enable tracking by itself. |
@@ -1447,6 +1459,15 @@ Bounded motor hold extensions (at most 250ms) are no longer discarded by the
 older 1400ms completion clamp; their completion cap is 1650ms. These are control
 budgets, not measurements of an optimal human throw duration.
 
+Live continuation no longer subtracts the launch reserve from force already
+spent. It reserves the next engine tick, checks active drain exposure and compares
+health/armor and force advantage with the launch snapshot. A visible throw that
+has made progress within 900ms can continue through the older soft timeouts:
+levels 2 and 3 are bounded below 5200ms. A worsening health lead
+of more than 20 or force lead of more than 30 ends this protection. A pass is
+still geometric evidence, not a confirmed hit; illegal powers, engine return,
+lethal threats, blocked flight and stalled progress remain recall reasons.
+
 Saber-only bots no longer automatically retreat just because an opponent closes
 faster than 420 units/second. Their controller can counter point-blank pressure
 within 64 units without waiting for a long swing to finish. At 64-120 units,
@@ -1460,6 +1481,19 @@ starts attacking. Recovery gaps also receive counter priority. Existing
 red/horizontal/poke/wiggle selections remain responsible for the actual attack;
 this is not an instruction to trade into every incoming swing.
 
+With bot-performed learning enabled (`bot_learninghumansonly 0`), saber-only
+counter trials explore three bounded entry delays during observed directional
+wind-up, active attack, return and transition phases. Keys separate stance,
+direction, animation-duration band, distance and closing-speed band. Timing
+choices explore 30% of eligible opportunities; after four samples the remaining
+choices prefer observed local trades. Bounded recipe bonuses and 20% motor
+exploration compare existing swing combinations with or without the controller's
+poke/wiggle. Requested but unaccepted attacks do not become successful examples;
+accepted inputs use the next two seconds of attributed damage. Complete recipes
+have separate outcome records. `LocalBotCounterV1` persists this evidence between
+duels and restarts; raw duel reset preserves it, learning reset clears it.
+These trials never bypass defense recovery, attack legality or movement safety.
+
 Idle grounded saber footing blends `bot_strafeduration` into its randomized
 side-switch timing when `bot_strafefrequency` is positive. Higher frequency also
 shortens that interval. Committed attack selection and airborne route inputs
@@ -1470,11 +1504,12 @@ are not randomized by this adjustment.
 FFA hunting, pursuit and fallback opponent waypoints exclude players in somebody
 else's private duel. A bot in a private duel still targets its own partner.
 
-A selected recorded route retains its planned world-space movement despite
-nearby opponents. With `bot_route_combathold 0`, legal combat aim/actions may
+A selected recorded route retains its planned world-space movement while airborne.
+Nearby visible opponents can end it on landing rather than letting the bot
+immediately start another route. With `bot_route_combathold 0`, legal combat aim/actions may
 continue without converting an aim turn into a different jump direction.
-The default `1` holds combat through the entire route, including edge landings
-and circle starts. Outside a route, carriers and flag attackers retain their
+The default `1` holds incidental combat during a hop but yields at grounded
+combat handoffs and nearby flag threats. Outside a route, traveling carriers and flag attackers retain their
 ordinary damage-response rules. Hard movement restrictions still apply.
 
 Lethal-hazard push/pull selection is available without `bot_bully`.
@@ -1667,6 +1702,63 @@ Public teaching annotations:
 - Active participants' messages link to their tracked duel when it is persisted. Messages from the same participant within 15s of completion can be marked `recent_inferred`; spectators and unmatched messages remain session annotations instead of being assigned to another participant's duel.
 - Chat rows include bounded full text, speaker type, map/session timing and association metadata. Public tutorial broadcasts are bot annotations; private tutorial tells are not recorded.
 - Chat is excluded from combat sequence scoring. Review a human explanation against the associated combat window before treating it as a correction; the engine does not interpret arbitrary chat as commands or trusted training labels.
+
+Tutorial history is stored independently in `LocalBotTutorialV1` and
+`LocalBotTutorialPatternV1`. Raw duel and learning resets preserve it. New
+identities can import up to 100 recent version-14-or-newer captures only when
+stored events and explicit diagnostics prove completeness. Existing history is
+not backfilled without a safe double-counting boundary. Pattern messages report
+recorded occurrence and distinct-duel counts, not inferred causes: force falling
+during a power before low-force damage, drain followed by damage, knockdown
+followed by damage, straight approaches during hits and saber-recovery reentry.
+The same pattern waits four coaching opportunities before repeating. General
+force-bar and binding lessons do not require push/pull; named-power techniques
+require their relevant power. Guest IP hashes are existing unsalted 32-bit
+pseudonyms: shared addresses and collisions can share history, and changing an
+address can lose it. They are not proof of a person's identity.
+
+Full-force personalized coaching also retains recognized action sequences in
+`LocalBotTutorialSequenceV3`, with transactional duel receipts preventing
+duplicate sequence counts. Repeated combo outcomes include each player's signed
+HP, AP and FP changes and attributed damage dealt/taken. These are bounded
+exchange measurements: an FP decrease is not automatically the cost of the
+named power, and regeneration or enemy drain can alter it. Sequence-specific
+resource evidence takes priority over stock lessons; full-force coaching does
+not fall back to the older standalone saber-entry/recovery diagnoses. Exact supported sequences,
+window timing, confidence thresholds and emitted templates are in
+`docs/tutorial-sequence-evidence.md`. The tutorial tables are independent of
+raw duel and combat-learning resets.
+
+Group C adds 100 personalized messages selected from interleaved actions by both
+duel participants, retained in `LocalBotTutorialChainV1`. It requires complete
+paired captures, at least two offensive actions per side, three observations
+of the same exact ordered chain and matching outcomes in two distinct duels.
+Recovery reminders use power usability captured at the attack, not merely the
+player's loadout after respawn. Other themes cover Force deficits, bad exchanges
+with PK/PTK/GK or saber replies, and repeated positive bot exchanges in human
+wins. The bot does not claim it proved prediction, a causal Drainlock or a
+counterfactual successful counter. Historical release measurements and a
+reproducible analysis script are described in `docs/tutorial-sequence-evidence.md`.
+
+#### Personalized tutorial capture settings
+
+Use `bot_dueltracking 1` to collect duel events and `bot_dueltracking_geometry 2`
+for the fullest positional/resource context (`1` captures selected combat events).
+Use `bot_tutorial 1` for private coaching or `2` for public coaching, with
+`bot_nochat 0` to permit delivery. Tutorial history can accumulate while
+`bot_tutorial` is off; turning coaching on does not reconstruct missing events.
+Commands are recorded automatically during eligible tracked duels; there is no
+separate command-recording cvar. Complete captures, at least 10 events and 12
+seconds, and the multi-duel evidence gates still apply. Logged-in accounts use
+their tracking identity; guests use the existing IP hash.
+
+`bot_learning`, `bot_learningstrength`, `bot_learninghumansonly` and
+`bot_learningminsamples` control bot combat preferences, not personalized
+tutorial capture. `bot_learninglog` records public chat only and is not required.
+`bot_forcepowers 1` enables bot force actions, while `g_forcePowerDisable` controls
+power legality; neither is a switch for tutorial recording. Lessons must match
+the duel's power availability and current costs, not assume every server uses
+the same damage/force settings.
 
 Recommended data: record duels against bots at skill 6+ so the skill gradient can be checked against data; the dueltracks2 set had no bots above skill 5.
 
