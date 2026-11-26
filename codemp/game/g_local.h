@@ -1937,13 +1937,14 @@ void G_TrackedDuelRecordDeath(gentity_t *self);
 void G_TrackedDuelRecordDamage(gentity_t *target, gentity_t *attacker, int amount, int mod);
 void G_RecordTrackedDuelDecision(gentity_t *self, gentity_t *enemy, int amount, const char *note);
 void G_RecordTutorialHeal(gentity_t *self);
+void G_RecordTutorialFlipKick(gentity_t *self);
+void G_ProcessBotTutorialQueue(gentity_t *ent);
 void G_ClearTrackedDuelIfMismatched(gentity_t *ent, gentity_t *opponent);
 void G_ClearTrackedDuelClientState(int clientNum);
 void G_StartTrackedArcadeCombat(gentity_t *ent);
 void G_UpdateTrackedArcadeCombatFrame(gentity_t *ent);
 void G_FinishTrackedArcadeCombat(gentity_t *ent, const char *result);
 void G_ClearTrackedArcadeCombat(int clientNum);
-void G_QueueArcadeBotTutorial(gentity_t *speaker, gentity_t *listener, int roundNumber, qboolean betweenRounds);
 
 // g_bot_learning.c
 void G_BotLearnResetClient(int clientNum);

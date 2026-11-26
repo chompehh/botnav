@@ -11787,7 +11787,9 @@ static qboolean BotNav_CombatPriority(bot_state_t *bs, const playerState_t *ps)
 		return qfalse;
 	return BotNav_RouteCombatPriority(ps->groundEntityNum != ENTITYNUM_NONE,
 		bs->frame_Enemy_Vis, Distance(ps->origin, enemy->client->ps.origin),
-		bot_targetdistance.value, BotSFJ_CombatTravel(bs, ps),
+		bot_targetdistance.value,
+		BotNav_DuelRouteCombatTravel(g_newBotAI.integer && level.gametype == GT_FFA &&
+			BotTargetModeIsDuelOnly(BotGetNewBotAITargetMode()), BotSFJ_CombatTravel(bs, ps)),
 		BotSFJ_ClientCarriesFlag(g_entities[bs->client].client),
 		flagThreat) ? qtrue : qfalse;
 }

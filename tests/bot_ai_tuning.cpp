@@ -5941,6 +5941,12 @@ BOOST_AUTO_TEST_CASE( nearby_combat_prevents_route_restarts_but_finishes_airborn
 	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 512, 0, 0, 0, 0));
 	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 513, 0, 0, 0, 0));
 	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 256, 128, 0, 0, 0));
+	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 256, 4096,
+		BotNav_DuelRouteCombatTravel(1, 1), 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(0, 1, 256, 4096,
+		BotNav_DuelRouteCombatTravel(1, 1), 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 256, 4096,
+		BotNav_DuelRouteCombatTravel(0, 1), 0, 0));
 }
 
 BOOST_AUTO_TEST_CASE( flag_threats_override_carrier_travel_only_near_the_flag )

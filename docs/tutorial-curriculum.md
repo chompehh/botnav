@@ -2,14 +2,24 @@
 
 The catalog contains 150 beginner and 150 advanced original messages, plus
 100 evidence-selected, personalized long-chain messages in **Group C** below. The
-full-force introduction teaches the first 28 entries in order before mixing
-the remaining beginner and advanced tiers; Force use is not a skill rating.
-Unavailable or unrenderable lessons are skipped without moving backward. The introduction has a separate
-persistent cursor for each account or guest identity. Evidence-based low-health
-attack advice can interrupt it without advancing that cursor. Other personalized
-advice resumes afterward. Repeated human wins can separately prompt a bot to
-acknowledge an observed successful habit without diagnosing a loss or claiming
-that the habit works against humans. Saber-only and arcade teaching do not use this sequence.
+Force duels alone activate coaching. Losing more than winning prioritizes the
+introduction and remaining eligible beginner lessons; low Push or Pull, level 3
+Lightning, level 2+ Mind Trick, and no observed flipkick are beginner signals.
+A winning record offsets one such signal. Winners without strong beginner signals
+can receive evidence-based advice without completing the introduction first.
+Unavailable or unrenderable lessons are skipped without moving backward, and
+introduction and beginner cursors persist per account or guest identity.
+Related introduction and adjacent same-power beginner lessons can be queued
+in batches of up to five. Messages are separated by seven seconds plus 30 ms
+per character of the longer adjacent message; personalized advice is individual.
+Session results and flipkick evidence reset when the player disconnects.
+When coaching is enabled, a bot automatically sends the first two unheard
+introductory messages to an active player with beginner signals, without
+requiring a duel. After the first human loss in a Force duel, a bot can send
+stock advice even if the opponent was human or the capture was incomplete.
+Personalized advice requires three informative tracked Force duels. After ten
+saber duels in a session, a bot may suggest a Force duel once.
+Arcade and saber duels do not otherwise produce tutorial advice.
 
 ## Integration and safety
 

@@ -599,6 +599,23 @@ static inline int G_DuelCurriculumRender(const duel_curriculum_lesson_t *lesson,
 
 #define DUEL_CURRICULUM_INTRO_COUNT 28
 
+/* Walk the remaining beginner lessons without repeating them in this session. */
+static inline int G_DuelCurriculumNextBasic(int start, unsigned int availablePowers,
+	const int *powerLevels, const duel_curriculum_inputs_t *inputs,
+	char *output, size_t outputSize)
+{
+	int i;
+	char scratch[150];
+	if (start < DUEL_CURRICULUM_INTRO_COUNT)
+		start = DUEL_CURRICULUM_INTRO_COUNT;
+	for (i = start; i < (int)DUEL_CURRICULUM_COUNT; ++i)
+		if (!g_duelCurriculumLessons[i].advanced &&
+			G_DuelCurriculumAllowed(&g_duelCurriculumLessons[i], 1, availablePowers, powerLevels) &&
+			G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, scratch, sizeof(scratch)))
+			return G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, output, outputSize) ? i : -1;
+	return -1;
+}
+
 /* Rotation is zero-based; unavailable or unrenderable lessons are skipped. */
 static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 	unsigned int availablePowers, const int *powerLevels,
@@ -641,6 +658,66 @@ static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 		tier = 1 - tier;
 	}
 	return -1;
+}
+
+static inline int G_DuelCurriculumIntroGroup(int index)
+{
+	if (index < 0 || index >= DUEL_CURRICULUM_INTRO_COUNT) return -1;
+	if (index < 2) return 0;
+	if (index < 6) return 1;
+	if (index < 11) return 2;
+	if (index < 15) return 3;
+	if (index < 17) return 4;
+	if (index < 22) return 5;
+	if (index < 25) return 6;
+	if (index < 27) return 7;
+	return 8;
+}
+
+static inline int G_DuelCurriculumIntroBatch(int start, unsigned int availablePowers,
+	const int *powerLevels, const duel_curriculum_inputs_t *inputs,
+	char messages[][150], int *indices, int limit)
+{
+	int count = 0, selected, group = -1;
+	char message[150];
+	if (start < 0 || start >= DUEL_CURRICULUM_INTRO_COUNT || limit <= 0)
+		return 0;
+	while (count < limit && start < DUEL_CURRICULUM_INTRO_COUNT)
+	{
+		selected = G_DuelCurriculumSelect(start, 1, availablePowers, powerLevels,
+			inputs, message, sizeof(message));
+		if (selected < 0 || (count && G_DuelCurriculumIntroGroup(selected) != group))
+			break;
+		group = G_DuelCurriculumIntroGroup(selected);
+		memcpy(messages[count], message, strlen(message) + 1);
+		indices[count] = selected;
+		start = selected + 1;
+		++count;
+	}
+	return count;
+}
+
+static inline int G_DuelCurriculumBasicBatch(int start, unsigned int availablePowers,
+	const int *powerLevels, const duel_curriculum_inputs_t *inputs,
+	char messages[][150], int *indices, int limit)
+{
+	int count = 0, selected, previous = -1;
+	unsigned int topic = 0;
+	char message[150];
+	while (count < limit)
+	{
+		selected = G_DuelCurriculumNextBasic(start, availablePowers, powerLevels,
+			inputs, message, sizeof(message));
+		if (selected < 0 || (count && (selected != previous + 1 || !topic ||
+			g_duelCurriculumLessons[selected].requiredPowers != topic)))
+			break;
+		topic = g_duelCurriculumLessons[selected].requiredPowers;
+		memcpy(messages[count], message, strlen(message) + 1);
+		indices[count] = previous = selected;
+		start = selected + 1;
+		++count;
+	}
+	return count;
 }
 
 #undef DC_ACT_VALUE
