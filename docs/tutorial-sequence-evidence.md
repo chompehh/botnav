@@ -75,8 +75,8 @@ latest qualifying attack can produce: `{n} attacks in {duels} duels while low
 on HP and behind. Latest: {self} HP vs {enemy}. Make space to Heal before
 re-entering.` It is an opportunity to consider healing, not proof the attack
 was a mistake or that a heal was possible after the snapshot. The usual pattern
-cooldown applies. This reminder can interrupt the ordered introduction without
-skipping a lesson.
+cooldown applies. This reminder follows the beginner curriculum rather than
+interrupting the introduction.
 
 ## Group C: long, two-sided exchanges
 
@@ -117,9 +117,9 @@ bot-opponent evidence are separate. Eligibility needs three observations of
 that signature, two matching outcomes in two distinct duels, a matching latest
 window, the normal three-informative-duel gate and four coaching rotations
 since the same signature/theme was last taught. Low-health opportunities take
-priority. After the ordered introduction, eligible long-chain evidence takes
-priority over short-sequence or stock advice. The existing introductory Heal
-reminder can still interrupt the introduction without advancing it.
+priority. Once beginner lessons are exhausted, or for players whose results and
+signals do not favor beginner lessons, eligible long-chain evidence takes
+priority over short-sequence or stock advice.
 
 The chat label is a compact summary: trainee actions on the left, opponent
 actions on the right. `You:PTK..Saber / Me:Pull..Throw` summarizes a longer chain;
@@ -145,8 +145,8 @@ regeneration and other actions; it is not gross combo cost. No message proves
 an untried counter would have succeeded, or that repetition establishes
 predictability. On human wins, only the bot-success theme may speak; repeated
 success against bots is not promoted as a proven habit against humans.
-Acknowledgments can precede completion of the introduction, without skipping
-its lessons or substituting ordinary loss diagnoses.
+Acknowledgments can precede completion of the introduction for players whose
+results and signals do not favor beginner lessons.
 
 ## Historical Dueltracks release sample
 

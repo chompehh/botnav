@@ -3959,6 +3959,11 @@ static inline int BotNav_RouteCombatPriority(int grounded, int visible, float di
 	return distance <= radius;
 }
 
+static inline int BotNav_DuelRouteCombatTravel(int ffaDuelMode, int combatTravel)
+{
+	return ffaDuelMode ? 0 : combatTravel;
+}
+
 static inline int BotSFJ_CarrierWaits(int carrying, int ownUnsafe, float baseDistance,
 	int teammatesCanRecover)
 {

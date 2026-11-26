@@ -7,6 +7,64 @@
 
 BOOST_AUTO_TEST_SUITE(duel_tutorial)
 
+BOOST_AUTO_TEST_CASE(skill_signals_and_results_choose_beginner_advice)
+{
+	duel_tutorial_session_t session = {};
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 3, 0, 0));
+	session.flipkick = 1;
+	BOOST_CHECK(!G_DuelTutorialPreferBasics(&session, 3, 3, 0, 0));
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 2, 3, 0, 0));
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 2, 0, 0));
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 3, 3, 0));
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 3, 0, 2));
+	session.forceWins = 3;
+	BOOST_CHECK(!G_DuelTutorialPreferBasics(&session, 3, 3, 3, 0));
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 2, 3, 3, 0));
+	session.forceLosses = 4;
+	BOOST_CHECK(G_DuelTutorialPreferBasics(&session, 3, 3, 0, 0));
+}
+
+BOOST_AUTO_TEST_CASE(beginner_cursor_persists_per_identity)
+{
+	sqlite3 *db = NULL;
+	int cursor = -1;
+	BOOST_REQUIRE_EQUAL(sqlite3_open(":memory:", &db), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialBasicCursor(db, "a", 1, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 0);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialBasicCursor(db, "a", 1, 42, &cursor), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialBasicCursor(db, "a", 1, 10, &cursor), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialBasicCursor(db, "a", 1, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 42);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialBasicCursor(db, "b", 1, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 0);
+	BOOST_CHECK_EQUAL(sqlite3_close(db), SQLITE_OK);
+}
+
+BOOST_AUTO_TEST_CASE(session_counts_only_duels_and_offers_saber_reminder_once)
+{
+	duel_tutorial_session_t session = {};
+	BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 1, 1, 0));
+	BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 1, 0, 0));
+	BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 1, 0, 1));
+	BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 2, 0, 0));
+	BOOST_CHECK_EQUAL(session.forceWins, 1);
+	BOOST_CHECK_EQUAL(session.forceLosses, 1);
+	BOOST_CHECK_EQUAL(session.forceDuels, 3);
+	for (int i = 0; i < 9; ++i)
+		BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 0, 1, 0));
+	BOOST_CHECK(G_DuelTutorialSessionFinish(&session, 0, 0, 1));
+	session.saberReminderSent = 1;
+	BOOST_CHECK(!G_DuelTutorialSessionFinish(&session, 0, 1, 0));
+	BOOST_CHECK_EQUAL(session.saberDuels, 11);
+}
+
+BOOST_AUTO_TEST_CASE(tutorial_message_spacing_grows_with_length)
+{
+	BOOST_CHECK_EQUAL(G_DuelTutorialMessageDelay(7000, 20, 40), 8200);
+	BOOST_CHECK_EQUAL(G_DuelTutorialMessageDelay(7000, 120, 40), 10600);
+	BOOST_CHECK_EQUAL(G_DuelTutorialMessageDelay(7000, 1000, 0), 11470);
+}
+
 static duel_chain_observation_t observe_long_chain(bool recovery, bool gap, bool won)
 {
 	duel_chain_observation_t o = {};
@@ -500,9 +558,6 @@ BOOST_AUTO_TEST_CASE(gates_reject_short_incomplete_and_insufficient_evidence)
 	BOOST_CHECK(!G_DuelTutorialCanTeach(1, 2));
 	BOOST_CHECK(!G_DuelTutorialCanTeach(0, 99));
 	BOOST_CHECK(G_DuelTutorialCanTeach(1, 3));
-	BOOST_CHECK(!G_DuelTutorialCanArcadeTeach(1, 2));
-	BOOST_CHECK(!G_DuelTutorialCanArcadeTeach(0, 3));
-	BOOST_CHECK(G_DuelTutorialCanArcadeTeach(1, 3));
 	BOOST_CHECK(!G_DuelTutorialCanDescribePattern(1, 3, 1));
 	BOOST_CHECK(!G_DuelTutorialCanDescribePattern(0, 9, 9));
 	BOOST_CHECK(G_DuelTutorialCanDescribePattern(1, 3, 2));
@@ -663,8 +718,9 @@ BOOST_AUTO_TEST_CASE(imports_only_complete_versioned_unimported_captures)
 			sqlite3_finalize(stmt);
 		}
 	BOOST_REQUIRE_EQUAL(G_DuelTutorialRecord(db, "account", 1, 1, 0, 0, &h), SQLITE_OK);
-	BOOST_REQUIRE_EQUAL(G_DuelTutorialImportComplete(db, "account", 1, &h), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialImportComplete(db, "account", 1, 1, &h), SQLITE_OK);
 	BOOST_CHECK_EQUAL(h.duels, 2);
+	BOOST_CHECK_EQUAL(h.modeDuels, 2);
 	BOOST_REQUIRE_EQUAL(G_DuelTutorialRecord(db, "account", 1, 1, 0, 0, &h), SQLITE_OK);
 	BOOST_CHECK_EQUAL(h.duels, 3);
 	BOOST_CHECK_EQUAL(sqlite3_close(db), SQLITE_OK);

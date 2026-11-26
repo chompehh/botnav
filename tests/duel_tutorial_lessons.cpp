@@ -220,4 +220,61 @@ BOOST_AUTO_TEST_CASE(selection_introduces_then_mixes_eligible_renderable_tiers)
 	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(-1, 1, ~0u, levels, &inputs, output, sizeof(output)), -1);
 }
 
+BOOST_AUTO_TEST_CASE(beginner_selection_does_not_wrap_or_repeat)
+{
+	int levels[DUEL_CURRICULUM_POWER_COUNT] = {};
+	duel_curriculum_inputs_t inputs = {};
+	char output[150];
+	int first = G_DuelCurriculumNextBasic(0, 0, levels, &inputs, output, sizeof(output));
+	BOOST_REQUIRE_GE(first, DUEL_CURRICULUM_INTRO_COUNT);
+	BOOST_CHECK_EQUAL(g_duelCurriculumLessons[first].advanced, 0);
+	int next = G_DuelCurriculumNextBasic(first + 1, 0, levels, &inputs, output, sizeof(output));
+	BOOST_CHECK_GT(next, first);
+	BOOST_CHECK_EQUAL(G_DuelCurriculumNextBasic(DUEL_CURRICULUM_COUNT, 0, levels,
+		&inputs, output, sizeof(output)), -1);
+	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(DUEL_CURRICULUM_INTRO_COUNT - 1, 1, 0,
+		levels, &inputs, output, sizeof(output)), 27);
+}
+
+BOOST_AUTO_TEST_CASE(introduction_batches_stay_within_a_topic_and_skip_unavailable_lessons)
+{
+	int levels[DUEL_CURRICULUM_POWER_COUNT] = {};
+	duel_curriculum_inputs_t inputs = {};
+	char messages[3][150];
+	int indices[3];
+	int count = G_DuelCurriculumIntroBatch(0, 0, levels, &inputs, messages, indices, 3);
+	BOOST_REQUIRE_EQUAL(count, 2);
+	BOOST_CHECK_EQUAL(indices[count - 1], 1);
+	BOOST_CHECK(messages[0][0]);
+	BOOST_CHECK(messages[1][0]);
+	count = G_DuelCurriculumIntroBatch(2, 0, levels, &inputs, messages, indices, 3);
+	BOOST_REQUIRE_EQUAL(count, 3);
+	BOOST_CHECK_EQUAL(indices[count - 1], 14);
+	for (int i = 0; i < count; ++i)
+		BOOST_CHECK(std::string(messages[i]).find("flip") != std::string::npos);
+	int resume = indices[0] + 1;
+	count = G_DuelCurriculumIntroBatch(resume, 0, levels, &inputs, messages, indices, 3);
+	BOOST_REQUIRE_EQUAL(count, 2);
+	BOOST_CHECK_EQUAL(indices[0], resume);
+	count = G_DuelCurriculumIntroBatch(27, 0, levels, &inputs, messages, indices, 3);
+	BOOST_REQUIRE_EQUAL(count, 1);
+	BOOST_CHECK_EQUAL(indices[count - 1], 27);
+	BOOST_CHECK_EQUAL(G_DuelCurriculumIntroBatch(28, 0, levels, &inputs, messages, indices, 3), 0);
+}
+
+BOOST_AUTO_TEST_CASE(basic_batches_follow_adjacent_lessons_with_the_same_power)
+{
+	int levels[DUEL_CURRICULUM_POWER_COUNT] = {};
+	duel_curriculum_inputs_t inputs = {};
+	char messages[5][150];
+	int indices[5];
+	levels[DUEL_CURRICULUM_HEAL] = 3;
+	int count = G_DuelCurriculumBasicBatch(31, 1u << DUEL_CURRICULUM_HEAL,
+		levels, &inputs, messages, indices, 5);
+	BOOST_REQUIRE_EQUAL(count, 4);
+	BOOST_CHECK_EQUAL(indices[count - 1], 34);
+	for (int i = 0; i < count; ++i)
+		BOOST_CHECK(std::string(messages[i]).find("Heal") != std::string::npos);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

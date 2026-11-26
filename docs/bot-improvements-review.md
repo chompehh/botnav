@@ -13,19 +13,20 @@ the blade heads toward the point the crosshair trace hits.
 
 Personalized sequence calculations, confidence requirements and all emitted
 message templates are documented in `tutorial-sequence-evidence.md`.
-Measured repeated exchanges take priority after the full-force introduction;
-the low-health attack reminder may interrupt it without skipping lessons. Force decreases
+Measured repeated exchanges take priority for players whose results and signals
+do not favor beginner lessons, or after those lessons are exhausted. Force decreases
 are not automatically called power costs, and a repeated sequence does not
 prove the opponent predicted it. Missing or incomplete evidence never becomes
 a diagnosis.
 
-Completed captures need at least 10 events and 12 seconds. New identities need
-three informative duels before coaching. Short opening grip-kick finishes and
-incomplete captures do not trigger advice, including for established players.
-One lesson is queued after a qualifying loss to a bot. Repeated positive
-exchanges in human wins can instead prompt a bot-specific acknowledgment:
-repetition is observed, not proof the habit works against humans. Busy queues are left
-alone. Beginner and advanced messages are teaching, not skill labels.
+Personalized evidence needs three complete informative Force-duel captures,
+each with at least 10 events and 12 seconds. After three completed Force duels
+in a session, bots can also offer stock lessons when captures are short or
+incomplete. Related lessons can be batched with length-dependent delays.
+Winning players can receive bot-specific acknowledgments: repetition is
+observed, not proof the habit works against humans. Busy queues are left alone.
+Saber duels and arcade do not trigger coaching; after ten saber duels a bot
+may suggest a Force duel once per session.
 
 ### Capture cvars
 

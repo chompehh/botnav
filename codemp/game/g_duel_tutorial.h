@@ -13,6 +13,56 @@ typedef struct
 	int rotation;
 } duel_tutorial_history_t;
 
+typedef struct
+{
+	int forceDuels, forceWins, forceLosses;
+	int saberDuels, saberReminderSent;
+	int flipkick;
+	int opponent;
+} duel_tutorial_session_t;
+
+static inline int G_DuelTutorialPreferBasics(const duel_tutorial_session_t *session,
+	int push, int pull, int lightning, int mindtrick)
+{
+	int signals = (push < 3) + (pull < 3) + (lightning >= 3) +
+		(mindtrick >= 2) + !session->flipkick;
+	if (session->forceLosses > session->forceWins)
+		return 1;
+	if (session->forceWins > session->forceLosses)
+		return signals >= 2;
+	return signals > 0;
+}
+
+static inline int G_DuelTutorialSessionFinish(duel_tutorial_session_t *session,
+	int duelType, int won, int draw)
+{
+	if (duelType == 1)
+	{
+		session->forceDuels++;
+		if (!draw)
+		{
+			if (won)
+				session->forceWins++;
+			else
+				session->forceLosses++;
+		}
+	}
+	else if (duelType == 0)
+	{
+		session->saberDuels++;
+		return session->saberDuels >= 10 && !session->saberReminderSent;
+	}
+	return 0;
+}
+
+static inline int G_DuelTutorialMessageDelay(int baseMs, size_t previousLength, size_t nextLength)
+{
+	size_t length = previousLength > nextLength ? previousLength : nextLength;
+	if (length > 149)
+		length = 149;
+	return baseMs + (int)length * 30;
+}
+
 static inline int G_DuelTutorialInformative(int events, int duration, int complete)
 {
 	return complete && events >= 10 && duration >= 12000;
@@ -21,11 +71,6 @@ static inline int G_DuelTutorialInformative(int events, int duration, int comple
 static inline int G_DuelTutorialCanTeach(int informative, int duels)
 {
 	return informative && duels >= 3;
-}
-
-static inline int G_DuelTutorialCanArcadeTeach(int informative, int arcadeRounds)
-{
-	return G_DuelTutorialCanTeach(informative, arcadeRounds);
 }
 
 static inline int G_DuelTutorialCanDescribePattern(int informative, int duels, int comparableDuels)
@@ -310,10 +355,47 @@ static inline int G_DuelTutorialIntroCursor(sqlite3 *db, const char *identity, i
 	return rc;
 }
 
+static inline int G_DuelTutorialBasicCursor(sqlite3 *db, const char *identity, int kind, int advance, int *cursor)
+{
+	sqlite3_stmt *stmt = NULL;
+	int rc = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS LocalBotTutorialBasicV1("
+		"identity TEXT NOT NULL,kind INTEGER NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,"
+		"PRIMARY KEY(identity,kind))", NULL, NULL, NULL);
+	if (rc != SQLITE_OK)
+		return rc;
+	rc = sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO LocalBotTutorialBasicV1(identity,kind) VALUES(?,?)", -1, &stmt, NULL);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 1, identity, -1, SQLITE_TRANSIENT);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, 2, kind);
+	if (rc == SQLITE_OK) rc = sqlite3_step(stmt) == SQLITE_DONE ? SQLITE_OK : sqlite3_errcode(db);
+	sqlite3_finalize(stmt);
+	stmt = NULL;
+	if (rc != SQLITE_OK)
+		return rc;
+	rc = sqlite3_prepare_v2(db, advance ?
+		"UPDATE LocalBotTutorialBasicV1 SET cursor=MAX(cursor,?) WHERE identity=? AND kind=?" :
+		"SELECT cursor FROM LocalBotTutorialBasicV1 WHERE identity=? AND kind=?", -1, &stmt, NULL);
+	if (advance && rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, 1, advance);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, advance ? 2 : 1, identity, -1, SQLITE_TRANSIENT);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, advance ? 3 : 2, kind);
+	if (rc == SQLITE_OK)
+	{
+		rc = sqlite3_step(stmt);
+		if (!advance && rc == SQLITE_ROW)
+		{
+			*cursor = sqlite3_column_int(stmt, 0);
+			rc = SQLITE_OK;
+		}
+		else if (advance && rc == SQLITE_DONE)
+			rc = SQLITE_OK;
+	}
+	sqlite3_finalize(stmt);
+	return rc;
+}
+
 /* Import only a new identity's proven-complete versioned raw captures. The
  * caller invokes this once, immediately after its first V1 record. */
 static inline int G_DuelTutorialImportComplete(sqlite3 *db, const char *identity, int kind,
-	duel_tutorial_history_t *history)
+	int mode, duel_tutorial_history_t *history)
 {
 	const char *sql = "SELECT type,COUNT(*) FROM (SELECT DISTINCT s.id,s.type FROM LocalDuelTrackParticipant p "
 		"JOIN LocalDuelTrackSummary s ON s.id=p.summary_id WHERE p.participant_key=? AND p.participant_kind=? "
@@ -379,7 +461,11 @@ static inline int G_DuelTutorialImportComplete(sqlite3 *db, const char *identity
 	if (rc != SQLITE_OK)
 		sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
 	else
+	{
 		history->duels += counts[0] + counts[1];
+		if (mode >= 0 && mode < 2)
+			history->modeDuels += counts[mode];
+	}
 	return rc;
 }
 

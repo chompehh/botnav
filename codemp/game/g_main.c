@@ -1518,12 +1518,6 @@ void G_ArcadeHandlePlayerDeath(gentity_t *self, gentity_t *attacker)
 		level.arcadeTotalKills[attacker->s.number]++;
 	}
 
-	if (roundActiveParticipant &&
-		attacker && attacker->client && (attacker->r.svFlags & SVF_BOT) &&
-		self->client->pers.connected == CON_CONNECTED && !(self->r.svFlags & SVF_BOT))
-	{
-		G_QueueArcadeBotTutorial(attacker, self, level.arcadeLevel, qfalse);
-	}
 	if (roundActiveParticipant)
 	{
 		G_FinishTrackedArcadeCombat(self, "eliminated");
@@ -5804,6 +5798,7 @@ void G_RunFrame( int levelTime ) {
 				}
 			}
 
+			G_ProcessBotTutorialQueue(ent);
 			if((!level.intermissiontime)&&!(ent->client->ps.pm_flags&PMF_FOLLOW) && ent->client->sess.sessionTeam != TEAM_SPECTATOR)
 			{
 				WP_ForcePowersUpdate(ent, &ent->client->pers.cmd );

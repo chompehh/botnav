@@ -5720,6 +5720,7 @@ void ClientThink_real( gentity_t *ent ) {
 				int strength = (int)VectorNormalize2( client->ps.velocity, oppDir );
 				int glitchKickBonus = 0;
 
+				G_RecordTutorialFlipKick(ent);
 				strength *= 0.05;
 
 				VectorScale( oppDir, -1, oppDir );
