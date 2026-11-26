@@ -1,9 +1,12 @@
 # Duel tutorial curriculum
 
 The catalog contains 150 beginner and 150 advanced original messages. The
-durable coaching rotation introduces 12 beginner selections, then mixes both
-tiers; Force use is not a skill rating. All entries use the same eligibility
-rules for registered and guest players.
+full-force introduction teaches the first 28 entries in order before mixing
+the remaining beginner and advanced tiers; Force use is not a skill rating.
+Unavailable or unrenderable lessons are skipped without moving backward. The introduction has a separate
+persistent cursor for each account or guest identity. Evidence-based low-health
+attack advice can interrupt it without advancing that cursor. Other personalized
+advice resumes afterward. Saber-only and arcade teaching do not use this sequence.
 
 ## Integration and safety
 
@@ -29,8 +32,8 @@ deactivation can alter availability (`codemp/game/w_force.c:665`,
 `codemp/game/bg_saber.c:2991`).
 Do not pass a guessed or stale value. Rendering rejects truncation and any
 message of 150 bytes or more. `G_DuelCurriculumSelect` is an optional,
-zero-based pure selector: its first 12 eligible selections are beginner,
-then it alternates eligible tiers. It skips unrenderable lessons.
+zero-based pure selector: the first 28 full-force rotations select from the
+introduction, then it alternates eligible tiers. It skips unrenderable lessons.
 
 ### Input values for the current implementation
 
@@ -106,6 +109,15 @@ conditions apply:
   (`codemp/game/w_force.c:2327`, `codemp/game/g_xcvar.h:621`).
   Arithmetic examples are labeled as examples; live placeholders report
   verified activation requirements, expenditures, damage and recovery timing.
+- Level-3 Grip applies 40 base choke damage after three seconds; level 2
+  applies 20 (`codemp/game/w_force.c:4588`, `codemp/game/w_force.c:4690`).
+  Three 20-damage kicks plus a 40-damage choke total 100 only if all connect
+  and deal those amounts. Rage, escape, protection and damage modifiers prevent
+  that from being a guaranteed kill.
+- A ready grounded defender may automatically counter Push or Pull if the
+  power is usable; movement reduces defense level, and the relative power
+  levels determine whether movement is prevented (`codemp/game/w_force.c:3229`,
+  `codemp/game/w_force.c:3917`). Counter animation is not a guaranteed stun.
 - The Pull-throw lesson combines live initial costs and base throw damage.
   At 20 FP each it shows 40 FP and 30 base damage; activation thresholds,
   regeneration, blocks and later modifiers remain separate. The swing plus
@@ -134,40 +146,40 @@ power is required. `%d` values are the checked inputs in the format column.
 
 | # | Tier | Mode | Required | Format inputs | Message |
 |---:|:---:|:---:|---|---|---|
-| 1 | B | any | none | literal | HP is health: reaching zero ends the duel. Protect low HP before planning another attack. |
-| 2 | B | any | none | literal | AP is armor: flipkicks bypass it and damage HP directly, so high armor cannot protect low health. |
-| 3 | B | force | none | literal | FP is Force power. Spending it on offense leaves less for your next defensive response. |
-| 4 | B | any | none | literal | Watch HP and AP separately: losing armor and losing health have different consequences. |
-| 5 | B | any | none | literal | At low HP, a close kick can end the duel; create distance before trying to recover. |
-| 6 | B | force | Drain@1 | literal | Short Drain taps can recover health without spending your entire Force reserve. |
-| 7 | B | force | Pull@1 | literal | A Pull can bring an opponent into a kick; practice the timing as they approach. |
-| 8 | B | force | Grip@1 | literal | Gripkick combines Grip with a close flipkick. A target can still fight back or escape. |
-| 9 | B | force | Pull@1, Throw@1 | literal | Pull-throw-kick, or PTK, combines Pull, saber throw and a close kick in one attack. |
-| 10 | B | any | none | literal | After exchanging hits, check all three resources before choosing whether to close again. |
-| 11 | B | force | Heal@1 | min HEAL; cost HEAL | Heal needs %d FP available and spends %d FP. It cannot heal past your maximum HP. |
-| 12 | B | force | Speed@1 | min SPEED; cost SPEED | Speed needs %d FP available and spends %d FP to start; reserve FP for defense. |
-| 13 | B | force | Push@1 | min PUSH; cost PUSH | Push needs %d FP available and spends %d FP on use; it can interrupt a close approach. |
-| 14 | B | force | Pull@1 | min PULL; cost PULL | Pull needs %d FP available and spends %d FP on use. Prepare for close range. |
-| 15 | B | force | Grip@1 | min GRIP; cost GRIP | Grip needs %d FP available; acquiring a target spends %d FP, then holding spends more. |
-| 16 | B | force | Lightning@1 | min LIGHTNING; cost LIGHTNING | Lightning needs %d FP available and spends %d FP to start; ongoing ticks cost more. |
-| 17 | B | force | Drain@1 | min DRAIN; cost DRAIN | Drain needs %d FP available and spends %d FP to start; processed shots cost more. |
-| 18 | B | force | Protect@1 | min PROTECT; cost PROTECT | Protect needs %d FP available and spends %d FP to start; it also drains FP while active. |
-| 19 | B | force | Absorb@1 | min ABSORB; cost ABSORB | Absorb needs %d FP available and spends %d FP to start; it also drains FP while active. |
-| 20 | B | force | Rage@1 | min RAGE; cost RAGE | Rage needs %d FP available, spends %d FP, and requires at least 10 HP. |
-| 21 | B | force | Jump@1 | literal | A charged Force Jump spends FP; short and high jumps can cost different amounts. |
-| 22 | B | force | Throw@1 | min THROW; cost THROW | Saber Throw needs %d FP available and spends %d FP on launch; level 2 can steer. |
-| 23 | B | force | Pull@1, Throw@1 | literal | Pull-throw draws a target toward the flying blade. A block or miss can stop the damage. |
-| 24 | B | force | Heal@1, Push@1 | cost PUSH; cost HEAL; sum | Push costs %d FP and Heal %d FP: together they spend %d FP; Heal requires missing HP. |
-| 25 | B | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d FP plus throw %d FP costs %d FP; an unblocked throw deals %d base damage. |
-| 26 | B | force | Speed@1, Throw@1 | literal | Speed and throw can pressure a hurt opponent trying to Drain, but spending FP can expose you to Drain too. |
-| 27 | B | force | Heal@1 | cost HEAL; value HEAL_GAIN | Heal spends %d FP for up to %d HP at your level, capped by missing HP. |
-| 28 | B | force | Grip@1 | value GRIP_START_COST; value GRIP_HOLD_COST | Grip spends %d FP after acquiring a target, then %d FP per hold tick. |
-| 29 | B | force | Drain@1 | value DRAIN_SHOT_MS; value DRAIN_SHOT_COST | Drain fires at a nominal %d ms cadence and costs %d FP per processed shot; line misses can skip the cost. |
-| 30 | B | force | Lightning@1 | value LIGHTNING_SHOT_COST; value LIGHTNING_SHOT_MS | Lightning's ongoing ticks cost %d FP each at a nominal %d ms cadence. |
-| 31 | B | force | Heal@1 | literal | Level 1 Heal restores up to 5 HP per activation, limited by your maximum health. |
-| 32 | B | force | Heal@2 | literal | Level 2 Heal restores up to 10 HP per activation, limited by your maximum health. |
-| 33 | B | force | Heal@3 | literal | Level 3 Heal restores up to 25 HP per activation, limited by your maximum health. |
-| 34 | B | force | Heal@1 | cost HEAL; value HEAL_GAIN | Your Heal spends %d FP to restore up to %d HP; it does not restore armor. |
+| 1 | B | force | none | literal | Bind your Force powers to keys you can reach, so you can react without cycling through the list. |
+| 2 | B | force | none | literal | FP is Force power: spending it on an attack leaves less for escaping or defending. |
+| 3 | B | force | Push@1 | cost PUSH | Push spends %d FP; it can move an opponent away or interrupt their approach. |
+| 4 | B | force | Pull@1 | cost PULL | Pull spends %d FP; it can draw an opponent toward you and set up close attacks. |
+| 5 | B | force | Push@1, Pull@1 | literal | A grounded, ready defender can counter Push or Pull with FP; the counter animation briefly locks them. Movement weakens resistance. |
+| 6 | B | force | Push@1, Pull@1 | literal | Close level 3 Push or Pull can knock down a vulnerable opponent; resistance and distance matter. |
+| 7 | B | force | Throw@1 | value THROW_BASE_DAMAGE | A saber throw can deal %d base damage on contact; blocks, misses and damage reductions change the result. |
+| 8 | B | force | Throw@1 | literal | A throw can catch an opponent while they attack, recover or cannot block; watch for their defense. |
+| 9 | B | force | Throw@2 | literal | Think of your crosshair as a laser pointer: the flying saber steers toward the traced point. |
+| 10 | B | force | Push@1, Throw@1 | literal | Push can move a target into a flying saber's path; a 30-damage throw can still be blocked or miss. |
+| 11 | B | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d FP plus throw %d FP costs %d FP; an unblocked throw deals %d base damage. |
+| 12 | B | any | none | literal | A flipkick is a wall-flip off your opponent: get close and jump into them as if they were a wall. |
+| 13 | B | any | none | literal | For a front flipkick, hold forward and tap jump again while rising near your opponent. For a side flip, strafe and jump. |
+| 14 | B | any | none | value FLIPKICK_BASE_DAMAGE | A flipkick can deal %d base damage; it bypasses armor and can knock the opponent down. |
+| 15 | B | any | none | literal | If you use TaystJK, you can bind flipkick in the JAPro menu instead of timing the jumps manually. |
+| 16 | B | force | Pull@1 | literal | Pullkick (PK): Pull, then flipkick as they reach you. A 20-damage kick takes 20 HP if it lands. |
+| 17 | B | force | Pull@1, Throw@1 | literal | PTK: throw, Pull into the blade, then flipkick. If the hits deal 30 and 20, that totals 50 damage. |
+| 18 | B | force | Grip@1 | threshold GRIP; cost GRIP | Grip needs %d FP available; acquiring a target spends %d FP, then holding spends more. |
+| 19 | B | force | Grip@1 | literal | Gripkick (GK): Grip the target and flipkick while holding them. Each 20-damage kick removes 20 HP if it lands. |
+| 20 | B | force | Grip@3 | literal | Level 3 Grip deals 40 base choke damage after about 3 seconds; reductions or escape can change the outcome. |
+| 21 | B | force | Grip@1 | literal | Example: three 20-damage kicks plus a level 3 Grip's 40 choke total 100 HP, enough to defeat a 100-HP target. |
+| 22 | B | force | Rage@1 | literal | Rage before choke damage can help you survive a gripkick; it costs FP and drains HP, so escape afterward. |
+| 23 | B | force | Drain@1 | value DRAIN_SHOT_COST; value DRAIN_HEAL_GAIN; value DRAIN_TARGET_LOSS | Each processed Drain shot costs %d FP; a clean hit can heal up to %d HP and remove up to %d enemy FP. |
+| 24 | B | force | Drain@1 | literal | Example: five clean hits at 5 FP per shot and 4 HP/FP per hit spend 25 FP and gain 20 HP while removing 20 FP. |
+| 25 | B | force | Pull@1, Drain@1 | literal | A drainlock delays FP recovery. Keeping an opponent below 20 FP can deny their Pull and expose them to your pullkick. |
+| 26 | B | force | Heal@1 | cost HEAL; value HEAL_GAIN | Heal spends %d FP for up to %d HP at your level, capped by missing HP. |
+| 27 | B | force | Heal@1 | literal | If you have 40 HP and the opponent has 80, create space and Heal rather than charging into another exchange. |
+| 28 | B | force | none | literal | If you have 80 HP and the opponent has 40, press the advantage, but leave enough FP to answer a counter. |
+| 29 | B | force | Grip@1 | value GRIP_START_COST; value GRIP_HOLD_COST | Grip spends %d FP after acquiring a target, then %d FP per hold tick. |
+| 30 | B | force | Drain@1 | value DRAIN_SHOT_MS; value DRAIN_SHOT_COST | Drain fires at a nominal %d ms cadence and costs %d FP per processed shot; line misses can skip the cost. |
+| 31 | B | force | Lightning@1 | value LIGHTNING_SHOT_COST; value LIGHTNING_SHOT_MS | Lightning's ongoing ticks cost %d FP each at a nominal %d ms cadence. |
+| 32 | B | force | Heal@1 | literal | Level 1 Heal restores up to 5 HP per activation, limited by your maximum health. |
+| 33 | B | force | Heal@2 | literal | Level 2 Heal restores up to 10 HP per activation, limited by your maximum health. |
+| 34 | B | force | Heal@3 | literal | Level 3 Heal restores up to 25 HP per activation, limited by your maximum health. |
 | 35 | B | force | Heal@1 | literal | Heal cannot restore armor. Use it to repair health lost in the last exchange. |
 | 36 | B | force | Heal@1, Push@1 | literal | After Push creates separation, Heal can trade FP for health before the opponent closes again. |
 | 37 | B | force | Heal@1 | literal | A heal spends FP that might otherwise answer Push or Grip. Consider the next exchange first. |
@@ -191,10 +203,10 @@ power is required. `%d` values are the checked inputs in the format column.
 | 55 | B | force | Pull@1 | literal | After a missed Pull, move sideways instead of standing still in front of the opponent. |
 | 56 | B | force | Pull@1 | literal | A close Pull can change the spacing quickly. Leave room to react rather than holding forward. |
 | 57 | B | force | Pull@1 | literal | Against Absorb, Pull may be weakened; do not assume the opponent will move. |
-| 58 | B | force | Pull@1, Throw@1 | literal | Pull-throw can catch a target moving toward the blade; practice against moving opponents. |
+| 58 | B | force | Pull@1, Throw@1 | literal | Pull-throw can catch a target moving toward the blade; a clean throw has 30 base damage before reductions. |
 | 59 | B | force | Pull@1 | literal | After Pull, a kick can threaten the opponent at close range; a miss exposes you too. |
 | 60 | B | force | Pull@1 | literal | Vary a Pull approach with movement so the opponent cannot prepare for the same entry each time. |
-| 61 | B | force | Grip@1 | literal | Gripkick: catch with Grip, then close for a flipkick; the opponent may break your hold. |
+| 61 | B | force | Grip@1 | literal | Gripkick: hold Grip and flipkick. A 20-damage kick plus level 3 Grip's 40 choke can total 60 HP if both land. |
 | 62 | B | force | Grip@1 | literal | You can steer a gripped target with your view; abrupt turns can make their movement hard to predict. |
 | 63 | B | force | Grip@1 | literal | A Grip attempt can fail against active Absorb. Keep a second plan for that response. |
 | 64 | B | force | Grip@1 | literal | During Grip, watch the opponent's movement and your own distance; a kick can punish close range. |
@@ -261,7 +273,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 125 | B | any | none | literal | After a knockdown, watch the opponent's recovery before committing to another close attack. |
 | 126 | B | any | none | literal | If you are knocked down, watch the attacker and choose a recovery direction away from hazards. |
 | 127 | B | any | none | literal | A wall behind you reduces retreat space after a kick. Move away from it before re-engaging. |
-| 128 | B | force | Pull@1 | literal | For a pullkick, Pull first and kick as the target reaches you; too early can miss. |
+| 128 | B | force | Pull@1 | literal | For a pullkick, Pull first and kick as the target reaches you; a 20-damage kick takes 20 HP if it lands. |
 | 129 | B | force | Pull@1, Throw@1 | example swing; value THROW_BASE_DAMAGE; value FLIPKICK_BASE_DAMAGE; sum | Example: if swing, throw and kick deal %d, %d and %d, swing + PTK totals %d damage. Hits can miss. |
 | 130 | B | any | none | literal | Spacing matters for kicks: too far misses, while too close leaves little room to evade. |
 | 131 | B | any | none | literal | Track the opponent's position while retreating; turning away can hide their approach. |
@@ -286,7 +298,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 150 | B | force | Throw@1 | literal | Avoid backing into a wall while tracking a throw; you need space to dodge its changing path. |
 | 151 | A | force | Heal@1, Speed@1 | cost SPEED; cost HEAL; sum | Speed plus Heal costs %d and %d FP, totaling %d FP before regeneration or any other drain. |
 | 152 | A | force | Drain@1 | literal | Anti-Drain means denying healing: spend or preserve FP deliberately, and pressure the opponent's approach. |
-| 153 | A | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum | Pull then throw costs %d plus %d FP, totaling %d FP; these costs do not guarantee a hit. |
+| 153 | A | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d plus throw %d costs %d FP; a clean throw has %d base damage before reductions. |
 | 154 | A | force | Speed@1, Absorb@1 | cost ABSORB; cost SPEED; sum | Absorb and Speed cost %d and %d FP, totaling %d FP before Absorb's ongoing drain. |
 | 155 | A | force | Pull@1, Protect@1 | cost PROTECT; cost PULL; sum | Protect and Pull cost %d and %d FP, totaling %d FP before Protect's ongoing drain. |
 | 156 | A | force | Grip@1 | value GRIP_START_COST; value GRIP_HOLD_COST | Grip spends %d FP on acquisition and %d per hold tick; its starting threshold is a separate check. |
@@ -404,7 +416,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 268 | A | force | Pull@1, Throw@1 | literal | A successful pull-throw can push the fight toward a close kick; judge the target's movement first. |
 | 269 | A | force | Throw@2 | literal | Steer a throw past cover only after your view has a clear trace beyond the obstruction. |
 | 270 | A | force | Throw@1 | literal | A returning saber changes your attack options; create space until you can use it again. |
-| 271 | A | force | Pull@1, Throw@1 | literal | For PTK, Pull and throw to bring the target into the blade, then kick as they enter range. |
+| 271 | A | force | Pull@1, Throw@1 | literal | For PTK, throw, Pull the target into the blade, then kick; hits dealing 30 and 20 total 50 damage. |
 | 272 | A | any | none | value FLIPKICK_BASE_DAMAGE | A flipkick can deal %d base damage; Grip and other factors can alter the hit. |
 | 273 | A | force | Pull@1, Throw@1 | literal | If the throw in a PTK is blocked, the kick can still threaten; do not assume both hits land. |
 | 274 | A | any | none | literal | A kick's knockdown is not guaranteed; the target's state can affect the outcome. |

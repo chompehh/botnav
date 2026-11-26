@@ -182,14 +182,31 @@ BOOST_AUTO_TEST_CASE(selection_introduces_then_mixes_eligible_renderable_tiers)
 	char output[150];
 	for (int i = 0; i < DUEL_CURRICULUM_POWER_COUNT; ++i)
 		levels[i] = 3;
+	inputs.validMinimums = inputs.validActionCosts = (1u << DUEL_CURRICULUM_POWER_COUNT) - 1;
+	inputs.validValues = (1u << DUEL_CURRICULUM_VALUE_COUNT) - 1;
+	for (int i = 0; i < DUEL_CURRICULUM_POWER_COUNT; ++i)
+		inputs.minimumFP[i] = inputs.actionCost[i] = 20;
+	for (int i = 0; i < DUEL_CURRICULUM_VALUE_COUNT; ++i)
+		inputs.values[i] = 4;
+	inputs.values[DUEL_VALUE_DRAIN_SHOT_COST] = 5;
 	for (int rotation = 0; rotation < 40; ++rotation)
 	{
 		int selected = G_DuelCurriculumSelect(rotation, 1, ~0u, levels, &inputs, output, sizeof(output));
 		BOOST_REQUIRE_GE(selected, 0);
 		BOOST_CHECK_EQUAL(g_duelCurriculumLessons[selected].advanced,
-			rotation < 12 ? 0 : (rotation - 12) % 2);
+			rotation < DUEL_CURRICULUM_INTRO_COUNT ? 0 : (rotation - DUEL_CURRICULUM_INTRO_COUNT) % 2);
+		if (rotation < DUEL_CURRICULUM_INTRO_COUNT)
+			BOOST_CHECK_EQUAL(selected, rotation);
 		BOOST_CHECK(output[0]);
 	}
+	BOOST_REQUIRE_EQUAL(G_DuelCurriculumSelect(22, 1, ~0u, levels, &inputs, output, sizeof(output)), 22);
+	BOOST_CHECK(std::string(output).find("costs 5 FP") != std::string::npos);
+	BOOST_CHECK(std::string(output).find("heal up to 4 HP") != std::string::npos);
+	BOOST_CHECK(std::string(output).find("remove up to 4 enemy FP") != std::string::npos);
+	inputs.validValues &= ~(1u << DUEL_VALUE_DRAIN_TARGET_LOSS);
+	BOOST_CHECK(!G_DuelCurriculumRender(&g_duelCurriculumLessons[22], &inputs, output, sizeof(output)));
+	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(22, 1, ~0u, levels, &inputs, output, sizeof(output)), 23);
+	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(3, 1, 0, levels, &inputs, output, sizeof(output)), 11);
 	char shortOutput[2];
 	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(0, 0, 0, NULL, NULL, shortOutput, sizeof(shortOutput)), -1);
 	BOOST_CHECK_EQUAL(shortOutput[0], '\0');

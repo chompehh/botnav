@@ -66,3 +66,14 @@ A receipt and all sequence updates are committed in one SQLite transaction.
 Retrying the same identity, mode and duel key does not count it twice; an
 error rolls back the receipt and all updates. SQLite errors suppress advice
 instead of inventing evidence.
+
+Separately, full-force coaching counts accepted swing and throw starts at
+60 HP or less when the opponent has at least 20 more HP, Heal is known and
+allowed, the player has its activation FP and at least 10 missing HP. Starts
+less than one second apart count once. After observations in two duels, the
+latest qualifying attack can produce: `{n} attacks in {duels} duels while low
+on HP and behind. Latest: {self} HP vs {enemy}. Make space to Heal before
+re-entering.` It is an opportunity to consider healing, not proof the attack
+was a mistake or that a heal was possible after the snapshot. The usual pattern
+cooldown applies. This reminder can interrupt the ordered introduction without
+skipping a lesson.

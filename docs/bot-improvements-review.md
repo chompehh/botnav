@@ -12,7 +12,8 @@ the blade heads toward the point the crosshair trace hits.
 
 Personalized sequence calculations, confidence requirements and all emitted
 message templates are documented in `tutorial-sequence-evidence.md`.
-Measured repeated exchanges take priority over stock lessons. Force decreases
+Measured repeated exchanges take priority after the full-force introduction;
+the low-health attack reminder may interrupt it without skipping lessons. Force decreases
 are not automatically called power costs, and a repeated sequence does not
 prove the opponent predicted it. Missing or incomplete evidence never becomes
 a diagnosis.

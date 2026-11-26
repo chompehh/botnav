@@ -35,10 +35,12 @@ static inline int G_DuelTutorialCanDescribePattern(int informative, int duels, i
 
 enum {
 	DUEL_TUTORIAL_LOW_FORCE, DUEL_TUTORIAL_DRAIN, DUEL_TUTORIAL_KNOCKDOWN,
-	DUEL_TUTORIAL_STRAIGHT, DUEL_TUTORIAL_RECOVERY, DUEL_TUTORIAL_PATTERN_COUNT
+	DUEL_TUTORIAL_STRAIGHT, DUEL_TUTORIAL_RECOVERY, DUEL_TUTORIAL_LOW_HEALTH_ATTACK,
+	DUEL_TUTORIAL_PATTERN_COUNT
 };
 
-enum { DUEL_TUTORIAL_EVENT_SPEND, DUEL_TUTORIAL_EVENT_KNOCKDOWN, DUEL_TUTORIAL_EVENT_HIT };
+enum { DUEL_TUTORIAL_EVENT_SPEND, DUEL_TUTORIAL_EVENT_KNOCKDOWN, DUEL_TUTORIAL_EVENT_HIT,
+	DUEL_TUTORIAL_EVENT_ATTACK };
 
 static inline int G_DuelTutorialPatternAllowedInMode(int pattern, int fullForce)
 {
@@ -49,13 +51,15 @@ static inline int G_DuelTutorialPatternAllowedInMode(int pattern, int fullForce)
 typedef struct
 {
 	int type, time, power, confirmed, force, straight, recovery;
+	int selfHealth, enemyHealth, healAvailable;
 } duel_tutorial_event_t;
 
 typedef struct
 {
 	int count[DUEL_TUTORIAL_PATTERN_COUNT];
-	int lastSpend, lastPower, lastDrain, lastKnockdown, lastHit;
+	int lastSpend, lastPower, lastDrain, lastKnockdown, lastHit, lastLowHealthAttack;
 	int samplePower, sampleForce, sampleTime[DUEL_TUTORIAL_PATTERN_COUNT];
+	int sampleSelfHealth, sampleEnemyHealth;
 } duel_tutorial_observation_t;
 
 typedef struct
@@ -74,15 +78,28 @@ static inline void G_DuelTutorialObserveInit(duel_tutorial_observation_t *o)
 		o->sampleTime[i] = -1;
 	}
 	o->lastSpend = o->lastDrain = o->lastKnockdown = o->lastHit = -1;
+	o->lastLowHealthAttack = -1;
 	o->lastPower = o->samplePower = -1;
 	o->sampleForce = -1;
+	o->sampleSelfHealth = o->sampleEnemyHealth = -1;
 }
 
 static inline void G_DuelTutorialObserve(duel_tutorial_observation_t *o,
 	const duel_tutorial_event_t *event, int drainPower)
 {
 	int delta;
-	if (event->type == DUEL_TUTORIAL_EVENT_SPEND && event->confirmed)
+	if (event->type == DUEL_TUTORIAL_EVENT_ATTACK && event->confirmed &&
+		event->healAvailable && event->selfHealth > 0 && event->selfHealth <= 60 &&
+		event->enemyHealth >= event->selfHealth + 20 &&
+		(o->lastLowHealthAttack < 0 || event->time - o->lastLowHealthAttack >= 1000))
+	{
+		o->lastLowHealthAttack = event->time;
+		o->count[DUEL_TUTORIAL_LOW_HEALTH_ATTACK]++;
+		o->sampleSelfHealth = event->selfHealth;
+		o->sampleEnemyHealth = event->enemyHealth;
+		o->sampleTime[DUEL_TUTORIAL_LOW_HEALTH_ATTACK] = event->time;
+	}
+	else if (event->type == DUEL_TUTORIAL_EVENT_SPEND && event->confirmed)
 	{
 		o->lastSpend = event->time;
 		o->lastPower = event->power;
@@ -134,6 +151,10 @@ static inline int G_DuelTutorialSelectPattern(int duels, int rotation,
 	const duel_tutorial_observation_t *o, const duel_tutorial_patterns_t *p)
 {
 	int i;
+	i = DUEL_TUTORIAL_LOW_HEALTH_ATTACK;
+	if (o->count[i] && G_DuelTutorialCanDescribePattern(1, duels, p->duels[i]) &&
+		rotation - p->lastRotation[i] >= 4)
+		return i;
 	for (i = 0; i < DUEL_TUTORIAL_PATTERN_COUNT; i++)
 		if (o->count[i] && G_DuelTutorialCanDescribePattern(1, duels, p->duels[i]) &&
 			rotation - p->lastRotation[i] >= 4)
@@ -236,6 +257,54 @@ static inline int G_DuelTutorialMarkPattern(sqlite3 *db, const char *identity, i
 		sqlite3_bind_int(stmt, 4, mode);
 		sqlite3_bind_int(stmt, 5, pattern);
 		rc = sqlite3_step(stmt) == SQLITE_DONE ? SQLITE_OK : sqlite3_errcode(db);
+	}
+	sqlite3_finalize(stmt);
+	return rc;
+}
+
+static inline int G_DuelTutorialIntroCursor(sqlite3 *db, const char *identity, int kind, int advance, int *cursor)
+{
+	sqlite3_stmt *stmt = NULL;
+	int rc;
+	rc = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS LocalBotTutorialIntroV1("
+		"identity TEXT NOT NULL,kind INTEGER NOT NULL,cursor INTEGER NOT NULL DEFAULT 0,"
+		"PRIMARY KEY(identity,kind))", NULL, NULL, NULL);
+	if (rc != SQLITE_OK)
+		return rc;
+	if (advance)
+	{
+		rc = sqlite3_prepare_v2(db, "INSERT OR IGNORE INTO LocalBotTutorialIntroV1(identity,kind) VALUES(?,?)", -1, &stmt, NULL);
+		if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, 1, identity, -1, SQLITE_TRANSIENT);
+		if (rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, 2, kind);
+		if (rc == SQLITE_OK)
+		{
+			rc = sqlite3_step(stmt);
+			if (rc == SQLITE_DONE) rc = SQLITE_OK;
+		}
+		sqlite3_finalize(stmt);
+		stmt = NULL;
+		if (rc != SQLITE_OK)
+			return rc;
+	}
+	rc = sqlite3_prepare_v2(db, advance ?
+		"UPDATE LocalBotTutorialIntroV1 SET cursor=MAX(cursor,?) WHERE identity=? AND kind=?" :
+		"SELECT cursor FROM LocalBotTutorialIntroV1 WHERE identity=? AND kind=?", -1, &stmt, NULL);
+	if (advance && rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, 1, advance);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_text(stmt, advance ? 2 : 1, identity, -1, SQLITE_TRANSIENT);
+	if (rc == SQLITE_OK) rc = sqlite3_bind_int(stmt, advance ? 3 : 2, kind);
+	if (rc == SQLITE_OK)
+	{
+		rc = sqlite3_step(stmt);
+		if (!advance && rc == SQLITE_ROW)
+		{
+			*cursor = sqlite3_column_int(stmt, 0);
+			rc = SQLITE_OK;
+		}
+		else if (rc == SQLITE_DONE)
+		{
+			if (!advance) *cursor = 0;
+			rc = SQLITE_OK;
+		}
 	}
 	sqlite3_finalize(stmt);
 	return rc;

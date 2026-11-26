@@ -4,6 +4,60 @@
 
 BOOST_AUTO_TEST_SUITE(duel_tutorial)
 
+BOOST_AUTO_TEST_CASE(low_health_attacks_require_evidence_and_available_heal)
+{
+	duel_tutorial_observation_t observation;
+	duel_tutorial_patterns_t patterns = {};
+	duel_tutorial_event_t event = {};
+	G_DuelTutorialObserveInit(&observation);
+	event.type = DUEL_TUTORIAL_EVENT_ATTACK;
+	event.confirmed = 1;
+	event.time = 100;
+	event.selfHealth = 40;
+	event.enemyHealth = 80;
+	G_DuelTutorialObserve(&observation, &event, 3);
+	BOOST_CHECK_EQUAL(observation.count[DUEL_TUTORIAL_LOW_HEALTH_ATTACK], 0);
+	event.healAvailable = 1;
+	G_DuelTutorialObserve(&observation, &event, 3);
+	event.time = 200;
+	G_DuelTutorialObserve(&observation, &event, 3);
+	BOOST_CHECK_EQUAL(observation.count[DUEL_TUTORIAL_LOW_HEALTH_ATTACK], 1);
+	event.time = 1200;
+	event.enemyHealth = 59;
+	G_DuelTutorialObserve(&observation, &event, 3);
+	BOOST_CHECK_EQUAL(observation.count[DUEL_TUTORIAL_LOW_HEALTH_ATTACK], 1);
+	event.enemyHealth = 80;
+	G_DuelTutorialObserve(&observation, &event, 3);
+	BOOST_CHECK_EQUAL(observation.count[DUEL_TUTORIAL_LOW_HEALTH_ATTACK], 2);
+	patterns.lastRotation[DUEL_TUTORIAL_LOW_HEALTH_ATTACK] = -1000;
+	patterns.duels[DUEL_TUTORIAL_LOW_HEALTH_ATTACK] = 1;
+	BOOST_CHECK_EQUAL(G_DuelTutorialSelectPattern(3, 30, &observation, &patterns), -1);
+	patterns.duels[DUEL_TUTORIAL_LOW_HEALTH_ATTACK] = 2;
+	BOOST_CHECK_EQUAL(G_DuelTutorialSelectPattern(3, 30, &observation, &patterns), DUEL_TUTORIAL_LOW_HEALTH_ATTACK);
+	BOOST_CHECK_EQUAL(observation.sampleSelfHealth, 40);
+	BOOST_CHECK_EQUAL(observation.sampleEnemyHealth, 80);
+	patterns.lastRotation[DUEL_TUTORIAL_LOW_HEALTH_ATTACK] = 28;
+	BOOST_CHECK_EQUAL(G_DuelTutorialSelectPattern(3, 30, &observation, &patterns), -1);
+}
+
+BOOST_AUTO_TEST_CASE(introduction_cursor_persists_independently_for_each_identity)
+{
+	sqlite3 *db = NULL;
+	int cursor = -1;
+	BOOST_REQUIRE_EQUAL(sqlite3_open(":memory:", &db), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:a", 2, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 0);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:a", 2, 2, &cursor), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:a", 2, 1, &cursor), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:a", 2, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 2);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:a", 1, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 0);
+	BOOST_REQUIRE_EQUAL(G_DuelTutorialIntroCursor(db, "iphash:b", 2, 0, &cursor), SQLITE_OK);
+	BOOST_CHECK_EQUAL(cursor, 0);
+	BOOST_REQUIRE_EQUAL(sqlite3_close(db), SQLITE_OK);
+}
+
 BOOST_AUTO_TEST_CASE(power_actions_require_hand_or_active_edges_not_force_loss)
 {
 	BOOST_CHECK_EQUAL(G_DuelSequencePowerAction(4, 4, 0, 0, 1, 2, 4, 8), DTS_NONE);

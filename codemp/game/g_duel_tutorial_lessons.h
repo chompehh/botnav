@@ -26,7 +26,8 @@ typedef enum {
 	DUEL_CURRICULUM_TWO_VALUES,
 	DUEL_CURRICULUM_COST_AND_VALUE,
 	DUEL_CURRICULUM_PAIR_THROW_DAMAGE,
-	DUEL_CURRICULUM_PTK_EXAMPLE
+	DUEL_CURRICULUM_PTK_EXAMPLE,
+	DUEL_CURRICULUM_DRAIN_EXCHANGE
 } duel_curriculum_format_t;
 
 typedef enum {
@@ -83,6 +84,7 @@ typedef struct {
 #define DC_PAIR(t,a,p,q) {t,a,1,DC_POWER(p)|DC_POWER(q),0,0,DUEL_CURRICULUM_TWO_COSTS_SUM,DUEL_CURRICULUM_##p,DUEL_CURRICULUM_##q}
 #define DC_PULL_THROW(t,a) {t,a,1,DC_POWER(PULL)|DC_POWER(THROW),0,0,DUEL_CURRICULUM_PAIR_THROW_DAMAGE,DUEL_CURRICULUM_PULL,DUEL_CURRICULUM_THROW}
 #define DC_PTK_EXAMPLE(t,a) {t,a,1,DC_POWER(PULL)|DC_POWER(THROW),0,0,DUEL_CURRICULUM_PTK_EXAMPLE,-1,-1}
+#define DC_DRAIN_EXCHANGE(t) {t,0,1,DC_POWER(DRAIN),0,0,DUEL_CURRICULUM_DRAIN_EXCHANGE,-1,-1}
 #define DC_VALUE(t,a,p,v) {t,a,1,p,0,0,DUEL_CURRICULUM_VALUE,DUEL_VALUE_##v,-1}
 #define DC_ANYVALUE(t,a,v) {t,a,0,0,0,0,DUEL_CURRICULUM_VALUE,DUEL_VALUE_##v,-1}
 #define DC_VALUES(t,a,p,v,w) {t,a,1,p,0,0,DUEL_CURRICULUM_TWO_VALUES,DUEL_VALUE_##v,DUEL_VALUE_##w}
@@ -93,36 +95,35 @@ typedef struct {
 #define DC_AT(t) DC_LESSON(t,1,1,DC_POWER(THROW),DC_POWER(THROW),0)
 
 static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
-	/* Beginner: resource fundamentals. */
-	DC_LESSON("HP is health: reaching zero ends the duel. Protect low HP before planning another attack.",0,0,0,0,0),
-	DC_LESSON("AP is armor: flipkicks bypass it and damage HP directly, so high armor cannot protect low health.",0,0,0,0,0),
-	DC_LESSON("FP is Force power. Spending it on offense leaves less for your next defensive response.",0,1,0,0,0),
-	DC_LESSON("Watch HP and AP separately: losing armor and losing health have different consequences.",0,0,0,0,0),
-	DC_LESSON("At low HP, a close kick can end the duel; create distance before trying to recover.",0,0,0,0,0),
-	DC_B("Short Drain taps can recover health without spending your entire Force reserve.",DC_POWER(DRAIN)),
-	DC_B("A Pull can bring an opponent into a kick; practice the timing as they approach.",DC_POWER(PULL)),
-	DC_B("Gripkick combines Grip with a close flipkick. A target can still fight back or escape.",DC_POWER(GRIP)),
-	DC_B("Pull-throw-kick, or PTK, combines Pull, saber throw and a close kick in one attack.",DC_POWER(PULL)|DC_POWER(THROW)),
-	DC_LESSON("After exchanging hits, check all three resources before choosing whether to close again.",0,0,0,0,0),
-	/* Force activation and recovery. */
-	DC_START("Heal needs %d FP available and spends %d FP. It cannot heal past your maximum HP.",HEAL),
-	DC_START("Speed needs %d FP available and spends %d FP to start; reserve FP for defense.",SPEED),
-	DC_START("Push needs %d FP available and spends %d FP on use; it can interrupt a close approach.",PUSH),
-	DC_START("Pull needs %d FP available and spends %d FP on use. Prepare for close range.",PULL),
-	DC_START("Grip needs %d FP available; acquiring a target spends %d FP, then holding spends more.",GRIP),
-	DC_START("Lightning needs %d FP available and spends %d FP to start; ongoing ticks cost more.",LIGHTNING),
-	DC_START("Drain needs %d FP available and spends %d FP to start; processed shots cost more.",DRAIN),
-	DC_START("Protect needs %d FP available and spends %d FP to start; it also drains FP while active.",PROTECT),
-	DC_START("Absorb needs %d FP available and spends %d FP to start; it also drains FP while active.",ABSORB),
-	DC_START("Rage needs %d FP available, spends %d FP, and requires at least 10 HP.",RAGE),
-	DC_B("A charged Force Jump spends FP; short and high jumps can cost different amounts.",DC_POWER(JUMP)),
-	DC_START("Saber Throw needs %d FP available and spends %d FP on launch; level 2 can steer.",THROW),
-	/* Resource arithmetic. */
-	DC_B("Pull-throw draws a target toward the flying blade. A block or miss can stop the damage.",DC_POWER(PULL)|DC_POWER(THROW)),
-	DC_PAIR("Push costs %d FP and Heal %d FP: together they spend %d FP; Heal requires missing HP.",0,PUSH,HEAL),
+	/* Ordered introduction: teach individual actions before their combinations. */
+	DC_LESSON("Bind your Force powers to keys you can reach, so you can react without cycling through the list.",0,1,0,0,0),
+	DC_LESSON("FP is Force power: spending it on an attack leaves less for escaping or defending.",0,1,0,0,0),
+	DC_ACT("Push spends %d FP; it can move an opponent away or interrupt their approach.",0,PUSH),
+	DC_ACT("Pull spends %d FP; it can draw an opponent toward you and set up close attacks.",0,PULL),
+	DC_B("A grounded, ready defender can counter Push or Pull with FP; the counter animation briefly locks them. Movement weakens resistance.",DC_POWER(PUSH)|DC_POWER(PULL)),
+	DC_B("Close level 3 Push or Pull can knock down a vulnerable opponent; resistance and distance matter.",DC_POWER(PUSH)|DC_POWER(PULL)),
+	DC_VALUE("A saber throw can deal %d base damage on contact; blocks, misses and damage reductions change the result.",0,DC_POWER(THROW),THROW_BASE_DAMAGE),
+	DC_B("A throw can catch an opponent while they attack, recover or cannot block; watch for their defense.",DC_POWER(THROW)),
+	DC_BT("Think of your crosshair as a laser pointer: the flying saber steers toward the traced point."),
+	DC_B("Push can move a target into a flying saber's path; a 30-damage throw can still be blocked or miss.",DC_POWER(PUSH)|DC_POWER(THROW)),
 	DC_PULL_THROW("Pull %d FP plus throw %d FP costs %d FP; an unblocked throw deals %d base damage.",0),
-	DC_B("Speed and throw can pressure a hurt opponent trying to Drain, but spending FP can expose you to Drain too.",DC_POWER(SPEED)|DC_POWER(THROW)),
+	DC_LESSON("A flipkick is a wall-flip off your opponent: get close and jump into them as if they were a wall.",0,0,0,0,0),
+	DC_LESSON("For a front flipkick, hold forward and tap jump again while rising near your opponent. For a side flip, strafe and jump.",0,0,0,0,0),
+	DC_ANYVALUE("A flipkick can deal %d base damage; it bypasses armor and can knock the opponent down.",0,FLIPKICK_BASE_DAMAGE),
+	DC_LESSON("If you use TaystJK, you can bind flipkick in the JAPro menu instead of timing the jumps manually.",0,0,0,0,0),
+	DC_B("Pullkick (PK): Pull, then flipkick as they reach you. A 20-damage kick takes 20 HP if it lands.",DC_POWER(PULL)),
+	DC_B("PTK: throw, Pull into the blade, then flipkick. If the hits deal 30 and 20, that totals 50 damage.",DC_POWER(PULL)|DC_POWER(THROW)),
+	DC_START("Grip needs %d FP available; acquiring a target spends %d FP, then holding spends more.",GRIP),
+	DC_B("Gripkick (GK): Grip the target and flipkick while holding them. Each 20-damage kick removes 20 HP if it lands.",DC_POWER(GRIP)),
+	DC_LESSON("Level 3 Grip deals 40 base choke damage after about 3 seconds; reductions or escape can change the outcome.",0,1,DC_POWER(GRIP),DC_POWER(GRIP),DC_POWER(GRIP)),
+	DC_B("Example: three 20-damage kicks plus a level 3 Grip's 40 choke total 100 HP, enough to defeat a 100-HP target.",DC_POWER(GRIP)),
+	DC_B("Rage before choke damage can help you survive a gripkick; it costs FP and drains HP, so escape afterward.",DC_POWER(RAGE)),
+	DC_DRAIN_EXCHANGE("Each processed Drain shot costs %d FP; a clean hit can heal up to %d HP and remove up to %d enemy FP."),
+	DC_B("Example: five clean hits at 5 FP per shot and 4 HP/FP per hit spend 25 FP and gain 20 HP while removing 20 FP.",DC_POWER(DRAIN)),
+	DC_B("A drainlock delays FP recovery. Keeping an opponent below 20 FP can deny their Pull and expose them to your pullkick.",DC_POWER(DRAIN)|DC_POWER(PULL)),
 	DC_ACT_VALUE("Heal spends %d FP for up to %d HP at your level, capped by missing HP.",0,HEAL,HEAL_GAIN),
+	DC_B("If you have 40 HP and the opponent has 80, create space and Heal rather than charging into another exchange.",DC_POWER(HEAL)),
+	DC_LESSON("If you have 80 HP and the opponent has 40, press the advantage, but leave enough FP to answer a counter.",0,1,0,0,0),
 	DC_VALUES("Grip spends %d FP after acquiring a target, then %d FP per hold tick.",0,DC_POWER(GRIP),GRIP_START_COST,GRIP_HOLD_COST),
 	DC_VALUES("Drain fires at a nominal %d ms cadence and costs %d FP per processed shot; line misses can skip the cost.",0,DC_POWER(DRAIN),DRAIN_SHOT_MS,DRAIN_SHOT_COST),
 	DC_VALUES("Lightning's ongoing ticks cost %d FP each at a nominal %d ms cadence.",0,DC_POWER(LIGHTNING),LIGHTNING_SHOT_COST,LIGHTNING_SHOT_MS),
@@ -130,7 +131,6 @@ static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
 	DC_B("Level 1 Heal restores up to 5 HP per activation, limited by your maximum health.",DC_POWER(HEAL)),
 	DC_LESSON("Level 2 Heal restores up to 10 HP per activation, limited by your maximum health.",0,1,DC_POWER(HEAL),DC_POWER(HEAL),0),
 	DC_LESSON("Level 3 Heal restores up to 25 HP per activation, limited by your maximum health.",0,1,DC_POWER(HEAL),DC_POWER(HEAL),DC_POWER(HEAL)),
-	DC_ACT_VALUE("Your Heal spends %d FP to restore up to %d HP; it does not restore armor.",0,HEAL,HEAL_GAIN),
 	DC_B("Heal cannot restore armor. Use it to repair health lost in the last exchange.",DC_POWER(HEAL)),
 	DC_B("After Push creates separation, Heal can trade FP for health before the opponent closes again.",DC_POWER(PUSH)|DC_POWER(HEAL)),
 	DC_B("A heal spends FP that might otherwise answer Push or Grip. Consider the next exchange first.",DC_POWER(HEAL)),
@@ -156,11 +156,11 @@ static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
 	DC_B("After a missed Pull, move sideways instead of standing still in front of the opponent.",DC_POWER(PULL)),
 	DC_B("A close Pull can change the spacing quickly. Leave room to react rather than holding forward.",DC_POWER(PULL)),
 	DC_B("Against Absorb, Pull may be weakened; do not assume the opponent will move.",DC_POWER(PULL)),
-	DC_B("Pull-throw can catch a target moving toward the blade; practice against moving opponents.",DC_POWER(PULL)|DC_POWER(THROW)),
+	DC_B("Pull-throw can catch a target moving toward the blade; a clean throw has 30 base damage before reductions.",DC_POWER(PULL)|DC_POWER(THROW)),
 	DC_B("After Pull, a kick can threaten the opponent at close range; a miss exposes you too.",DC_POWER(PULL)),
 	DC_B("Vary a Pull approach with movement so the opponent cannot prepare for the same entry each time.",DC_POWER(PULL)),
 	/* Grip. */
-	DC_B("Gripkick: catch with Grip, then close for a flipkick; the opponent may break your hold.",DC_POWER(GRIP)),
+	DC_B("Gripkick: hold Grip and flipkick. A 20-damage kick plus level 3 Grip's 40 choke can total 60 HP if both land.",DC_POWER(GRIP)),
 	DC_B("You can steer a gripped target with your view; abrupt turns can make their movement hard to predict.",DC_POWER(GRIP)),
 	DC_B("A Grip attempt can fail against active Absorb. Keep a second plan for that response.",DC_POWER(GRIP)),
 	DC_B("During Grip, watch the opponent's movement and your own distance; a kick can punish close range.",DC_POWER(GRIP)),
@@ -233,7 +233,7 @@ static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
 	DC_LESSON("After a knockdown, watch the opponent's recovery before committing to another close attack.",0,0,0,0,0),
 	DC_LESSON("If you are knocked down, watch the attacker and choose a recovery direction away from hazards.",0,0,0,0,0),
 	DC_LESSON("A wall behind you reduces retreat space after a kick. Move away from it before re-engaging.",0,0,0,0,0),
-	DC_B("For a pullkick, Pull first and kick as the target reaches you; too early can miss.",DC_POWER(PULL)),
+	DC_B("For a pullkick, Pull first and kick as the target reaches you; a 20-damage kick takes 20 HP if it lands.",DC_POWER(PULL)),
 	DC_PTK_EXAMPLE("Example: if swing, throw and kick deal %d, %d and %d, swing + PTK totals %d damage. Hits can miss.",0),
 	DC_LESSON("Spacing matters for kicks: too far misses, while too close leaves little room to evade.",0,0,0,0,0),
 	/* Defense and reading. */
@@ -261,7 +261,7 @@ static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
 	/* Advanced: expenditure and timing. */
 	DC_PAIR("Speed plus Heal costs %d and %d FP, totaling %d FP before regeneration or any other drain.",1,SPEED,HEAL),
 	DC_A("Anti-Drain means denying healing: spend or preserve FP deliberately, and pressure the opponent's approach.",DC_POWER(DRAIN)),
-	DC_PAIR("Pull then throw costs %d plus %d FP, totaling %d FP; these costs do not guarantee a hit.",1,PULL,THROW),
+	DC_PULL_THROW("Pull %d plus throw %d costs %d FP; a clean throw has %d base damage before reductions.",1),
 	DC_PAIR("Absorb and Speed cost %d and %d FP, totaling %d FP before Absorb's ongoing drain.",1,ABSORB,SPEED),
 	DC_PAIR("Protect and Pull cost %d and %d FP, totaling %d FP before Protect's ongoing drain.",1,PROTECT,PULL),
 	DC_VALUES("Grip spends %d FP on acquisition and %d per hold tick; its starting threshold is a separate check.",1,DC_POWER(GRIP),GRIP_START_COST,GRIP_HOLD_COST),
@@ -391,7 +391,7 @@ static const duel_curriculum_lesson_t g_duelCurriculumLessons[] = {
 	DC_LESSON("Steer a throw past cover only after your view has a clear trace beyond the obstruction.",1,1,DC_POWER(THROW),DC_POWER(THROW),0),
 	DC_A("A returning saber changes your attack options; create space until you can use it again.",DC_POWER(THROW)),
 	/* Advanced: kick and survival. */
-	DC_A("For PTK, Pull and throw to bring the target into the blade, then kick as they enter range.",DC_POWER(PULL)|DC_POWER(THROW)),
+	DC_A("For PTK, throw, Pull the target into the blade, then kick; hits dealing 30 and 20 total 50 damage.",DC_POWER(PULL)|DC_POWER(THROW)),
 	DC_ANYVALUE("A flipkick can deal %d base damage; Grip and other factors can alter the hit.",1,FLIPKICK_BASE_DAMAGE),
 	DC_A("If the throw in a PTK is blocked, the kick can still threaten; do not assume both hits land.",DC_POWER(PULL)|DC_POWER(THROW)),
 	DC_LESSON("A kick's knockdown is not guaranteed; the target's state can affect the outcome.",1,0,0,0,0),
@@ -473,6 +473,24 @@ static inline int G_DuelCurriculumRender(const duel_curriculum_lesson_t *lesson,
 	}
 	if (!inputs)
 		return 0;
+	if (lesson->format == DUEL_CURRICULUM_DRAIN_EXCHANGE)
+	{
+		unsigned int required = (1u << DUEL_VALUE_DRAIN_SHOT_COST) |
+			(1u << DUEL_VALUE_DRAIN_HEAL_GAIN) | (1u << DUEL_VALUE_DRAIN_TARGET_LOSS);
+		int cost = inputs->values[DUEL_VALUE_DRAIN_SHOT_COST];
+		int heal = inputs->values[DUEL_VALUE_DRAIN_HEAL_GAIN];
+		int loss = inputs->values[DUEL_VALUE_DRAIN_TARGET_LOSS];
+		if ((inputs->validValues & required) != required ||
+			cost < 0 || cost > 999999 || heal < 0 || heal > 999999 || loss < 0 || loss > 999999)
+			return 0;
+		written = snprintf(output, outputSize, lesson->text, cost, heal, loss);
+		if (written < 0 || (size_t)written >= outputSize || written >= 150)
+		{
+			output[0] = '\0';
+			return 0;
+		}
+		return 1;
+	}
 	if (lesson->format == DUEL_CURRICULUM_PTK_EXAMPLE)
 	{
 		unsigned int required = (1u << DUEL_VALUE_THROW_BASE_DAMAGE) |
@@ -579,6 +597,8 @@ static inline int G_DuelCurriculumRender(const duel_curriculum_lesson_t *lesson,
 	return 1;
 }
 
+#define DUEL_CURRICULUM_INTRO_COUNT 28
+
 /* Rotation is zero-based; unavailable or unrenderable lessons are skipped. */
 static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 	unsigned int availablePowers, const int *powerLevels,
@@ -590,12 +610,20 @@ static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 	if (rotation < 0 || !output || !outputSize)
 		return -1;
 	output[0] = '\0';
-	tier = rotation < 12 ? 0 : (rotation - 12) % 2;
-	ordinal = rotation < 12 ? rotation : (rotation - 12) / 2 + (tier == 0 ? 12 : 0);
+	if (fullForce && rotation < DUEL_CURRICULUM_INTRO_COUNT)
+	{
+		for (i = rotation; i < DUEL_CURRICULUM_INTRO_COUNT; ++i)
+			if (G_DuelCurriculumAllowed(&g_duelCurriculumLessons[i], fullForce, availablePowers, powerLevels) &&
+				G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, scratch, sizeof(scratch)))
+				return G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, output, outputSize) ? i : -1;
+		return -1;
+	}
+	tier = fullForce ? (rotation - DUEL_CURRICULUM_INTRO_COUNT) % 2 : rotation % 2;
+	ordinal = fullForce ? (rotation - DUEL_CURRICULUM_INTRO_COUNT) / 2 : rotation / 2;
 	for (pass = 0; pass < 2; ++pass)
 	{
 		count = 0;
-		for (i = 0; i < (int)DUEL_CURRICULUM_COUNT; ++i)
+		for (i = fullForce && tier == 0 ? DUEL_CURRICULUM_INTRO_COUNT : 0; i < (int)DUEL_CURRICULUM_COUNT; ++i)
 			if (g_duelCurriculumLessons[i].advanced == tier &&
 				G_DuelCurriculumAllowed(&g_duelCurriculumLessons[i], fullForce, availablePowers, powerLevels) &&
 				G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, scratch, sizeof(scratch)))
@@ -603,7 +631,7 @@ static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 		if (count)
 		{
 			ordinal %= count;
-			for (i = 0; i < (int)DUEL_CURRICULUM_COUNT; ++i)
+			for (i = fullForce && tier == 0 ? DUEL_CURRICULUM_INTRO_COUNT : 0; i < (int)DUEL_CURRICULUM_COUNT; ++i)
 				if (g_duelCurriculumLessons[i].advanced == tier &&
 					G_DuelCurriculumAllowed(&g_duelCurriculumLessons[i], fullForce, availablePowers, powerLevels) &&
 					G_DuelCurriculumRender(&g_duelCurriculumLessons[i], inputs, scratch, sizeof(scratch)) &&
@@ -622,6 +650,7 @@ static inline int G_DuelCurriculumSelect(int rotation, int fullForce,
 #undef DC_PAIR
 #undef DC_PULL_THROW
 #undef DC_PTK_EXAMPLE
+#undef DC_DRAIN_EXCHANGE
 #undef DC_ACT2
 #undef DC_ACT
 #undef DC_START

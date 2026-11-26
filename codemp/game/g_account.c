@@ -3000,7 +3000,7 @@ static void G_TutorialCurriculumInputs(gentity_t *player,
 }
 
 static qboolean G_TutorialCurriculumMessage(gentity_t *player, qboolean fullForce,
-	int rotation, qboolean arcade, char *message, size_t messageSize)
+	int rotation, qboolean arcade, char *message, size_t messageSize, int *selectedIndex)
 {
 	duel_curriculum_inputs_t inputs;
 	unsigned int available;
@@ -3010,6 +3010,8 @@ static qboolean G_TutorialCurriculumMessage(gentity_t *player, qboolean fullForc
 	selected = G_DuelCurriculumSelect(rotation > 0 ? rotation - 1 : 0,
 		fullForce && !arcade, available, player->client->ps.fd.forcePowerLevel,
 		&inputs, message, messageSize);
+	if (selectedIndex)
+		*selectedIndex = selected;
 	if (selected < 0)
 	{
 		trap->Print("Tutorial: no eligible curriculum message could be rendered.\n");
@@ -3031,7 +3033,9 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	int duration, informative, i, rc, pattern;
 	char message[MAX_SAY_TEXT];
 	char sequenceDuel[128];
-	int sequenceChoice = -1;
+	int sequenceChoice = -1, introCursor = DUEL_CURRICULUM_INTRO_COUNT, introSelected;
+	duel_curriculum_inputs_t curriculumInputs;
+	unsigned int curriculumAvailable;
 	static const char *const sequenceNames[DTS_COUNT] = {
 		"throw-pull-kick", "grip-kick", "pull-kick", "drain-kick",
 		"drain-pull", "drain-swing", "drain", "pull-swing",
@@ -3057,6 +3061,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		return;
 	}
 	fullForce = runtime->duelType == 1;
+	G_TutorialCurriculumInputs(player, &curriculumInputs, &curriculumAvailable);
 	memset(&sequenceObservation, 0, sizeof(sequenceObservation));
 	memset(&sequenceHistory, 0, sizeof(sequenceHistory));
 	G_DuelTutorialObserveInit(&observation);
@@ -3067,7 +3072,20 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		vec3_t toward;
 		memset(&tutorialEvent, 0, sizeof(tutorialEvent));
 		tutorialEvent.time = event->relTime;
-		if (event->eventType == DUEL_TRACK_EVENT_FORCE && !event->note[0] &&
+		if (fullForce && event->opponentClientNum == runtime->opponentClientNum &&
+			(event->eventType == DUEL_TRACK_EVENT_THROW_START ||
+			 (event->eventType == DUEL_TRACK_EVENT_SWING_START && !Q_stricmp(event->note, "accepted"))))
+		{
+			tutorialEvent.type = DUEL_TUTORIAL_EVENT_ATTACK;
+			tutorialEvent.confirmed = 1;
+			tutorialEvent.selfHealth = event->selfHealth;
+			tutorialEvent.enemyHealth = event->enemyHealth;
+			tutorialEvent.healAvailable = (curriculumAvailable & (1u << FP_HEAL)) &&
+				(curriculumInputs.validMinimums & (1u << FP_HEAL)) &&
+				event->selfForce >= curriculumInputs.minimumFP[FP_HEAL] &&
+				event->selfHealth <= player->client->ps.stats[STAT_MAX_HEALTH] - 10;
+		}
+		else if (event->eventType == DUEL_TRACK_EVENT_FORCE && !event->note[0] &&
 			!(event->tutorialEnemyPowersActive & (1 << FP_DRAIN)) &&
 			event->power >= 0 && event->power < DUEL_TRACK_POWER_UNKNOWN && event->amount > 0)
 		{
@@ -3182,6 +3200,8 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		rc = G_DuelTutorialSequenceRecord(db, runtime->identityKey, runtime->identityKind,
 			1, sequenceDuel, &sequenceObservation, &sequenceHistory);
 	}
+	if (rc == SQLITE_OK && fullForce && canCoach)
+		rc = G_DuelTutorialIntroCursor(db, runtime->identityKey, runtime->identityKind, 0, &introCursor);
 	if (rc != SQLITE_OK)
 		G_TrackedDBError("record tutorial history", db, rc);
 	if (rc != SQLITE_OK || !canCoach || !G_DuelTutorialCanTeach(informative, history.duels))
@@ -3193,9 +3213,14 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	if (!G_DuelTutorialPatternAllowedInMode(pattern, fullForce))
 		pattern = -1;
 	message[0] = '\0';
-	if (fullForce)
+	if (fullForce && introCursor >= DUEL_CURRICULUM_INTRO_COUNT)
 		sequenceChoice = G_DuelSequenceSelect(history.duels, history.rotation,
 			&sequenceObservation, &sequenceHistory);
+	if (fullForce && introCursor < DUEL_CURRICULUM_INTRO_COUNT &&
+		pattern != DUEL_TUTORIAL_LOW_HEALTH_ATTACK)
+		pattern = -1;
+	if (pattern == DUEL_TUTORIAL_LOW_HEALTH_ATTACK)
+		sequenceChoice = -1;
 	if (sequenceChoice >= 0)
 	{
 		const duel_sequence_stat_t *total = &sequenceHistory.stat[sequenceChoice];
@@ -3255,6 +3280,10 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		case DUEL_TUTORIAL_RECOVERY:
 			Com_sprintf(message, sizeof(message), "You were hit moving in during saber recovery %d times across %d duels. Let recovery finish before closing in.", n, duels);
 			break;
+		case DUEL_TUTORIAL_LOW_HEALTH_ATTACK:
+			Com_sprintf(message, sizeof(message), "%d attacks in %d duels while low on HP and behind. Latest: %d HP vs %d. Make space to Heal before re-entering.",
+				n, duels, observation.sampleSelfHealth, observation.sampleEnemyHealth);
+			break;
 		}
 		rc = G_DuelTutorialMarkPattern(db, runtime->identityKey, runtime->identityKind,
 			fullForce ? 1 : 0, pattern, history.rotation);
@@ -3264,9 +3293,23 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 			message[0] = '\0';
 		}
 	}
+	else if (fullForce && introCursor < DUEL_CURRICULUM_INTRO_COUNT)
+	{
+		if (G_TutorialCurriculumMessage(player, fullForce, introCursor + 1, qfalse,
+			message, sizeof(message), &introSelected))
+		{
+			rc = G_DuelTutorialIntroCursor(db, runtime->identityKey, runtime->identityKind, introSelected + 1, &introCursor);
+			if (rc != SQLITE_OK)
+			{
+				G_TrackedDBError("advance tutorial introduction", db, rc);
+				message[0] = '\0';
+			}
+		}
+	}
 	else
-		G_TutorialCurriculumMessage(player, fullForce, history.rotation, qfalse,
-			message, sizeof(message));
+		G_TutorialCurriculumMessage(player, fullForce,
+			fullForce ? history.rotation + DUEL_CURRICULUM_INTRO_COUNT : history.rotation, qfalse,
+			message, sizeof(message), NULL);
 	sqlite3_close(db);
 	if (message[0])
 		G_QueueBotTutorialMessage(opponent->s.number, player->s.number, message);
@@ -6163,7 +6206,7 @@ static void G_RecordArcadeTutorialOutcome(gentity_t *ent, const tracked_arcade_r
 	if (rc != SQLITE_OK || !coach || !G_DuelTutorialCanArcadeTeach(1, history.modeDuels))
 		return;
 	if (!G_TutorialCurriculumMessage(ent, qfalse, history.rotation, qtrue,
-		message, sizeof(message)))
+		message, sizeof(message), NULL))
 		return;
 	G_QueueBotTutorialMessage(runtime->tutorialSpeaker, ent->s.number, message);
 	if (queue->queuedCount > queue->nextMessageIndex)
