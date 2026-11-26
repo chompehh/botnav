@@ -5,6 +5,7 @@
 #include "g_duel_session.h"
 #include "g_duel_tutorial.h"
 #include "g_duel_tutorial_lessons.h"
+#include "g_duel_tutorial_chains.h"
 #include "g_ctf_tracking.h"
 #include "g_account.h"
 #include "g_route_edit.h"
@@ -92,6 +93,7 @@ void G_ErrorPrint( const char *fmt, int s );
 void G_Say(gentity_t *ent, gentity_t *target, int mode, const char *chatText);
 extern qboolean BG_InKnockDown(int anim);
 extern qboolean BG_KickingAnim(int anim);
+extern qboolean WP_ForcePowerUsable(gentity_t *self, forcePowers_t forcePower);
 
 #define CALL_SQLITE(f) {                                        \
         int i;                                                  \
@@ -240,6 +242,8 @@ typedef struct
 	int torsoTimer, torsoAnim;
 	int tutorialPowersActive, tutorialHandExtend, tutorialLegsAnim;
 	int tutorialEnemyPowersActive;
+	int tutorialRecoveryPowers;
+	unsigned int tutorialHealCount;
 	int tutorialKickTarget;
 	int saberPositionValid;
 	vec3_t saberPosition, aimEndpoint;
@@ -488,6 +492,7 @@ static qboolean G_BeginLearningSession(void)
 }
 static tracked_arcade_runtime_t g_trackedArcadeCombats[MAX_CLIENTS];
 static bot_tutorial_queue_t g_botTutorialQueues[MAX_CLIENTS];
+static unsigned int g_tutorialHealCounts[MAX_CLIENTS];
 static duel_advice_session_state_t g_duelAdviceSessions[MAX_CLIENTS];
 static qboolean g_duelTrackingSchemaReady = qfalse;
 static char g_duelTrackingSchemaPath[MAX_OSPATH];
@@ -1232,6 +1237,7 @@ void G_ClearTrackedDuelClientState(int clientNum)
 {
 	if (clientNum < 0 || clientNum >= MAX_CLIENTS)
 		return;
+	g_tutorialHealCounts[clientNum] = 0;
 	memset(&g_recentLearningDuels[clientNum], 0, sizeof(g_recentLearningDuels[clientNum]));
 	G_ClearTrackedDuelRuntime(clientNum);
 	G_ClearBotTutorialQueue(clientNum);
@@ -2069,6 +2075,8 @@ static void G_FillTrackedEventContext(tracked_duel_event_t *event, gentity_t *se
 	event->selfFooting = event->enemyFooting = -1;
 	event->torsoTimer = event->torsoAnim = -1;
 	event->tutorialPowersActive = event->tutorialEnemyPowersActive = 0;
+	event->tutorialRecoveryPowers = 0;
+	event->tutorialHealCount = 0;
 	event->tutorialHandExtend = event->tutorialLegsAnim = -1;
 	event->tutorialKickTarget = -1;
 	event->aimMask = -1;
@@ -2103,6 +2111,16 @@ static void G_FillTrackedEventContext(tracked_duel_event_t *event, gentity_t *se
 	event->tutorialPowersActive = self->client->ps.fd.forcePowersActive;
 	event->tutorialHandExtend = self->client->ps.forceHandExtend;
 	event->tutorialLegsAnim = self->client->ps.legsAnim;
+	if (self->s.number >= 0 && self->s.number < MAX_CLIENTS)
+		event->tutorialHealCount = g_tutorialHealCounts[self->s.number];
+	if (self->health <= self->client->ps.stats[STAT_MAX_HEALTH] - 10)
+	{
+		if (!(g_forcePowerDisable.integer & (1 << FP_HEAL)) && WP_ForcePowerUsable(self, FP_HEAL))
+			event->tutorialRecoveryPowers |= 1 << FP_HEAL;
+		if (!(g_forcePowerDisable.integer & (1 << FP_DRAIN)) &&
+			self->client->ps.fd.forcePower >= 25 && WP_ForcePowerUsable(self, FP_DRAIN))
+			event->tutorialRecoveryPowers |= 1 << FP_DRAIN;
+	}
 	if (self->client->ps.forceKickFlip > 0)
 		event->tutorialKickTarget = self->client->ps.forceKickFlip - 1;
 	event->selfHealth = (short)self->health;
@@ -3020,8 +3038,114 @@ static qboolean G_TutorialCurriculumMessage(gentity_t *player, qboolean fullForc
 	return qtrue;
 }
 
+void G_RecordTutorialHeal(gentity_t *self)
+{
+	if (self && self->client && self->s.number >= 0 && self->s.number < MAX_CLIENTS &&
+		g_trackedDuels[self->s.number].active)
+		++g_tutorialHealCounts[self->s.number];
+}
+
+static int G_TutorialChainPowerAction(const tracked_duel_event_t *event,
+	const tracked_duel_event_t *previous)
+{
+	if (event->tutorialHealCount != previous->tutorialHealCount)
+		return DTC_ACTION_HEAL;
+	return G_DuelSequencePowerAction(previous->tutorialPowersActive, event->tutorialPowersActive,
+		previous->tutorialHandExtend, event->tutorialHandExtend, HANDEXTEND_FORCEPULL,
+		HANDEXTEND_FORCEPUSH, 1 << FP_GRIP, 1 << FP_DRAIN);
+}
+
+static int G_TutorialChainAction(const tracked_duel_event_t *event,
+	const tracked_duel_event_t *previous, int opponent)
+{
+	int kicking, wasKicking;
+	if (event->eventType == DUEL_TRACK_EVENT_THROW_START) return DTS_THROW;
+	if (event->eventType == DUEL_TRACK_EVENT_SWING_START && !Q_stricmp(event->note, "accepted"))
+		return DTS_SWING;
+	kicking = (event->saberMove >= LS_KICK_F && event->saberMove <= LS_KICK_L_AIR) ||
+		(event->tutorialLegsAnim >= BOTH_A7_KICK_F && event->tutorialLegsAnim <= BOTH_A7_KICK_L_AIR &&
+		 event->tutorialLegsAnim != BOTH_A7_KICK_BF_STOP) ||
+		(event->torsoAnim >= BOTH_A7_KICK_F && event->torsoAnim <= BOTH_A7_KICK_L_AIR &&
+		 event->torsoAnim != BOTH_A7_KICK_BF_STOP);
+	wasKicking = (previous->saberMove >= LS_KICK_F && previous->saberMove <= LS_KICK_L_AIR) ||
+		(previous->tutorialLegsAnim >= BOTH_A7_KICK_F && previous->tutorialLegsAnim <= BOTH_A7_KICK_L_AIR &&
+		 previous->tutorialLegsAnim != BOTH_A7_KICK_BF_STOP) ||
+		(previous->torsoAnim >= BOTH_A7_KICK_F && previous->torsoAnim <= BOTH_A7_KICK_L_AIR &&
+		 previous->torsoAnim != BOTH_A7_KICK_BF_STOP);
+	if (G_DuelSequenceKickEdge(kicking, wasKicking, event->tutorialKickTarget,
+		previous->tutorialKickTarget, opponent))
+		return DTS_KICK;
+	return G_TutorialChainPowerAction(event, previous);
+}
+
+static void G_TutorialChainCapture(const tracked_duel_runtime_t *runtime,
+	const tracked_duel_runtime_t *other, const duel_curriculum_inputs_t *inputs,
+	unsigned int available, int wonAgainstBot, duel_chain_observation_t *out)
+{
+	const tracked_duel_runtime_t *sides[2] = { runtime, other };
+	int index[2] = { 0, 0 };
+	int actor, heal, drain;
+	memset(out, 0, sizeof(*out));
+	if (!other || other->duelType != 1 || runtime->duelStartTime != other->duelStartTime ||
+		Q_stricmp(other->opponentKey, runtime->identityKey) ||
+		Q_stricmp(runtime->opponentKey, other->identityKey) ||
+		!G_DuelTutorialInformative(other->eventCount,
+			other->eventCount ? other->events[other->eventCount - 1].relTime : 0,
+			G_DuelCaptureCanRankOutcomes(&other->capture)))
+		return;
+	while (index[0] < runtime->eventCount || index[1] < other->eventCount)
+	{
+		const tracked_duel_event_t *event, *previous;
+		duel_chain_event_t sample;
+		int powerAction;
+		if (index[0] >= runtime->eventCount) actor = 1;
+		else if (index[1] >= other->eventCount) actor = 0;
+		else actor = other->events[index[1]].relTime < runtime->events[index[0]].relTime;
+		event = &sides[actor]->events[index[actor]];
+		previous = index[actor] ? &sides[actor]->events[index[actor] - 1] : event;
+		++index[actor];
+		if (event->opponentClientNum != sides[actor]->opponentClientNum)
+			continue;
+		memset(&sample, 0, sizeof(sample));
+		sample.actor = actor;
+		sample.action = G_TutorialChainAction(event, previous, sides[actor]->opponentClientNum);
+		sample.state.time = event->relTime;
+		sample.state.selfHealth = actor ? event->enemyHealth : event->selfHealth;
+		sample.state.selfArmor = actor ? event->enemyArmor : event->selfArmor;
+		sample.state.selfForce = actor ? event->enemyForce : event->selfForce;
+		sample.state.enemyHealth = actor ? event->selfHealth : event->enemyHealth;
+		sample.state.enemyArmor = actor ? event->selfArmor : event->enemyArmor;
+		sample.state.enemyForce = actor ? event->selfForce : event->enemyForce;
+		sample.state.enemyDraining = ((actor ? event->tutorialPowersActive :
+			event->tutorialEnemyPowersActive) & (1 << FP_DRAIN)) != 0;
+		if (!actor && event->eventType == DUEL_TRACK_EVENT_DAMAGE_DEALT && event->amount > 0)
+			sample.state.dealt = event->amount;
+		if (!actor && event->eventType == DUEL_TRACK_EVENT_DAMAGE && event->amount > 0 &&
+			!Q_stricmp(event->damageAttackerKey, runtime->opponentKey))
+			sample.state.taken = event->amount;
+		heal = (event->tutorialRecoveryPowers & (1 << FP_HEAL)) &&
+			(available & (1u << FP_HEAL)) && (inputs->validMinimums & (1u << FP_HEAL)) &&
+			sample.state.selfForce >= inputs->minimumFP[FP_HEAL];
+		drain = (event->tutorialRecoveryPowers & (1 << FP_DRAIN)) &&
+			(available & (1u << FP_DRAIN)) && (inputs->validMinimums & (1u << FP_DRAIN)) &&
+			sample.state.selfForce >= inputs->minimumFP[FP_DRAIN] && sample.state.enemyForce > 0;
+		sample.recoveryReady = heal || drain;
+		G_DuelChainObserve(out, &sample, wonAgainstBot);
+		powerAction = G_TutorialChainPowerAction(event, previous);
+		if (powerAction && powerAction != sample.action)
+		{
+			sample.action = powerAction;
+			sample.state.dealt = sample.state.taken = 0;
+			G_DuelChainObserve(out, &sample, wonAgainstBot);
+		}
+	}
+	if (out->failed)
+		trap->Print("Tutorial: long-chain evidence exceeded bounds or had invalid ordering; no chain advice was used.\n");
+}
+
 static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
-	tracked_duel_runtime_t *runtime, qboolean canCoach)
+	tracked_duel_runtime_t *runtime, const tracked_duel_runtime_t *otherRuntime,
+	qboolean humanWon, qboolean canCoach)
 {
 	sqlite3 *db = NULL;
 	duel_tutorial_history_t history;
@@ -3029,6 +3153,8 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	duel_tutorial_patterns_t patterns;
 	duel_sequence_observation_t sequenceObservation;
 	duel_sequence_history_t sequenceHistory;
+	duel_chain_observation_t chainObservation;
+	duel_chain_advice_t chainAdvice;
 	bot_tutorial_queue_t *queue = NULL;
 	int duration, informative, i, rc, pattern;
 	char message[MAX_SAY_TEXT];
@@ -3062,6 +3188,11 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	}
 	fullForce = runtime->duelType == 1;
 	G_TutorialCurriculumInputs(player, &curriculumInputs, &curriculumAvailable);
+	memset(&chainObservation, 0, sizeof(chainObservation));
+	chainAdvice.theme = -1;
+	if (fullForce)
+		G_TutorialChainCapture(runtime, otherRuntime, &curriculumInputs, curriculumAvailable,
+			humanWon && (opponent->r.svFlags & SVF_BOT), &chainObservation);
 	memset(&sequenceObservation, 0, sizeof(sequenceObservation));
 	memset(&sequenceHistory, 0, sizeof(sequenceHistory));
 	G_DuelTutorialObserveInit(&observation);
@@ -3169,7 +3300,8 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 			G_DuelSequenceObserve(&sequenceObservation, &sample);
 		}
 	}
-	canCoach = canCoach && (opponent->r.svFlags & SVF_BOT) && bot_tutorial.integer && !bot_nochat.integer;
+	canCoach = canCoach && (!humanWon || (fullForce && chainObservation.count > 0)) &&
+		(opponent->r.svFlags & SVF_BOT) && bot_tutorial.integer && !bot_nochat.integer;
 	if (canCoach)
 	{
 		queue = &g_botTutorialQueues[opponent->s.number];
@@ -3199,6 +3331,10 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		Com_sprintf(sequenceDuel, sizeof(sequenceDuel), "%s:%d", g_learningSession, runtime->duelStartTime);
 		rc = G_DuelTutorialSequenceRecord(db, runtime->identityKey, runtime->identityKind,
 			1, sequenceDuel, &sequenceObservation, &sequenceHistory);
+		if (rc == SQLITE_OK)
+			rc = G_DuelChainRecord(db, runtime->identityKey, runtime->identityKind,
+				(opponent->r.svFlags & SVF_BOT) != 0, sequenceDuel, &chainObservation,
+				history.rotation, humanWon, &chainAdvice);
 	}
 	if (rc == SQLITE_OK && fullForce && canCoach)
 		rc = G_DuelTutorialIntroCursor(db, runtime->identityKey, runtime->identityKind, 0, &introCursor);
@@ -3221,7 +3357,21 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		pattern = -1;
 	if (pattern == DUEL_TUTORIAL_LOW_HEALTH_ATTACK)
 		sequenceChoice = -1;
-	if (sequenceChoice >= 0)
+	if (fullForce && (introCursor >= DUEL_CURRICULUM_INTRO_COUNT || humanWon) &&
+		(humanWon || pattern != DUEL_TUTORIAL_LOW_HEALTH_ATTACK || chainAdvice.theme == DTC_LOW_HEALTH) &&
+		chainAdvice.theme >= 0 && G_DuelChainRender(&chainAdvice, history.rotation, message, sizeof(message)))
+	{
+		rc = G_DuelChainMark(db, runtime->identityKey, runtime->identityKind,
+			(opponent->r.svFlags & SVF_BOT) != 0, &chainAdvice, history.rotation);
+		if (rc != SQLITE_OK)
+		{
+			G_TrackedDBError("record long-chain tutorial rotation", db, rc);
+			message[0] = '\0';
+		}
+	}
+	else if (humanWon)
+		message[0] = '\0';
+	else if (sequenceChoice >= 0)
 	{
 		const duel_sequence_stat_t *total = &sequenceHistory.stat[sequenceChoice];
 		const duel_sequence_stat_t *sample = &sequenceObservation.stat[sequenceChoice];
@@ -5582,8 +5732,8 @@ void G_FinishTrackedDuel(gentity_t *winner, gentity_t *loser, int duelType, qboo
 		else
 			trap->Print("Counter learning: unable to open database; pending evidence retained.\n");
 	}
-	G_RecordTutorialOutcome(winner, loser, &winnerRuntime, qfalse);
-	G_RecordTutorialOutcome(loser, winner, &loserRuntime, !draw);
+	G_RecordTutorialOutcome(winner, loser, &winnerRuntime, &loserRuntime, !draw, !draw);
+	G_RecordTutorialOutcome(loser, winner, &loserRuntime, &winnerRuntime, qfalse, !draw);
 	//Queues the database write (spread over later frames); takes ownership of the events.
 	G_PersistTrackedDuel(&winnerRuntime, &loserRuntime, duelType, draw);
 }

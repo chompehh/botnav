@@ -1142,7 +1142,7 @@ Notes:
 |------|---------|-------------|
 | `sv_dlRate` | `1024` | Dedicated server: per-client UDP download rate in KB/s (requires `sv_allowDownload 1`). Download-only packets are sent every server frame, separate from snapshots, with up to 48 blocks (96 KB) waiting for client acknowledgement. Legacy downloads were limited to `rate`/`sv_maxRate` per snapshot with an 8-block window. Set to `0` for legacy behaviour. Lower it on servers with limited upload bandwidth, because each downloading client can use this much. |
 | `bot_nochat` | `0` | Disable bot chat. |
-| `bot_tutorial` | `0` | Enable human-readable coaching after tracked losses to bots; `1` private, `2+` public. New identities need three complete informative duels (at least 10 events and 12s); short opening finishes and incomplete captures never trigger advice. One lesson per qualifying loss, drawn from 150 beginner and 150 advanced mode/power-aware messages or recurring resource/sequence evidence. Guests retain existing IP-hash history; accounts retain tracking identity history. Arcade teaching needs three complete informative rounds. Existing queue/cooldown and `bot_nochat` apply. See `docs/bot-improvements-review.md`, `docs/tutorial-curriculum.md` and `docs/tutorial-sequence-evidence.md` for messages and conditions. |
+| `bot_tutorial` | `0` | Enable human-readable coaching after tracked losses to bots; `1` private, `2+` public. New identities need three complete informative duels (at least 10 events and 12s); short opening finishes and incomplete captures never trigger advice. One lesson per qualifying loss, drawn from 150 beginner, 150 advanced and 100 personalized long-chain messages or recurring resource evidence. Repeated human wins can prompt bot-specific habit acknowledgments, not claims of human-duel skill. Guests retain existing IP-hash history; accounts retain tracking identity history. Arcade teaching needs three complete informative rounds. Existing queue/cooldown and `bot_nochat` apply. See `docs/bot-improvements-review.md`, `docs/tutorial-curriculum.md` and `docs/tutorial-sequence-evidence.md` for messages and conditions. |
 | `bot_learninglog` | `0` | Opt-in recording of accepted public chat in the existing events export, independently of tutorial chat and learned weight consumption. Private tells, team, clan and admin chat are excluded. Human explanations remain untrusted annotations, not automatic behavior rules. |
 | `bot_dueltracking` | `1` | Record duel summaries, per-player force-spend stats, and sequential duel events for eligible human-vs-human and human-vs-bot duels (bot-vs-bot excluded). `0` disables this recording; it does not disable use of already stored learned preferences. |
 | `bot_dueltracking_geometry` | `2` | Optional geometry on tracked duel events. `0` disables geometry; `1` captures it for damage/range/air/knockdown, attack and swing, counter/punish/follow-up, input, throw, dodge, defense, attack-sample and decision events; `2` captures geometry for all tracked non-command-sample events. Geometry is supplementary to duel recording and does not enable tracking by itself. |
@@ -1728,6 +1728,17 @@ not fall back to the older standalone saber-entry/recovery diagnoses. Exact supp
 window timing, confidence thresholds and emitted templates are in
 `docs/tutorial-sequence-evidence.md`. The tutorial tables are independent of
 raw duel and combat-learning resets.
+
+Group C adds 100 personalized messages selected from interleaved actions by both
+duel participants, retained in `LocalBotTutorialChainV1`. It requires complete
+paired captures, at least two offensive actions per side, three observations
+of the same exact ordered chain and matching outcomes in two distinct duels.
+Recovery reminders use power usability captured at the attack, not merely the
+player's loadout after respawn. Other themes cover Force deficits, bad exchanges
+with PK/PTK/GK or saber replies, and repeated positive bot exchanges in human
+wins. The bot does not claim it proved prediction, a causal Drainlock or a
+counterfactual successful counter. Historical release measurements and a
+reproducible analysis script are described in `docs/tutorial-sequence-evidence.md`.
 
 #### Personalized tutorial capture settings
 

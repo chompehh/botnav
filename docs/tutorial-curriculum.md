@@ -1,12 +1,15 @@
 # Duel tutorial curriculum
 
-The catalog contains 150 beginner and 150 advanced original messages. The
+The catalog contains 150 beginner and 150 advanced original messages, plus
+100 evidence-selected, personalized long-chain messages in **Group C** below. The
 full-force introduction teaches the first 28 entries in order before mixing
 the remaining beginner and advanced tiers; Force use is not a skill rating.
 Unavailable or unrenderable lessons are skipped without moving backward. The introduction has a separate
 persistent cursor for each account or guest identity. Evidence-based low-health
 attack advice can interrupt it without advancing that cursor. Other personalized
-advice resumes afterward. Saber-only and arcade teaching do not use this sequence.
+advice resumes afterward. Repeated human wins can separately prompt a bot to
+acknowledge an observed successful habit without diagnosing a loss or claiming
+that the habit works against humans. Saber-only and arcade teaching do not use this sequence.
 
 ## Integration and safety
 
@@ -90,8 +93,8 @@ conditions apply:
   Force-combo tweak permits coexistence (`codemp/game/w_force.c:1779`,
   `codemp/game/w_force.c:1830`, `codemp/game/w_force.c:1892`);
   `g_tweakForce` defaults to 0 (`codemp/game/g_xcvar.h:232`).
-- Throw steering starts at level 2, traces world solids at level 2 and players
-  as well at level 3, with different update intervals
+- The tutorial recommends level 3 Throw; its steering traces both world solids
+  and players
   (`codemp/game/w_saber.c:7530`). The saber travels toward the traced point;
   it does not teleport. Release, maximum duration and distance can recall it
   (`codemp/game/w_saber.c:7495`).
@@ -143,19 +146,23 @@ The entries below reproduce the catalog text. `B`/`A` are the tiers; `any`
 means either duel mode, while `force` requires full Force. Requirements list
 all player powers, with `@2`/`@3` for minimum levels. `none` means no player
 power is required. `%d` values are the checked inputs in the format column.
+The first lessons cover binds and the level-3 loadout, Push/Pull stuns and the
+below-20-FP counter/displacement risk, throw vulnerability and laser-pointer
+steering, then flipkick, PK/PTK, GK/Rage and Drain/Heal. Push is not taught as
+pushing an opponent into the blade: its longer counter stun is the opening.
 
 | # | Tier | Mode | Required | Format inputs | Message |
 |---:|:---:|:---:|---|---|---|
 | 1 | B | force | none | literal | Bind your Force powers to keys you can reach, so you can react without cycling through the list. |
-| 2 | B | force | none | literal | FP is Force power: spending it on an attack leaves less for escaping or defending. |
-| 3 | B | force | Push@1 | cost PUSH | Push spends %d FP; it can move an opponent away or interrupt their approach. |
-| 4 | B | force | Pull@1 | cost PULL | Pull spends %d FP; it can draw an opponent toward you and set up close attacks. |
-| 5 | B | force | Push@1, Pull@1 | literal | A grounded, ready defender can counter Push or Pull with FP; the counter animation briefly locks them. Movement weakens resistance. |
-| 6 | B | force | Push@1, Pull@1 | literal | Close level 3 Push or Pull can knock down a vulnerable opponent; resistance and distance matter. |
+| 2 | B | force | none | literal | Choose level 3 Push, Pull and Saber Throw; take level 3 Drain for dark side, or Heal and Absorb for light side. |
+| 3 | B | force | Push@1 | cost PUSH | Push spends %d FP. It can stun a ready defender during their counter, leaving an opening for saber throw. |
+| 4 | B | force | Pull@1 | cost PULL | Pull spends %d FP. Its counter stun briefly exposes a ready defender to saber throw. |
+| 5 | B | force | Push@1, Pull@1 | literal | Push's counter stun lasts longer than Pull's. An airborne or attacking opponent cannot use that automatic counter. |
+| 6 | B | force | Push@1, Pull@1 | literal | Below 20 FP, a target cannot normally counter Push or Pull: Pull can set up PK, and Push can send them over a ledge. |
 | 7 | B | force | Throw@1 | value THROW_BASE_DAMAGE | A saber throw can deal %d base damage on contact; blocks, misses and damage reductions change the result. |
 | 8 | B | force | Throw@1 | literal | A throw can catch an opponent while they attack, recover or cannot block; watch for their defense. |
-| 9 | B | force | Throw@2 | literal | Think of your crosshair as a laser pointer: the flying saber steers toward the traced point. |
-| 10 | B | force | Push@1, Throw@1 | literal | Push can move a target into a flying saber's path; a 30-damage throw can still be blocked or miss. |
+| 9 | B | force | Throw@3 | literal | Think of your crosshair as a laser pointer: the flying saber steers toward the traced point. |
+| 10 | B | force | Push@1, Throw@1 | literal | Push can stun the opponent during their counter; throw into that opening for up to 30 base damage, not a guaranteed hit. |
 | 11 | B | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d FP plus throw %d FP costs %d FP; an unblocked throw deals %d base damage. |
 | 12 | B | any | none | literal | A flipkick is a wall-flip off your opponent: get close and jump into them as if they were a wall. |
 | 13 | B | any | none | literal | For a front flipkick, hold forward and tap jump again while rising near your opponent. For a side flip, strafe and jump. |
@@ -194,7 +201,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 46 | B | force | Push@1 | literal | After pushing an opponent away, avoid running straight into the counterattack. |
 | 47 | B | force | Push@1 | literal | A failed Push still leaves you facing an opponent. Keep an exit direction in mind. |
 | 48 | B | force | Push@1 | literal | Watch for an opponent's active Absorb before depending on Push to create space. |
-| 49 | B | force | Push@1 | literal | Push can change an enemy's position; aim the follow-up at where they move, not where they stood. |
+| 49 | B | force | Push@1, Throw@1 | literal | A Push counter briefly occupies the defender; a 30-base-damage saber throw can punish that stun. |
 | 50 | B | force | Pull@1, Drain@1 | literal | Pull-Drain can bring an opponent into Drain range; follow only if you have enough FP to use Drain. |
 | 51 | B | force | Pull@1 | literal | Pull draws the fight closer. Prepare for a saber attack at the new distance. |
 | 52 | B | force | Pull@1 | cost PULL | Pull spends %d FP on use; bringing the opponent closer also exposes your HP. |
@@ -246,14 +253,14 @@ power is required. `%d` values are the checked inputs in the format column.
 | 98 | B | force | Rage@1, Drain@1 | literal | Rage consumes health and eventually ends. Leave the attacker's Drain range before turning it off. |
 | 99 | B | force | Rage@1, Drain@1 | literal | If you can afford it, keep enough FP after Rage to Drain once you have escaped. |
 | 100 | B | force | Drain@1 | literal | Drain has a short tail after release. Let go early near full HP so extra shots do not waste FP. |
-| 101 | B | force | Throw@2 | literal | At throw level 2 or higher, aim the crosshair to steer the flying saber toward the traced point. |
-| 102 | B | force | Throw@2 | literal | Think of the crosshair as a laser pointer: at throw level 2 or higher the saber steers toward its trace. |
-| 103 | B | force | Throw@2 | literal | At throw level 2, the trace uses solid surfaces; level 3 also traces players. |
-| 104 | B | force | Throw@3 | literal | At throw level 3, the steering trace can target players directly and updates faster than level 2. |
-| 105 | B | force | Throw@2 | literal | A thrown saber turns toward your aim rather than teleporting to it. Lead a moving target. |
-| 106 | B | force | Throw@2 | literal | A wall catches the steering trace. Move your aim around the wall to change the saber's path. |
-| 107 | B | force | Throw@2 | literal | Aim past an opponent to guide the saber across their route, then watch where they move. |
-| 108 | B | force | Throw@2 | literal | Aim above or below a target to change the saber's path; it still needs time to turn. |
+| 101 | B | force | Throw@3 | literal | Use level 3 Saber Throw: the crosshair is a laser pointer, and the blade heads toward the point it hits. |
+| 102 | B | force | Throw@3 | literal | The flying saber takes time to reach the pointer's destination; a stun can give it time to hit. |
+| 103 | B | force | Throw@3 | literal | Pull's counter stun creates a short opening for a throw with 30 base damage. |
+| 104 | B | force | Throw@3 | literal | Push's longer counter stun gives a 30-base-damage throw more time to connect. |
+| 105 | B | force | Throw@3 | literal | An opponent can block a throw after recovering from a stun; use the opening before their defense returns. |
+| 106 | B | force | Throw@3 | literal | A wall can stop the blade before it reaches the target; the crosshair cannot make it pass through cover. |
+| 107 | B | force | Throw@3 | literal | An attacking opponent cannot auto-counter Pull; pulling toward a flying blade can add 30 base damage. |
+| 108 | B | force | Throw@3 | literal | Below 20 FP, an opponent loses their normal Push/Pull counter; expect movement rather than a counter stun. |
 | 109 | B | force | Throw@1 | literal | Release alternate attack to recall a thrown saber after its initial flight period. |
 | 110 | B | force | Throw@1 | value THROW_BASE_DAMAGE | A thrown saber's base contact damage is %d before reductions; blocks can prevent the hit. |
 | 111 | B | force | Push@1, Throw@1 | cost PUSH; cost THROW; sum | Push then saber throw costs %d plus %d FP, or %d FP; the throw can punish their retreat. |
@@ -288,7 +295,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 140 | B | any | none | literal | Keep a clear route out of close range before starting an attack. |
 | 141 | B | force | Throw@1 | literal | A thrown saber has travel time. Move out of its path rather than waiting for it to reach you. |
 | 142 | B | force | Throw@1 | literal | Cover can obstruct a thrown saber. Keep track of the opponent while moving behind it. |
-| 143 | B | force | Throw@1 | literal | The opponent can change the flight path of a level 2 or 3 throw. Watch the blade, not only the thrower. |
+| 143 | B | force | Throw@1 | literal | The opponent can steer a level 3 throw. Watch the blade, not only the thrower. |
 | 144 | B | force | Throw@1 | literal | An opponent's returning saber is still a moving object. Watch its path as you change position. |
 | 145 | B | force | Throw@1 | literal | Closing on an opponent whose saber is away can pressure them, but watch for Force counters. |
 | 146 | B | force | Throw@1 | literal | If the opponent attacks while throwing, watch both the blade and their approach. |
@@ -339,7 +346,7 @@ power is required. `%d` values are the checked inputs in the format column.
 | 191 | A | force | Pull@1 | literal | Pull changes both players' threat distance. Prepare a landing or escape route before drawing them in. |
 | 192 | A | force | Pull@1 | literal | Pull toward your saber range, not blindly into contact; the opponent can attack at close range too. |
 | 193 | A | force | Pull@1 | literal | A Pull and kick sequence needs aim, spacing and timing; the Pull alone does not guarantee a knockdown. |
-| 194 | A | force | Pull@1 | literal | If Pull moves an opponent sideways, adjust your saber aim to their new position before swinging. |
+| 194 | A | force | Pull@1 | literal | After Pull moves a target, a saber reply avoids paying for another Force attack; its damage depends on the swing and hit. |
 | 195 | A | force | Pull@1 | cost PULL | Pull spends %d FP even if the follow-up swing misses; reposition before the opponent counters. |
 | 196 | A | force | Pull@1 | literal | Pulling an opponent near a wall can shorten their travel; do not time the follow-up as if space were open. |
 | 197 | A | force | Pull@1 | literal | After an opponent resists Pull, change angle before spending on the same entry again. |
@@ -386,35 +393,35 @@ power is required. `%d` values are the checked inputs in the format column.
 | 238 | A | force | Drain@1 | literal | Anti-Drain has a tradeoff: empty FP denies healing, but also prevents your own Force defense. |
 | 239 | A | force | Drain@1, Throw@1 | literal | Against anti-Drain, wait for their saber to return and FP to recover, then use a brief Drain. |
 | 240 | A | force | Drain@1 | literal | A drainlock can be broken by cover, distance or a counterattack; none works in every position. |
-| 241 | A | force | Throw@2 | literal | At throw level 2, the blade steers toward the crosshair's solid-surface trace, not directly onto players. |
+| 241 | A | force | Throw@3 | literal | Level 3 throw traces players and solid cover; the blade heads toward the crosshair's destination. |
 | 242 | A | force | Throw@3 | literal | At throw level 3, the steering trace includes players, allowing direct aim at the target. |
-| 243 | A | force | Throw@2 | literal | Treat the crosshair as a laser pointer: a nearby wall becomes the steering destination. |
-| 244 | A | force | Throw@2 | literal | Move the pointer beyond the opponent to send the flying saber across their route rather than at their feet. |
-| 245 | A | force | Throw@2 | literal | Steer from one side of the opponent to the other; the blade turns over time, so lead their movement. |
-| 246 | A | force | Throw@2 | literal | Aiming high changes the traced destination and the blade's path; it does not create an instant hit. |
-| 247 | A | force | Throw@2 | literal | At level 2, placing the pointer on a player traces through them to solid geometry behind them. |
-| 248 | A | force | Throw@3 | literal | Level 3 steering updates more frequently than level 2, but the flying blade still needs time to turn. |
-| 249 | A | force | Throw@2 | literal | A distant pointer destination and a nearby destination produce different paths from the saber's position. |
-| 250 | A | force | Throw@2 | literal | As you move, the steering trace starts at your view position. Re-aim after changing cover. |
-| 251 | A | force | Throw@2 | literal | Steer around a wall by moving your view to an unobstructed trace; the blade cannot pass through the wall. |
-| 252 | A | force | Throw@2 | literal | After a target sidesteps, move the pointer ahead of their path instead of tracing where they were. |
-| 253 | A | force | Throw@2 | literal | Do not chase the target's every movement with the pointer; blade travel time can make the aim lag. |
-| 254 | A | force | Throw@2 | literal | Watch the flying saber as well as the pointer: it approaches the traced point from its location. |
-| 255 | A | force | Throw@2 | literal | A pointer aimed at the floor can pull the saber down; lift the aim to change its flight path. |
-| 256 | A | force | Throw@2 | literal | Aiming at a wall behind the target gives level 2 steering a destination beyond the target. |
+| 243 | A | force | Throw@3 | literal | Treat the crosshair as a laser pointer: a nearby wall becomes the steering destination. |
+| 244 | A | force | Throw@3 | literal | A counter-stunned opponent has fewer immediate saber options; a 30-base-damage throw can exploit that delay. |
+| 245 | A | force | Throw@3 | literal | A moving or attacking opponent resists Pull less effectively; confirm whether they moved before following. |
+| 246 | A | force | Throw@3 | literal | Below 20 FP, an opponent is vulnerable to Pull movement and a 20-damage flipkick if it connects. |
+| 247 | A | force | Throw@3 | literal | Push near an unguarded ledge threatens a low-FP target through displacement, not guaranteed throw damage. |
+| 248 | A | force | Throw@3 | literal | A low-FP defender may still evade or block after movement; low FP does not guarantee your next hit. |
+| 249 | A | force | Throw@3 | literal | A distant pointer destination and a nearby destination produce different paths from the saber's position. |
+| 250 | A | force | Throw@3 | literal | The saber's travel time can outlast Pull's stun; an opening is not proof the blade will arrive in time. |
+| 251 | A | force | Throw@3 | literal | Cover can end a throw's pressure; continuing to hold it also delays your own FP regeneration. |
+| 252 | A | force | Throw@3 | literal | A defender may sidestep your throw after a stun; repeated failed throws spend FP without returning damage. |
+| 253 | A | force | Throw@3 | literal | A throw that never connects still costs FP and delays recovery; recall before committing to the same entry. |
+| 254 | A | force | Throw@3 | literal | Watch the flying saber as well as the pointer: it approaches the traced point from its location. |
+| 255 | A | force | Throw@3 | literal | Push and Pull stun through a defender's counter animation; the blade still needs an unblocked contact to deal 30 base damage. |
+| 256 | A | force | Throw@3 | literal | Pressure a low-FP target with Pull or a saber attack rather than assuming they remain helpless after a stun. |
 | 257 | A | force | Throw@1 | literal | Release alternate attack after the initial flight period to call the saber back rather than hold it out. |
 | 258 | A | force | Throw@1 | literal | The saber also returns at its range limit or after its maximum flight time; do not plan an indefinite hold. |
 | 259 | A | force | Throw@1 | literal | During the return, move to avoid the opponent while tracking where your saber will reach you. |
 | 260 | A | force | Drain@1, Throw@1 | literal | A throw used to deny Drain also delays your own FP recovery; recall before you need a Force response. |
-| 261 | A | force | Push@1, Throw@1 | cost PUSH; cost THROW; sum | Push then throw spends %d plus %d FP, or %d FP; adjust aim after Push moves the target. |
-| 262 | A | force | Pull@1, Throw@2 | literal | Pull then steer the saber across the opponent's new position; check both the Pull and throw costs. |
-| 263 | A | force | Grip@1, Throw@2 | literal | After a Grip release, steer a thrown saber toward the opponent's actual path, not their last held position. |
-| 264 | A | force | Speed@1, Throw@2 | literal | Use Speed to change the angle of a steered throw; the aim trace follows your new view position. |
-| 265 | A | force | Throw@2 | literal | Throw then sidestep: update the pointer after moving because cover may now block the trace. |
+| 261 | A | force | Push@1, Throw@1 | cost PUSH; cost THROW; sum | Push then throw spends %d plus %d FP, or %d FP; Push's counter stun can expose the target to 30 base damage. |
+| 262 | A | force | Throw@3 | literal | Pull's counter stun and a flying blade can combine for 30 base damage; a moving target may be pulled instead. |
+| 263 | A | force | Throw@3 | literal | After a Grip release, a 30-base-damage throw is another threat, but spending its FP can leave no reserve for escape. |
+| 264 | A | force | Throw@3 | literal | A throw can punish a Force counter's stun without committing you to a close kick; its clean base damage is 30. |
+| 265 | A | force | Throw@3 | literal | After a blocked throw, repeated Pull attempts may spend FP without any HP return; change the next response. |
 | 266 | A | force | Throw@1 | literal | After an unsuccessful throw, check your FP and recall the saber before entering close range. |
 | 267 | A | force | Throw@1 | literal | Use a throw to pressure retreat, then keep enough distance to react if the opponent closes instead. |
 | 268 | A | force | Pull@1, Throw@1 | literal | A successful pull-throw can push the fight toward a close kick; judge the target's movement first. |
-| 269 | A | force | Throw@2 | literal | Steer a throw past cover only after your view has a clear trace beyond the obstruction. |
+| 269 | A | force | Throw@3 | literal | A target behind cover can recover FP while your saber stays out; holding a blocked line may lose your resource advantage. |
 | 270 | A | force | Throw@1 | literal | A returning saber changes your attack options; create space until you can use it again. |
 | 271 | A | force | Pull@1, Throw@1 | literal | For PTK, throw, Pull the target into the blade, then kick; hits dealing 30 and 20 total 50 damage. |
 | 272 | A | any | none | value FLIPKICK_BASE_DAMAGE | A flipkick can deal %d base damage; Grip and other factors can alter the hit. |
@@ -446,3 +453,124 @@ power is required. `%d` values are the checked inputs in the format column.
 | 298 | A | force | none | literal | If the opponent moves behind cover, cancel the aimed follow-up and choose a new line. |
 | 299 | A | force | none | literal | If a defensive power ends during a sequence, do not assume it remains active for the next hit. |
 | 300 | A | force | none | literal | When a combination fails, identify whether aim, distance, FP or an enemy counter caused the failure. |
+## Group C: personalized long-chain messages
+
+These 100 templates are selected from recurring two-sided exchanges, not a
+stock rotation. `%s` is the latest compact chain summary, with `You:` on the
+left and `Me:` on the right; the stored signature retains the exact action
+order even when the label is abbreviated. Every message has two `%d` inputs.
+Their meaning is stated in the table below. Counts refer to matching bounded
+windows out of all observations of that chain against the same opponent kind,
+not the total number of duels. Evidence must recur in two distinct duels.
+Bot-success counts can span different bots; the latest summary concerns the
+bot giving the message.
+
+The full capture, confidence, recovery-readiness and cooldown conditions,
+historical release sample and executable query are in
+`tutorial-sequence-evidence.md`. Numerical combo examples are illustrative
+base arithmetic, not guarantees that every hit landed or that an untried
+counter would work. Damage totals for saber-reply messages cover the whole
+exchange, not just saber hits.
+
+| # | Evidence theme | Inputs after chain summary | Message |
+|---|---|---|---|
+| C001 | Poor Force | matching windows; all observations | %s: No damage credited, worse Force balance in %d/%d attempts; try a saber reply. |
+| C002 | Poor Force | matching windows; all observations | %s: No damage and net Force loss in %d/%d attempts; retreat briefly to rebuild. |
+| C003 | Poor Force | matching windows; all observations | %s: %d/%d attempts: zero credited damage, worse Force balance; save Force for defense. |
+| C004 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses; don't pay for a second Pull before the first throw arrives. |
+| C005 | Poor Force | matching windows; all observations | %s: %d/%d attempts had no credited damage and worse net Force; reset before another attack. |
+| C006 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses. Pull+Throw example: 40 FP for 30 damage, only if it lands. |
+| C007 | Poor Force | matching windows; all observations | %s: %d/%d attempts: no damage credited, net Force down; break off and recover. |
+| C008 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses; let my kick finish, then test a saber reply instead of casting. |
+| C009 | Poor Force | matching windows; all observations | %s: %d/%d attempts paired no damage credit with Force loss; let Force recover before returning. |
+| C010 | Poor Force | matching windows; all observations | %s: No damage credited, Force balance worsened in %d/%d attempts; test a low-cost saber option. |
+| C011 | Drain Exposure | matching windows; all observations | %s: Drain active in %d/%d attempts; net Force fell, own Force ended under 20. Make space. |
+| C012 | Drain Exposure | matching windows; all observations | %s: Drain active in %d/%d attempts; net Force fell, your Force ended under 20. Reset. |
+| C013 | Drain Exposure | matching windows; all observations | %s: %d/%d ended below 20 FP with my Drain active earlier; another Pull delays recovery. |
+| C014 | Drain Exposure | matching windows; all observations | %s: Drain active, net Force down, your Force under 20 at end: %d/%d attempts. Save reserve. |
+| C015 | Drain Exposure | matching windows; all observations | %s: %d/%d attempts: Drain active, net Force fell, your Force ended below 20; break contact. |
+| C016 | Drain Exposure | matching windows; all observations | %s: %d/%d fell below 20 FP with my Drain earlier; break range before spending on a reply. |
+| C017 | Drain Exposure | matching windows; all observations | %s: %d/%d fell below 20 FP with my Drain earlier; a clean Drain hit removes up to 4 FP. |
+| C018 | Drain Exposure | matching windows; all observations | %s: %d/%d attempts paired active Drain, falling net Force, and Force ending below 20; break contact. |
+| C019 | Drain Exposure | matching windows; all observations | %s: %d/%d FP losses under 20 with my Drain earlier; rebuild first, not another costly PTK. |
+| C020 | Drain Exposure | matching windows; all observations | %s: Net Force fell in %d/%d attempts with Drain active and your Force under 20; reset. |
+| C021 | Low Health | trainee HP; opponent HP | %s: Attack at %d HP vs %d; no recovery followed. Use the available Heal or Drain. |
+| C022 | Low Health | trainee HP; opponent HP | %s: Later attack: %d HP to their %d; Heal or Drain was available, but unused afterward. |
+| C023 | Low Health | trainee HP; opponent HP | %s: You attacked at %d HP vs %d; no recovery followed. Use available Heal or Drain. |
+| C024 | Low Health | trainee HP; opponent HP | %s: %d HP vs %d, still attacking; recovery was usable. Make room to Heal or reach with Drain. |
+| C025 | Low Health | trainee HP; opponent HP | %s: %d HP to their %d at attack; no later recovery attempt. Heal or Drain was available. |
+| C026 | Low Health | trainee HP; opponent HP | %s: Attack snapshot: %d HP vs %d; no recovery followed. Use the available Heal or Drain. |
+| C027 | Low Health | trainee HP; opponent HP | %s: Later attack at %d HP, they had %d; no recovery followed though Heal or Drain was legal. |
+| C028 | Low Health | trainee HP; opponent HP | %s: %d HP vs %d, no recovery; Heal/Drain was usable. Recover before trying the same entry. |
+| C029 | Low Health | trainee HP; opponent HP | %s: At the later attack: %d HP vs %d; no recovery followed; Heal or Drain was available. |
+| C030 | Low Health | trainee HP; opponent HP | %s: %d HP against their %d at attack; recovery wasn't tried despite legal Heal or Drain. |
+| C031 | Force Deficit | trainee FP; opponent FP | %s: At attack: %d own Force to their %d; retreat briefly and rebuild your reserve. |
+| C032 | Force Deficit | trainee FP; opponent FP | %s: You had %d Force, they had %d; avoid optional casts until you recover. |
+| C033 | Force Deficit | trainee FP; opponent FP | %s: At attack: %d own Force, %d theirs; step back and regain Force. |
+| C034 | Force Deficit | trainee FP; opponent FP | %s: %d FP vs my %d; a saber reply to PTK can return damage without paying for another Pull. |
+| C035 | Force Deficit | trainee FP; opponent FP | %s: %d own Force to their %d; a saber reply avoids extra activation costs. |
+| C036 | Force Deficit | trainee FP; opponent FP | %s: At attack: %d own Force vs %d theirs; save reserve for defense, not optional casts. |
+| C037 | Force Deficit | trainee FP; opponent FP | %s: %d FP vs my %d; Pull+Throw costs 40 FP in the base example. Repeating it widens the gap. |
+| C038 | Force Deficit | trainee FP; opponent FP | %s: Attack snapshot: %d Force for you, %d for them; wait for a useful opening. |
+| C039 | Force Deficit | trainee FP; opponent FP | %s: You had %d Force to their %d; favor a low-cost reply while recovering. |
+| C040 | Force Deficit | trainee FP; opponent FP | %s: %d own Force against their %d at attack; conserve it for a meaningful response. |
+| C041 | Vs Ptk | matching windows; all observations | %s: Observed PTK with bad HP/AP trades in %d/%d attempts; reset your defense. |
+| C042 | Vs Ptk | matching windows; all observations | %s: Observed PTK, poor trades: %d/%d attempts; saber reply during recovery can save Force. |
+| C043 | Vs Ptk | matching windows; all observations | %s: %d/%d bad trades with my PTK; test a saber swing as my kick ends, rather than a second Pull. |
+| C044 | Vs Ptk | matching windows; all observations | %s: %d/%d bad trades with my PTK; vary your saber entry between my throw and kick, not every cast. |
+| C045 | Vs Ptk | matching windows; all observations | %s: Observed PTK, %d/%d negative HP/AP trades; retreat to regain Force before re-entry. |
+| C046 | Vs Ptk | matching windows; all observations | %s: %d/%d poor trades alongside observed PTK; answer with saber to conserve Force. |
+| C047 | Vs Ptk | matching windows; all observations | %s: %d/%d bad PTK trades. Example: 30 saber + 30 throw + 20 kick = 80 damage if all land. |
+| C048 | Vs Ptk | matching windows; all observations | %s: %d/%d negative trades with PTK observed; avoid spending Force on a repeated plan. |
+| C049 | Vs Ptk | matching windows; all observations | %s: Observed PTK accompanied %d/%d poor trades; reset defense, then choose a new entry. |
+| C050 | Vs Ptk | matching windows; all observations | %s: %d/%d bad PTK trades; a fresh Pull+Throw example costs 40 FP for 30 damage if it lands. |
+| C051 | Vs Pk | matching windows; all observations | %s: Observed PK with bad HP/AP trades in %d/%d attempts; change your response. |
+| C052 | Vs Pk | matching windows; all observations | %s: PK pattern, %d/%d poor trades; a saber reply during recovery can conserve Force. |
+| C053 | Vs Pk | matching windows; all observations | %s: %d/%d bad PK trades; test a saber reply after my kick. Pull's base cost is 20 FP. |
+| C054 | Vs Pk | matching windows; all observations | %s: Bad trades in %d/%d attempts with PK observed; retreat and recover before re-engaging. |
+| C055 | Vs Pk | matching windows; all observations | %s: %d/%d bad PK trades; rebuild FP before re-entry. Under 20, another Pull can move you. |
+| C056 | Vs Pk | matching windows; all observations | %s: %d/%d poor trades alongside observed PK; consider a low-cost saber answer. |
+| C057 | Vs Pk | matching windows; all observations | %s: PK observed in %d/%d negative-trade attempts; vary your defense after the exchange. |
+| C058 | Vs Pk | matching windows; all observations | %s: %d/%d bad PK trades; let the kick pass, then test a saber hit instead of matching Pulls. |
+| C059 | Vs Pk | matching windows; all observations | %s: Observed PK and %d/%d bad trades; make space, then return with a different plan. |
+| C060 | Vs Pk | matching windows; all observations | %s: %d/%d negative trades alongside observed PK; don't spend Force just to repeat a plan. |
+| C061 | Vs Gk | matching windows; all observations | %s: Observed GK with bad HP/AP trades in %d/%d attempts; if grip starts, break hold before choke. |
+| C062 | Vs Gk | matching windows; all observations | %s: %d/%d bad GK trades; level-3 choke adds 40 base damage. Break the hold before that arrives. |
+| C063 | Vs Gk | matching windows; all observations | %s: %d/%d negative trades with observed GK; if gripped, break hold first, then make space. |
+| C064 | Vs Gk | matching windows; all observations | %s: Bad trades in %d/%d attempts with GK observed; if gripped, save Force for escape. |
+| C065 | Vs Gk | matching windows; all observations | %s: Observed GK, %d/%d poor trades; if held, break free before attacking. |
+| C066 | Vs Gk | matching windows; all observations | %s: %d/%d bad GK trades. Three 20-damage kicks + 40 choke = 100 HP; escape before the choke. |
+| C067 | Vs Gk | matching windows; all observations | %s: GK observed in %d/%d negative-trade attempts; reset after escaping, then recover. |
+| C068 | Vs Gk | matching windows; all observations | %s: %d/%d bad GK trades; if you have Rage and 50 FP, use it before choke, then escape. |
+| C069 | Vs Gk | matching windows; all observations | %s: Observed GK accompanied %d/%d bad trades; if held, prioritize escape over attack. |
+| C070 | Vs Gk | matching windows; all observations | %s: %d/%d negative trades alongside GK; if gripped, break hold, retreat, and rebuild Force. |
+| C071 | Vs Saber | matching windows; all observations | %s: Saber swings with bad HP/AP trades in %d/%d attempts; defend, then reset. |
+| C072 | Vs Saber | matching windows; all observations | %s: %d/%d poor trades with observed swings; retreat after the exchange to recover. |
+| C073 | Vs Saber | matching windows; all observations | %s: Negative trades in %d/%d swing patterns; choose a defensive reply before re-entry. |
+| C074 | Vs Saber | matching windows; all observations | %s: %d/%d bad saber trades; test a reply as my swing recovers, not another Pull into its arc. |
+| C075 | Vs Saber | matching windows; all observations | %s: %d/%d poor trades during swing patterns; use a saber defense to spare Force. |
+| C076 | Vs Saber | matching windows; all observations | %s: Saber pattern with %d/%d negative trades; reset defense before countering. |
+| C077 | Vs Saber | matching windows; all observations | %s: %d/%d bad saber trades; vary when you enter between my swings instead of charging every time. |
+| C078 | Vs Saber | matching windows; all observations | %s: Observed saber swings and %d/%d poor trades; save Force for defense. |
+| C079 | Vs Saber | matching windows; all observations | %s: %d/%d negative trades vs swings; disengage briefly rather than answer each one. |
+| C080 | Vs Saber | matching windows; all observations | %s: Poor exchanges in %d/%d saber attempts; keep a low-cost defense ready. |
+| C081 | Saber Reply | exchange damage dealt; taken | %s: Whole-window totals: %d dealt, %d taken; keep saber as a low-cost option. |
+| C082 | Saber Reply | exchange damage dealt; taken | %s: %d damage dealt vs %d taken, with saber replies and a good FP trade; keep that option. |
+| C083 | Saber Reply | exchange damage dealt; taken | %s: Window-wide damage was %d dealt, %d taken; consider a saber reply to save Force. |
+| C084 | Saber Reply | exchange damage dealt; taken | %s: %d dealt vs %d taken across this chain; you kept pace in FP with saber replies, too. |
+| C085 | Saber Reply | exchange damage dealt; taken | %s: %d dealt vs %d taken across all attacks; keep the saber reply before adding a costly Pull. |
+| C086 | Saber Reply | exchange damage dealt; taken | %s: Window totals were %d dealt, %d taken; preserve Force with a saber response when useful. |
+| C087 | Saber Reply | exchange damage dealt; taken | %s: %d dealt vs %d taken across this chain; your saber replies coincided with a better trade. |
+| C088 | Saber Reply | exchange damage dealt; taken | %s: You dealt %d and took %d overall; this positive exchange kept pace in net Force. |
+| C089 | Saber Reply | exchange damage dealt; taken | %s: Across all actions: %d dealt, %d taken; favor a saber answer over extra Force costs. |
+| C090 | Saber Reply | exchange damage dealt; taken | %s: %d dealt vs %d taken across this chain; fewer extra casts may preserve that FP advantage. |
+| C091 | Bot Success | matching windows; all observations | %s: Repeated habit: %d/%d positive trades vs bots in won duels; humans may read it differently. |
+| C092 | Bot Success | matching windows; all observations | %s: This pattern: %d/%d positive bot exchanges in won duels; people may answer another way. |
+| C093 | Bot Success | matching windows; all observations | %s: %d/%d positive trades vs bots in won duels; human opponents may read the repeat. |
+| C094 | Bot Success | matching windows; all observations | %s: Your repeated chain had %d/%d positive bot trades in won duels; human replies can differ. |
+| C095 | Bot Success | matching windows; all observations | %s: This habit: %d/%d positive bot trades in won duels; don't assume people will copy it. |
+| C096 | Bot Success | matching windows; all observations | %s: %d/%d positive exchanges with bots in won duels; a person may recognize the repeat. |
+| C097 | Bot Success | matching windows; all observations | %s: Your repeated sequence: %d/%d positive bot trades in won duels; human reads may differ. |
+| C098 | Bot Success | matching windows; all observations | %s: %d/%d bot exchanges were positive in won duels; vary the habit if a human adapts. |
+| C099 | Bot Success | matching windows; all observations | %s: This repeated approach had %d/%d positive bot trades in won duels; human responses vary. |
+| C100 | Bot Success | matching windows; all observations | %s: %d/%d positive bot trades in won duels; use the lesson cautiously against people. |

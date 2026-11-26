@@ -4,7 +4,8 @@
 
 The full current message catalog, mechanic references and lesson conditions are
 in `tutorial-curriculum.md`. It replaces the earlier 75-message catalog with
-150 beginner and 150 advanced messages. The emphasis is force management,
+150 beginner and 150 advanced messages, plus 100 personalized long-chain
+messages. The emphasis is force management,
 health/armor exchanges and force-plus-saber combinations, not generic saber
 movement tips. Numeric examples distinguish configured mechanics from illustrative
 combo arithmetic. Throw steering is explained as a crosshair laser pointer:
@@ -21,7 +22,9 @@ a diagnosis.
 Completed captures need at least 10 events and 12 seconds. New identities need
 three informative duels before coaching. Short opening grip-kick finishes and
 incomplete captures do not trigger advice, including for established players.
-One lesson is queued after a qualifying loss to a bot; busy queues are left
+One lesson is queued after a qualifying loss to a bot. Repeated positive
+exchanges in human wins can instead prompt a bot-specific acknowledgment:
+repetition is observed, not proof the habit works against humans. Busy queues are left
 alone. Beginner and advanced messages are teaching, not skill labels.
 
 ### Capture cvars

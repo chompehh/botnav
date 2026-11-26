@@ -38,7 +38,9 @@ BOOST_AUTO_TEST_CASE(catalog_is_complete_unique_and_fits_chat)
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		for (const char *phrase : {"server", "setting", "rules", "push then pull",
 				"pull then push", "speed and push", "speed plus push", "safe jump",
-				"face your opponent", "aim at the opponent"})
+				"face your opponent", "aim at the opponent", "adjust your aim",
+				"adjust aim", "level 2 saber throw", "level 2 throw",
+				"throw angle", "move a target into a flying saber", "current"})
 			BOOST_CHECK_MESSAGE(text.find(phrase) == std::string::npos, text);
 		if (text.find("bypass") != std::string::npos)
 			++armorBypass;
@@ -53,6 +55,11 @@ BOOST_AUTO_TEST_CASE(catalog_is_complete_unique_and_fits_chat)
 	BOOST_CHECK_EQUAL(tiers[1], 150);
 	BOOST_CHECK_EQUAL(armorBypass, 1);
 	BOOST_CHECK(ptk && drainlock && antiDrain && rageEscape);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[1].text).find("level 3 Push, Pull and Saber Throw") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[2].text).find("stun") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[3].text).find("stun") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[4].text).find("longer") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[5].text).find("Below 20 FP") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(combo_examples_require_live_components_and_show_base_math)

@@ -1,8 +1,242 @@
 #include "g_duel_tutorial.h"
 #include "g_duel_tutorial_sequences.h"
+#include "g_duel_tutorial_chains.h"
 #include <boost/test/unit_test.hpp>
+#include <set>
+#include <string>
 
 BOOST_AUTO_TEST_SUITE(duel_tutorial)
+
+static duel_chain_observation_t observe_long_chain(bool recovery, bool gap, bool won)
+{
+	duel_chain_observation_t o = {};
+	duel_chain_event_t e = {};
+	e.state.selfHealth = 40; e.state.enemyHealth = 80;
+	e.state.selfForce = 80; e.state.enemyForce = 100;
+	G_DuelChainObserve(&o, &e, won);
+	const int actions[] = {DTS_THROW, DTS_THROW, DTS_PULL, DTS_PULL, DTS_KICK, DTS_KICK};
+	for (int t = 100; t <= (recovery ? 2700 : 2600); t += 100)
+	{
+		if (gap && t == 1000) t += 600;
+		e.state.time = t; e.action = 0; e.actor = 0;
+		if (t <= 600) { e.action = actions[t / 100 - 1]; e.actor = (t / 100 - 1) % 2; }
+		if (t == 700 && recovery) e.action = DTC_ACTION_HEAL;
+		e.recoveryReady = 1;
+		e.state.selfForce = t < 700 ? 80 : 10;
+		e.state.enemyDraining = t >= 700;
+		e.state.selfHealth = won ? 40 : (t < 700 ? 40 : 20);
+		e.state.enemyHealth = won ? (t < 700 ? 80 : 20) : 80;
+		e.state.dealt = won && t == 700 ? 60 : 0;
+		e.state.taken = !won && t == 700 ? 20 : 0;
+		G_DuelChainObserve(&o, &e, won);
+	}
+	return o;
+}
+
+BOOST_AUTO_TEST_CASE(long_chains_require_both_sides_and_measure_recovery_opportunities)
+{
+	duel_chain_observation_t o = observe_long_chain(false, false, false);
+	BOOST_REQUIRE_EQUAL(o.count, 1);
+	const duel_chain_window_t &w = o.windows[0];
+	BOOST_CHECK(w.themes & (1u << DTC_LOW_HEALTH));
+	BOOST_CHECK(w.themes & (1u << DTC_DRAIN_EXPOSURE));
+	BOOST_CHECK(w.themes & (1u << DTC_FORCE_DEFICIT));
+	BOOST_CHECK(w.themes & (1u << DTC_VS_PTK));
+	BOOST_CHECK_EQUAL(w.lowHp, 40);
+	BOOST_CHECK_EQUAL(w.otherHp, 80);
+	BOOST_CHECK_EQUAL(w.selfFp, -70);
+	BOOST_CHECK_EQUAL(w.taken, 20);
+	BOOST_CHECK(std::string(w.label).find("PTK") != std::string::npos);
+	o = observe_long_chain(true, false, false);
+	BOOST_REQUIRE_EQUAL(o.count, 1);
+	BOOST_CHECK(!(o.windows[0].themes & (1u << DTC_LOW_HEALTH)));
+	o = observe_long_chain(false, true, false);
+	BOOST_CHECK_EQUAL(o.count, 0);
+	o = observe_long_chain(false, false, true);
+	BOOST_REQUIRE_EQUAL(o.count, 1);
+	BOOST_CHECK(o.windows[0].themes & (1u << DTC_BOT_SUCCESS));
+	BOOST_CHECK(!(o.windows[0].themes & (1u << DTC_VS_PTK)));
+}
+
+BOOST_AUTO_TEST_CASE(long_chain_counter_themes_follow_observed_opponent_actions_not_damage_labels)
+{
+	const int enemyActions[][3] = {
+		{DTS_THROW, DTS_PULL, DTS_KICK},
+		{DTS_PULL, DTS_KICK, DTS_SWING},
+		{DTS_GRIP, DTS_KICK, DTS_SWING},
+		{DTS_SWING, DTS_SWING, DTS_SWING}
+	};
+	const int themes[] = {DTC_VS_PTK, DTC_VS_PK, DTC_VS_GK, DTC_VS_SABER};
+	for (int combo = 0; combo < 4; ++combo)
+		for (int positive = 0; positive <= 1; ++positive)
+		{
+			duel_chain_observation_t o = {};
+			duel_chain_event_t e = {};
+			e.state.selfHealth = e.state.enemyHealth = 100;
+			e.state.selfForce = e.state.enemyForce = 100;
+			G_DuelChainObserve(&o, &e, 0);
+			for (int t = 100; t <= 2600; t += 100)
+			{
+				e.state.time = t; e.action = 0; e.actor = 0;
+				if (t <= 600)
+				{
+					e.actor = (t / 100 - 1) % 2;
+					e.action = e.actor ? enemyActions[combo][t / 200 - 1] : DTS_SWING;
+				}
+				if (t >= 700)
+				{
+					e.state.selfHealth = positive ? 80 : 60;
+					e.state.enemyHealth = positive ? 40 : 80;
+					e.state.selfForce = positive ? 90 : 40;
+					e.state.enemyForce = positive ? 40 : 90;
+				}
+				e.state.dealt = t == 700 ? (positive ? 60 : 20) : 0;
+				e.state.taken = t == 700 ? (positive ? 20 : 40) : 0;
+				G_DuelChainObserve(&o, &e, 0);
+			}
+			BOOST_REQUIRE_EQUAL(o.count, 1);
+			if (positive)
+			{
+				BOOST_CHECK(o.windows[0].themes & (1u << DTC_SABER_REPLY));
+				BOOST_CHECK(!(o.windows[0].themes & (1u << themes[combo])));
+			}
+			else
+			{
+				BOOST_CHECK(o.windows[0].themes & (1u << themes[combo]));
+				BOOST_CHECK(!(o.windows[0].themes & (1u << DTC_SABER_REPLY)));
+			}
+		}
+}
+
+BOOST_AUTO_TEST_CASE(long_chain_start_uses_preceding_timestamp_not_same_frame_after_state)
+{
+	duel_chain_observation_t o = {};
+	duel_chain_event_t e = {};
+	e.state.selfHealth = e.state.enemyHealth = 100;
+	e.state.selfForce = e.state.enemyForce = 100;
+	G_DuelChainObserve(&o, &e, 0);
+	e.state.time = 100; e.state.selfForce = 80;
+	G_DuelChainObserve(&o, &e, 0);
+	e.action = DTS_THROW;
+	G_DuelChainObserve(&o, &e, 0);
+	BOOST_CHECK_EQUAL(o.start.selfForce, 100);
+	BOOST_CHECK_EQUAL(o.start.time, 100);
+	e.state.time = 50;
+	G_DuelChainObserve(&o, &e, 0);
+	BOOST_CHECK(o.failed);
+}
+
+BOOST_AUTO_TEST_CASE(long_chains_reject_truncation_terminal_snapshots_and_invalid_actors)
+{
+	duel_chain_observation_t o = {};
+	duel_chain_event_t e = {};
+	e.state.selfHealth = e.state.enemyHealth = e.state.selfForce = e.state.enemyForce = 100;
+	G_DuelChainObserve(&o, &e, 0);
+	for (int i = 1; i <= 9; ++i)
+	{
+		e.state.time = i * 100; e.actor = i % 2; e.action = DTS_SWING;
+		G_DuelChainObserve(&o, &e, 0);
+	}
+	e.action = 0;
+	for (int t = 1000; t <= 3000; t += 100)
+	{
+		e.state.time = t;
+		G_DuelChainObserve(&o, &e, 0);
+	}
+	BOOST_CHECK_EQUAL(o.count, 0);
+	o = {};
+	e.state.time = 0;
+	G_DuelChainObserve(&o, &e, 0);
+	for (int i = 1; i <= 4; ++i)
+	{
+		e.state.time = i * 100; e.actor = i % 2; e.action = DTS_SWING;
+		G_DuelChainObserve(&o, &e, 0);
+	}
+	e.action = 0;
+	e.state.selfHealth = 0; e.state.time = 500;
+	G_DuelChainObserve(&o, &e, 0);
+	e.state.selfHealth = 100; e.state.time = 2400;
+	G_DuelChainObserve(&o, &e, 0);
+	BOOST_CHECK_EQUAL(o.count, 0);
+	e.actor = 2;
+	G_DuelChainObserve(&o, &e, 0);
+	BOOST_CHECK(o.failed);
+}
+
+BOOST_AUTO_TEST_CASE(long_chain_history_is_receipted_and_separates_bot_evidence)
+{
+	sqlite3 *db = NULL;
+	duel_chain_observation_t o = observe_long_chain(false, false, false);
+	duel_chain_advice_t advice = {};
+	BOOST_REQUIRE_EQUAL(sqlite3_open(":memory:", &db), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "one", &o, 40, 0, &advice), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "one", &o, 40, 0, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	o.windows[1] = o.windows[0]; o.count = 2;
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "two", &o, 40, 0, &advice), SQLITE_OK);
+	BOOST_REQUIRE_GE(advice.theme, 0);
+	BOOST_CHECK_EQUAL(advice.theme, DTC_LOW_HEALTH);
+	BOOST_CHECK_EQUAL(advice.matches, 3);
+	BOOST_CHECK_EQUAL(advice.attempts, 3);
+	BOOST_CHECK_EQUAL(advice.duels, 2);
+	BOOST_REQUIRE_EQUAL(G_DuelChainMark(db, "a", 2, 1, &advice, 40), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 0, "human", &o, 41, 0, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	BOOST_REQUIRE_EQUAL(sqlite3_exec(db, "CREATE TRIGGER fail_chain BEFORE UPDATE ON LocalBotTutorialChainV1 "
+		"BEGIN SELECT RAISE(FAIL,'test'); END", NULL, NULL, NULL), SQLITE_OK);
+	BOOST_CHECK_NE(G_DuelChainRecord(db, "a", 2, 1, "three", &o, 45, 0, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	BOOST_REQUIRE_EQUAL(sqlite3_exec(db, "DROP TRIGGER fail_chain", NULL, NULL, NULL), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "three", &o, 45, 0, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.attempts, 5);
+	BOOST_CHECK_EQUAL(advice.duels, 3);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "three", &o, 45, 1, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	BOOST_REQUIRE_EQUAL(sqlite3_close(db), SQLITE_OK);
+}
+
+BOOST_AUTO_TEST_CASE(bot_win_acknowledgments_require_repeated_positive_bot_windows)
+{
+	sqlite3 *db = NULL;
+	duel_chain_observation_t o = observe_long_chain(false, false, true);
+	duel_chain_advice_t advice = {};
+	BOOST_REQUIRE_EQUAL(sqlite3_open(":memory:", &db), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "one", &o, 40, 1, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	o.windows[1] = o.windows[0]; o.count = 2;
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "two", &o, 40, 1, &advice), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(advice.theme, DTC_BOT_SUCCESS);
+	BOOST_REQUIRE_EQUAL(G_DuelChainMark(db, "a", 2, 1, &advice, 40), SQLITE_OK);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "three", &o, 41, 1, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, -1);
+	BOOST_REQUIRE_EQUAL(G_DuelChainRecord(db, "a", 2, 1, "four", &o, 44, 1, &advice), SQLITE_OK);
+	BOOST_CHECK_EQUAL(advice.theme, DTC_BOT_SUCCESS);
+	BOOST_REQUIRE_EQUAL(sqlite3_close(db), SQLITE_OK);
+}
+
+BOOST_AUTO_TEST_CASE(long_chain_catalog_has_one_hundred_evidence_scoped_messages)
+{
+	std::set<std::string> messages;
+	duel_chain_advice_t advice = {};
+	char text[150];
+	BOOST_REQUIRE_EQUAL(DUEL_CHAIN_MESSAGE_COUNT, 100u);
+	for (int theme = 0; theme < DTC_THEME_COUNT; ++theme)
+		for (int i = 0; i < 10; ++i)
+		{
+			const duel_chain_message_t &lesson = g_duelChainMessages[theme * 10 + i];
+			BOOST_CHECK_EQUAL(lesson.theme, theme);
+			BOOST_CHECK(messages.insert(lesson.text).second);
+			advice.theme = theme;
+			advice.matches = advice.attempts = 999999;
+			advice.sample.lowHp = advice.sample.otherHp = 999999;
+			advice.sample.deficitFp = advice.sample.otherFp = 999999;
+			advice.sample.dealt = advice.sample.taken = 999999;
+			std::memset(advice.sample.label, 'x', sizeof(advice.sample.label) - 1);
+			advice.sample.label[sizeof(advice.sample.label) - 1] = '\0';
+			BOOST_REQUIRE(G_DuelChainRender(&advice, i, text, sizeof(text)));
+			BOOST_CHECK_LT(std::strlen(text), 150u);
+		}
+}
 
 BOOST_AUTO_TEST_CASE(low_health_attacks_require_evidence_and_available_heal)
 {
