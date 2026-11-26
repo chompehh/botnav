@@ -5426,8 +5426,8 @@ BOOST_AUTO_TEST_CASE( air_side_switch_leads_the_velocity_turn )
 
 BOOST_AUTO_TEST_CASE( defenders_recover_stolen_flags_or_escort_a_closer_carrier )
 {
-	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
-	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, 0.0f, -1.0f), BOT_SFJ_GOAL_FLAG_ATTACK );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, -1.0f, -1.0f), BOT_SFJ_GOAL_FLAG_DEFEND );
+	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(0, 0.0f, -1.0f), BOT_SFJ_GOAL_FLAG_DEFEND );
 	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, -1.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
 	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 200.0f, 1000.0f), BOT_SFJ_GOAL_FLAG_RECOVER );
 	BOOST_CHECK_EQUAL( BotSFJ_DefenderGoal(1, 1000.0f, 200.0f), BOT_SFJ_GOAL_ESCORT );
@@ -5918,20 +5918,78 @@ BOOST_AUTO_TEST_CASE( interference_never_earns_either_outcome_and_soak_preserves
 	BOOST_CHECK(BotSFJ_NavigationAwake(0, 0, 0));
 }
 
-BOOST_AUTO_TEST_CASE( ffa_routes_yield_on_landing_at_half_target_distance )
+BOOST_AUTO_TEST_CASE( combat_travel_requires_a_fast_separating_opponent )
 {
-	BOOST_CHECK(BotSFJ_FFACombatPriority(1, 1, 1, 2048, 4096, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, 2049, 4096, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 0, 1, 100, 4096, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 0, 100, 4096, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(0, 1, 1, 100, 4096, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, 100, 4096, 1));
-	BOOST_CHECK(BotSFJ_FFACombatPriority(1, 1, 1, 100, 0, 0));
-	BOOST_CHECK(!BotSFJ_FFACombatPriority(1, 1, 1, NAN, 4096, 0));
 	BOOST_CHECK(BotSFJ_OpponentEscaping(500, 320, 500, 300));
 	BOOST_CHECK(!BotSFJ_OpponentEscaping(500, 320, 500, -300));
 	BOOST_CHECK(!BotSFJ_OpponentEscaping(100, 320, 500, 300));
 	BOOST_CHECK(!BotSFJ_OpponentEscaping(500, 320, 300, 200));
+}
+
+BOOST_AUTO_TEST_CASE( nearby_combat_prevents_route_restarts_but_finishes_airborne_hops )
+{
+	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 1024, 4096, 0, 0, 0));
+	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 2048, 4096, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 2049, 4096, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(0, 1, 64, 4096, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 0, 64, 4096, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 64, 4096, 1, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 64, 4096, 0, 1, 0));
+	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 64, 4096, 1, 1, 1));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, NAN, 4096, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 100, NAN, 0, 0, 0));
+	BOOST_CHECK(BotNav_RouteCombatPriority(1, 1, 512, 0, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 513, 0, 0, 0, 0));
+	BOOST_CHECK(!BotNav_RouteCombatPriority(1, 1, 256, 128, 0, 0, 0));
+}
+
+BOOST_AUTO_TEST_CASE( flag_threats_override_carrier_travel_only_near_the_flag )
+{
+	BOOST_CHECK(BotNav_FlagThreat(1, 512, 768));
+	BOOST_CHECK(!BotNav_FlagThreat(1, 513, 768));
+	BOOST_CHECK(!BotNav_FlagThreat(1, 512, 769));
+	BOOST_CHECK(!BotNav_FlagThreat(0, 100, 100));
+	BOOST_CHECK(!BotNav_FlagThreat(1, -1, 100));
+	BOOST_CHECK(!BotNav_FlagThreat(1, 100, NAN));
+}
+
+BOOST_AUTO_TEST_CASE( carriers_wait_for_return_support_and_retrieve_when_alone )
+{
+	BOOST_CHECK(BotSFJ_CarrierWaits(1, 1, 256, 1));
+	BOOST_CHECK(!BotSFJ_CarrierWaits(1, 1, 256, 0));
+	BOOST_CHECK(!BotSFJ_CarrierWaits(1, 0, 256, 1));
+	BOOST_CHECK(!BotSFJ_CarrierWaits(0, 1, 256, 1));
+	BOOST_CHECK(!BotSFJ_CarrierWaits(1, 1, 512, 1));
+	BOOST_CHECK(!BotSFJ_CarrierWaits(1, 1, NAN, 1));
+	BOOST_CHECK(BotSFJ_ReturnForWaitingCarrier(0, 1, 1));
+	BOOST_CHECK(!BotSFJ_ReturnForWaitingCarrier(1, 1, 1));
+	BOOST_CHECK(!BotSFJ_ReturnForWaitingCarrier(0, 0, 1));
+	BOOST_CHECK(!BotSFJ_ReturnForWaitingCarrier(0, 1, 0));
+}
+
+BOOST_AUTO_TEST_CASE( flag_force_moves_opponents_away_not_toward_the_flag )
+{
+	const float self[3] = {0, 0, 0};
+	const float enemy[3] = {200, 0, 0};
+	const float between[3] = {100, 0, 0};
+	const float beyond[3] = {300, 0, 0};
+	const float behind[3] = {-100, 0, 0};
+	const float offAxis[3] = {100, 129, 0};
+	const float high[3] = {100, 0, 97};
+	const float invalid[3] = {NAN, 0, 0};
+	const float diagonalEnemy[3] = {200, 200, 0};
+	const float diagonalBetween[3] = {100, 100, 0};
+	const float diagonalBeyond[3] = {300, 300, 0};
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, between), 1);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, beyond), 2);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, enemy), 1);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, behind), 0);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, offAxis), 0);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, high), 0);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, enemy, invalid), 0);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, self, between), 0);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, diagonalEnemy, diagonalBetween), 1);
+	BOOST_CHECK_EQUAL(BotNav_FlagForceChoice(self, diagonalEnemy, diagonalBeyond), 2);
 }
 
 BOOST_AUTO_TEST_CASE( route_diversity_prefers_underused_exits_without_inventing_goal_gain )

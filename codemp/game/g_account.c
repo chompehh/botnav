@@ -3,6 +3,8 @@
 #include "g_duel_elo.h"
 #include "g_duel_capture.h"
 #include "g_duel_session.h"
+#include "g_duel_tutorial.h"
+#include "g_duel_tutorial_lessons.h"
 #include "g_ctf_tracking.h"
 #include "g_account.h"
 #include "g_route_edit.h"
@@ -236,6 +238,9 @@ typedef struct
 	int aimMask, aimEndpointValid;
 	int selfFooting, enemyFooting;
 	int torsoTimer, torsoAnim;
+	int tutorialPowersActive, tutorialHandExtend, tutorialLegsAnim;
+	int tutorialEnemyPowersActive;
+	int tutorialKickTarget;
 	int saberPositionValid;
 	vec3_t saberPosition, aimEndpoint;
 	int learnedStimulus, learnedResponse, learnedFollow, learnedBonus, learnedContext;
@@ -338,6 +343,7 @@ typedef struct
 {
 	qboolean active;
 	int startTime;
+	int tutorialSpeaker;
 	int eventCount;
 	int lastForce;
 	int lowestForce;
@@ -821,6 +827,12 @@ static void G_EnsureLocalDuelTrackingSchema(sqlite3 *db)
 		return;
 	if (g_duelTrackingSchemaReady && !Q_stricmp(g_duelTrackingSchemaPath, LOCAL_DUELTRACK_DB_PATH))
 		return;
+
+	s = sqlite3_exec(db, "CREATE TABLE IF NOT EXISTS LocalBotCounterV1("
+		"key INTEGER NOT NULL,choice INTEGER NOT NULL,samples INTEGER NOT NULL,"
+		"net INTEGER NOT NULL,PRIMARY KEY(key,choice))", NULL, NULL, NULL);
+	if (s != SQLITE_OK)
+		G_TrackedDBError("create counter learning evidence", db, s);
 
 	sql = "CREATE TABLE IF NOT EXISTS LocalDuelTrackSummary("
 		"id INTEGER PRIMARY KEY, start_time UNSIGNED INTEGER, end_time UNSIGNED INTEGER, duration UNSIGNED INTEGER, "
@@ -2056,6 +2068,9 @@ static void G_FillTrackedEventContext(tracked_duel_event_t *event, gentity_t *se
 	event->targetYawError = event->targetPitchError = -1.0f;
 	event->selfFooting = event->enemyFooting = -1;
 	event->torsoTimer = event->torsoAnim = -1;
+	event->tutorialPowersActive = event->tutorialEnemyPowersActive = 0;
+	event->tutorialHandExtend = event->tutorialLegsAnim = -1;
+	event->tutorialKickTarget = -1;
 	event->aimMask = -1;
 	event->aimEndpointValid = 0;
 	if (!self || !self->client)
@@ -2085,6 +2100,11 @@ static void G_FillTrackedEventContext(tracked_duel_event_t *event, gentity_t *se
 	event->saberMove = self->client->ps.saberMove;
 	event->torsoTimer = self->client->ps.torsoTimer;
 	event->torsoAnim = self->client->ps.torsoAnim;
+	event->tutorialPowersActive = self->client->ps.fd.forcePowersActive;
+	event->tutorialHandExtend = self->client->ps.forceHandExtend;
+	event->tutorialLegsAnim = self->client->ps.legsAnim;
+	if (self->client->ps.forceKickFlip > 0)
+		event->tutorialKickTarget = self->client->ps.forceKickFlip - 1;
 	event->selfHealth = (short)self->health;
 	event->selfArmor = (short)self->client->ps.stats[STAT_ARMOR];
 	event->selfForce = (short)self->client->ps.fd.forcePower;
@@ -2136,6 +2156,7 @@ static void G_FillTrackedEventContext(tracked_duel_event_t *event, gentity_t *se
 		event->enemyHealth = (short)enemy->health;
 		event->enemyArmor = (short)enemy->client->ps.stats[STAT_ARMOR];
 		event->enemyForce = (short)enemy->client->ps.fd.forcePower;
+		event->tutorialEnemyPowersActive = enemy->client->ps.fd.forcePowersActive;
 		event->enemyYaw = enemy->client->ps.viewangles[YAW];
 		event->enemyPitch = enemy->client->ps.viewangles[PITCH];
 		event->enemySaberDefense = G_BotLearnDefenseState(enemy);
@@ -2860,445 +2881,399 @@ static void G_QueueBotTutorialMessage(int botClientNum, int targetClientNum, con
 		queue->nextSendTime = level.time;
 }
 
-static int G_GetTrackedIssueConfidence(const duel_advice_session_state_t *session, duel_track_issue_t issue)
+static void G_TutorialCurriculumInputs(gentity_t *player,
+	duel_curriculum_inputs_t *inputs, unsigned int *available)
 {
-	if (!session || issue < 0 || issue >= DUEL_TRACK_ISSUE_COUNT)
-		return 0;
-	return session->sessionIssueCounts[issue] + session->historyIssueCounts[issue];
-}
+	const playerState_t *ps = &player->client->ps;
+	int power, powerLevel;
 
-static qboolean G_IsTrackedIntermediateCandidate(const tracked_duel_runtime_t *runtime)
-{
-	if (!runtime)
-		return qfalse;
-	if (runtime->totalForceSpent >= 80 && runtime->lowForceWindows <= 1 && runtime->lateDefenseSpends <= 0)
-		return qtrue;
-	if (runtime->spentByState[DUEL_TRACK_STATE_ADVANTAGE] >= 20)
-		return qtrue;
-	return qfalse;
-}
-
-static qboolean G_ShouldSuppressRepeatedIssueAdvice(const tracked_duel_runtime_t *runtime, duel_advice_session_state_t *session, duel_track_issue_t issue)
-{
-	unsigned int opponentHash;
-
-	if (!runtime || !session || issue < 0 || issue >= DUEL_TRACK_ISSUE_COUNT)
+	memset(inputs, 0, sizeof(*inputs));
+	*available = ps->fd.forcePowersKnown & ~g_forcePowerDisable.integer;
+	if (ps->stats[STAT_RESTRICTIONS] & JAPRO_RESTRICT_BHOP)
+		*available &= ~((1u << FP_SPEED) | (1u << FP_RAGE));
+	for (power = 0; power < NUM_FORCE_POWERS; power++)
 	{
-		return qfalse;
-	}
-	opponentHash = G_HashTrackedIdentityString(runtime->opponentKey);
-	if (session->lastIssueAdvised != issue)
-	{
-		return qfalse;
-	}
-	if (session->lastIssueAdviceDuel != session->duelsSeen)
-	{
-		return qfalse;
-	}
-	if (session->lastOpponentHash != opponentHash)
-	{
-		return qfalse;
-	}
-
-	return (level.time < session->lastIssueAdviceTime + 20000) ? qtrue : qfalse;
-}
-
-static void G_MarkTrackedIssueAdvice(duel_advice_session_state_t *session, const tracked_duel_runtime_t *runtime, duel_track_issue_t issue)
-{
-	if (!session || !runtime || issue < 0 || issue >= DUEL_TRACK_ISSUE_COUNT)
-	{
-		return;
-	}
-
-	session->lastIssueAdvised = issue;
-	session->lastIssueAdviceTime = level.time;
-	session->lastIssueAdviceDuel = session->duelsSeen;
-	session->lastOpponentHash = G_HashTrackedIdentityString(runtime->opponentKey);
-}
-
-static void G_FormatTrackedSequenceLabel(const char *label, char *out, int outSize)
-{
-	int i, outIndex;
-	qboolean capitalizeNext = qtrue;
-
-	if (!out || outSize <= 0)
-		return;
-	out[0] = '\0';
-
-	if (!label || !label[0])
-	{
-		Q_strncpyz(out, "sequence", outSize);
-		return;
-	}
-
-	for (i = 0, outIndex = 0; label[i] && outIndex < outSize - 1; i++)
-	{
-		char ch = label[i];
-
-		if (ch == '_')
+		powerLevel = ps->fd.forcePowerLevel[power];
+		if (powerLevel <= FORCE_LEVEL_0 || powerLevel >= NUM_FORCE_POWER_LEVELS)
 		{
-			out[outIndex++] = ' ';
-			capitalizeNext = qtrue;
+			*available &= ~(1u << power);
 			continue;
 		}
-		if (capitalizeNext && ch >= 'a' && ch <= 'z')
+		inputs->minimumFP[power] = forcePowerNeeded[powerLevel][power];
+		inputs->validMinimums |= 1u << power;
+		if (power != FP_LEVITATION)
 		{
-			ch = (char)(ch - ('a' - 'A'));
+			inputs->actionCost[power] = forcePowerNeeded[powerLevel][power];
+			inputs->validActionCosts |= 1u << power;
 		}
-		else if (!capitalizeNext && ch >= 'A' && ch <= 'Z')
+	}
+	inputs->actionCost[FP_GRIP] = GRIP_DRAIN_AMOUNT;
+	inputs->actionCost[FP_DRAIN] = 0;
+	inputs->minimumFP[FP_LIGHTNING] = inputs->minimumFP[FP_DRAIN] = 25;
+	if (player->client->sess.raceMode)
+	{
+		inputs->minimumFP[FP_SPEED] = 75;
+		inputs->actionCost[FP_SPEED] = 75;
+	}
+	if (g_tweakForce.integer & FT_WEAKPULL)
+		inputs->validActionCosts &= ~(1u << FP_PULL);
+	if (g_tweakWeapons.integer & WT_TRIBES)
+	{
+		inputs->minimumFP[FP_PROTECT] = 50;
+		inputs->minimumFP[FP_PUSH] = 95;
+		inputs->minimumFP[FP_ABSORB] = 30;
+		inputs->actionCost[FP_PROTECT] = 40;
+		inputs->actionCost[FP_ABSORB] = 20;
+		inputs->validActionCosts &= ~(1u << FP_PUSH);
+	}
+	inputs->values[DUEL_VALUE_GRIP_START_COST] = GRIP_DRAIN_AMOUNT;
+	inputs->values[DUEL_VALUE_GRIP_HOLD_COST] = 1;
+	inputs->values[DUEL_VALUE_GRIP_HOLD_MS] = 100;
+	inputs->values[DUEL_VALUE_DRAIN_SHOT_COST] = 5;
+	inputs->values[DUEL_VALUE_DRAIN_SHOT_MS] = 50;
+	inputs->values[DUEL_VALUE_THROW_BASE_DAMAGE] = SABER_THROWN_HIT_DAMAGE;
+	inputs->values[DUEL_VALUE_LIGHTNING_SHOT_MS] = 50;
+	inputs->values[DUEL_VALUE_RAGE_HEALTH_DRAIN] = 2;
+	inputs->validValues = (1u << DUEL_VALUE_GRIP_START_COST) |
+		(1u << DUEL_VALUE_GRIP_HOLD_COST) | (1u << DUEL_VALUE_GRIP_HOLD_MS) |
+		(1u << DUEL_VALUE_DRAIN_SHOT_COST) | (1u << DUEL_VALUE_DRAIN_SHOT_MS) |
+		(1u << DUEL_VALUE_THROW_BASE_DAMAGE) | (1u << DUEL_VALUE_LIGHTNING_SHOT_MS) |
+		(1u << DUEL_VALUE_RAGE_HEALTH_DRAIN);
+	powerLevel = ps->fd.forcePowerLevel[FP_HEAL];
+	if (powerLevel >= FORCE_LEVEL_1 && powerLevel <= FORCE_LEVEL_3)
+	{
+		inputs->values[DUEL_VALUE_HEAL_GAIN] = powerLevel == FORCE_LEVEL_3 ? 25 :
+			powerLevel == FORCE_LEVEL_2 ? 10 : 5;
+		inputs->validValues |= 1u << DUEL_VALUE_HEAL_GAIN;
+	}
+	powerLevel = ps->fd.forcePowerLevel[FP_RAGE];
+	if (powerLevel >= FORCE_LEVEL_1 && powerLevel <= FORCE_LEVEL_3)
+	{
+		inputs->values[DUEL_VALUE_RAGE_DRAIN_MS] = powerLevel * 150;
+		inputs->validValues |= 1u << DUEL_VALUE_RAGE_DRAIN_MS;
+	}
+	powerLevel = ps->fd.forcePowerLevel[FP_LIGHTNING];
+	if (powerLevel >= FORCE_LEVEL_1 && powerLevel <= FORCE_LEVEL_3)
+	{
+		inputs->values[DUEL_VALUE_LIGHTNING_SHOT_COST] = forcePowerNeeded[powerLevel][FP_LIGHTNING];
+		inputs->validValues |= 1u << DUEL_VALUE_LIGHTNING_SHOT_COST;
+		if (ps->weapon == WP_SABER)
 		{
-			ch = (char)(ch + ('a' - 'A'));
+			inputs->values[DUEL_VALUE_LIGHTNING_BASE_MAX] = g_fixLightning.integer > 1 ? 1 : 2;
+			inputs->validValues |= 1u << DUEL_VALUE_LIGHTNING_BASE_MAX;
 		}
-		out[outIndex++] = ch;
-		capitalizeNext = qfalse;
 	}
-	out[outIndex] = '\0';
-}
-
-static void G_QueueManualBasicsAdvice(int botClientNum, int targetClientNum, int duelIndex, duel_advice_session_state_t *session)
-{
-	int slot;
-	static const char *manualBasics[] = {
-		"PK means Pull Kick. Use it after committed movement, knockdowns, or saber recovery windows.",
-		"GK means Grip Kick. Keep grip and kick binds clean so timing stays reliable under pressure.",
-		"PTK means Pull-Throw-Kick. Threaten space first, then convert only on real recovery windows.",
-		"Force management first: preserve exit force before re-committing to pressure.",
-		"Lane basics: a lane is your approach angle into threat range; rotate lanes to stay less readable.",
-		"After lane basics are stable, layer movement variation and timing changes into your entries."
-	};
-
-	slot = duelIndex;
-	if (slot < 0)
-		slot = 0;
-	G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, manualBasics,
-		(int)(sizeof(manualBasics) / sizeof(manualBasics[0])), slot, session);
-}
-
-static void G_QueueManualMetaAdvice(int botClientNum, int targetClientNum, int rotation, duel_advice_session_state_t *session)
-{
-	static const char *manualMeta[] = {
-		"Meta tempo: bait first, then spend into the lane they just exposed.",
-		"Meta rhythm: rotate entry timing each exchange so they cannot pre-read cadence.",
-		"Meta reserve: keep exit force banked, then convert advantage with short checks.",
-		"Meta spacing: camera and footwork should be clean before hard grip/pull commits.",
-		"Meta composure: hide panic tells by keeping movement quality steady at low HP.",
-		"Meta punish: if they copy your last option, change lane immediately and counter."
-	};
-	int slot = rotation;
-	if (slot < 0)
-		slot = 0;
-	G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, manualMeta,
-		(int)(sizeof(manualMeta) / sizeof(manualMeta[0])), slot, session);
-}
-
-static void G_QueueManualIntermediateAdvice(int botClientNum, int targetClientNum, int rotation, duel_advice_session_state_t *session)
-{
-	static const char *manualIntermediate[] = {
-		"Intermediate: shape pull pressure with throw feints, then convert only on exposed recovery.",
-		"Intermediate tempo: spend in bursts, reset, then re-enter from lateral movement.",
-		"Intermediate anti-grip: vary delay, down-state, and exit direction to break reads.",
-		"Intermediate side-kick: use it as spacing control, but respect regen pause until landing.",
-		"Intermediate anti-throw: punish recall windows and return path, not just launch timing."
-	};
-	int slot = rotation;
-	if (slot < 0)
-		slot = 0;
-	G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, manualIntermediate,
-		(int)(sizeof(manualIntermediate) / sizeof(manualIntermediate[0])), slot, session);
-}
-
-static void G_QueueManualGenericAdvice(int botClientNum, int targetClientNum, tracked_duel_runtime_t *runtime, qboolean loggedIn, duel_advice_session_state_t *session)
-{
-	int rotation;
-	static const char *manualGeneric[] = {
-		"Balanced offense rule: split pressure across PTK/pull-throw, saber checks, and GK.",
-		"Drain discipline: controlled taps beat panic holds and keep force economy efficient.",
-		"If punish lane is still live, delay stand-up to deny free follow-up damage.",
-		"Anti-throw discipline: track blade return path and punish recall windows.",
-		"GK variation wins: rotate kick type, turn angle, and yank timing every attempt.",
-		"Entry strategy: use movement gap and strafe pressure before force commitment.",
-		"Anti-drain strategy: rotate counters so one repeated answer cannot be farmed.",
-		"Map strategy: know chase routes, hide routes, and force ranges before hard commits.",
-		"Spacing control: close only when camera and footwork constrain snap answers.",
-		"Short saber checks can create safer pull/grip conversions than force-first entries."
-	};
-
-	rotation = (session ? session->duelsSeen : 0) + (runtime ? runtime->eventCount : 0);
-	if (rotation < 0)
-		rotation = 0;
-	G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, manualGeneric,
-		(int)(sizeof(manualGeneric) / sizeof(manualGeneric[0])), rotation, session);
-
-	if (loggedIn && session && session->historyDuels > 0)
+	powerLevel = ps->fd.forcePowerLevel[FP_DRAIN];
+	if (!player->client->sess.raceMode && !JVM_IsMode(level.gametype) &&
+		powerLevel >= FORCE_LEVEL_1 && powerLevel <= FORCE_LEVEL_3)
 	{
-		static const char *historyBlend[] = {
-			"I’m factoring your history now, so repeated habits will matter more than one noisy round.",
-			"History loaded—coaching will track your recurring patterns, not just one duel snapshot."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, historyBlend,
-			(int)(sizeof(historyBlend) / sizeof(historyBlend[0])), rotation, session);
-	}
-	else
-	{
-		static const char *sessionCoaching[] = {
-			"Session coaching is live—keep fundamentals clean and I’ll scale the advice with you.",
-			"Good discipline this session will unlock tighter matchup-specific tips."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, sessionCoaching,
-			(int)(sizeof(sessionCoaching) / sizeof(sessionCoaching[0])), rotation, session);
-	}
-}
-
-static void G_QueueManualIssueAdvice(int botClientNum, int targetClientNum, duel_track_issue_t issue, duel_advice_session_state_t *session)
-{
-	switch (issue)
-	{
-	case DUEL_TRACK_ISSUE_LOW_FORCE:
-	{
-		static const char *messages[] = {
-			"I’ve noticed your force crashes late in exchanges. Keep reserve force for exits before re-engaging.",
-			"I’m seeing force economy leaks under pressure. Short drain taps and calmer spend should help."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_GRIP_CONTROL:
-	{
-		static const char *messages[] = {
-			"I’ve noticed their grip control is getting clean reads. Randomize breakout timing and direction.",
-			"I’m seeing predictable grip lanes. Mix down-state delay, pull breaks, and off-angle exits."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_SABER_THROW:
-	{
-		static const char *messages[] = {
-			"I’ve noticed saber-throw punishes landing too often. Read path early, then hit the return window.",
-			"I’m seeing late toss defense. Keep sticky crosshair and deny easy entry lanes."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_KNOCKDOWN:
-	{
-		static const char *messages[] = {
-			"I’ve noticed knockdown follow-ups costing you. Recover with safer exits before full reset.",
-			"I’m seeing punishable getups. Stay down through danger, then stand into movement, not into panic."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_LATE_DEFENSE:
-	{
-		static const char *messages[] = {
-			"I’ve noticed your defense turns on late. Pre-activate before the collapse frame.",
-			"I’m seeing last-second reactions repeat. Stabilize early, then counter with controlled trades."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_FORCED_ENTRIES:
-	{
-		static const char *messages[] = {
-			"I’ve noticed forced entries into ready defense. Feint first, then convert on reaction.",
-			"I’m seeing readable approach timing. Add lateral delay to desync their counter window."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	case DUEL_TRACK_ISSUE_LINEAR_ENTRIES:
-	{
-		static const char *messages[] = {
-			"I’ve noticed linear entries getting read. Rotate angles and vary your lane order.",
-			"I’m seeing repeated straight-line pressure. Shift to strafe-led entries with staged PTK threat."
-		};
-		G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, messages,
-			(int)(sizeof(messages) / sizeof(messages[0])), G_GetTrackedIssueConfidence(session, issue), session);
-		break;
-	}
-	default:
-		break;
-	}
-}
-
-static void G_MaybeQueueTrackedLoginAdvice(int botClientNum, int targetClientNum, duel_advice_session_state_t *session, qboolean loggedIn)
-{
-	static const char *loginAdvice[] = {
-		"Tip: use /login or /register once to save progress and coaching history between sessions."
-	};
-
-	if (!session || loggedIn || session->loginReminderSent ||
-		session->duelsSeen < TRACKED_DUEL_ADVICE_LOGIN_MIN_DUELS)
-	{
-		return;
-	}
-
-	G_QueueRotatingTutorialMessage(botClientNum, targetClientNum, loginAdvice,
-		(int)(sizeof(loginAdvice) / sizeof(loginAdvice[0])), session->duelsSeen, session);
-	session->loginReminderSent = qtrue;
-}
-
-static void G_MaybeQueueBotTutorial(tracked_duel_runtime_t *loserRuntime, gentity_t *winner, gentity_t *loser)
-{
-	int botClientNum;
-	duel_advice_session_state_t *session;
-	duel_track_issue_t issue;
-	duel_track_skill_band_t skillBand;
-	qboolean loggedIn;
-	qboolean basicsWindow;
-	qboolean lowSignalDuel;
-	qboolean allowSpecificIssue;
-	qboolean suppressRepeatedIssueAdvice;
-	int duelDuration;
-
-	if (!bot_tutorial.integer || bot_nochat.integer || !loserRuntime || !winner || !loser ||
-		!winner->client || !loser->client)
-		return;
-	if (!(winner->r.svFlags & SVF_BOT) || (loser->r.svFlags & SVF_BOT))
-		return;
-
-	botClientNum = winner->s.number;
-	session = G_GetTrackedAdviceSession(loser, loserRuntime);
-	if (!session)
-		return;
-	loggedIn = (loserRuntime->identityKind == DUEL_TRACK_ID_LOGIN) ? qtrue : qfalse;
-	if (loggedIn)
-		G_LoadTrackedAdviceHistory(session);
-	issue = G_MapPrimaryIssueToTrackedIssue(loserRuntime->primaryIssue);
-	if (issue < DUEL_TRACK_ISSUE_COUNT)
-		session->sessionIssueCounts[issue]++;
-	duelDuration = (loserRuntime->eventCount > 0) ? loserRuntime->events[loserRuntime->eventCount - 1].relTime : 0;
-	lowSignalDuel = (loserRuntime->eventCount < TRACKED_DUEL_PATTERN_MIN_EVENTS ||
-		duelDuration < TRACKED_DUEL_PATTERN_MIN_DURATION_MS) ? qtrue : qfalse;
-	allowSpecificIssue = (issue < DUEL_TRACK_ISSUE_COUNT && G_TrackedAdviceIsSpecificAllowed(loserRuntime, session, issue)) ? qtrue : qfalse;
-	suppressRepeatedIssueAdvice = allowSpecificIssue ? G_ShouldSuppressRepeatedIssueAdvice(loserRuntime, session, issue) : qfalse;
-	skillBand = G_GetTrackedSkillBand(loserRuntime, session, 1, 0);
-	g_botTutorialQueues[botClientNum].cooldownMs = TRACKED_DUEL_TUTORIAL_COOLDOWN_MS;
-	if (!lowSignalDuel && G_DuelCaptureCanRankOutcomes(&loserRuntime->capture))
-	{
-		int i, hits = 0, lastHit = -1000, brokenHits = 0, lastBrokenHit = -1000;
-		static const char *recoveryAdvice[] = {
-			"Hits landed while you advanced straight during saber return. Finish recovery at safer range, then re-enter laterally."
-		};
-		static const char *brokenAdvice[] = {
-			"Hits landed as you advanced straight during broken parry/bounce. Let that recovery clear at safer range, then re-enter laterally."
-		};
-		for (i = 0; i < loserRuntime->eventCount; i++)
+		inputs->values[DUEL_VALUE_DRAIN_TARGET_LOSS] = powerLevel + 1;
+		inputs->values[DUEL_VALUE_DRAIN_HEAL_GAIN] = powerLevel + 1;
+#if _draintest
+		if (powerLevel == FORCE_LEVEL_3)
 		{
-			const tracked_duel_event_t *event = &loserRuntime->events[i];
-			if (event->eventType == DUEL_TRACK_EVENT_DAMAGE && event->relTime - lastHit >= 1000 &&
-				event->selfFooting == BOTLEARN_FOOTING_ADVANCE &&
-				G_DuelCaptureRecoveryReentry(event->amount, event->recovery, event->radialSpeed,
-					event->forwardmove, event->rightmove))
+			inputs->values[DUEL_VALUE_DRAIN_TARGET_LOSS] = g_forceDrainDamage.integer;
+			inputs->values[DUEL_VALUE_DRAIN_HEAL_GAIN] = g_forceDrainDamage.integer;
+		}
+#else
+		if (powerLevel == FORCE_LEVEL_3 && (g_tweakForce.integer & FT_DRAINDMGNERF))
+			inputs->values[DUEL_VALUE_DRAIN_TARGET_LOSS] = 3;
+#endif
+		inputs->validValues |= (1u << DUEL_VALUE_DRAIN_TARGET_LOSS) |
+			(1u << DUEL_VALUE_DRAIN_HEAL_GAIN);
+	}
+#if _draintest
+	inputs->values[DUEL_VALUE_DRAIN_TARGET_REGEN_DELAY_MS] = g_forceDrainTargetRegenDelay.integer;
+	inputs->values[DUEL_VALUE_DRAIN_SELF_REGEN_DELAY_MS] = g_forceDrainSelfRegenDelay.integer;
+#else
+	inputs->values[DUEL_VALUE_DRAIN_TARGET_REGEN_DELAY_MS] = 800;
+	inputs->values[DUEL_VALUE_DRAIN_SELF_REGEN_DELAY_MS] = 500;
+#endif
+	if (!(g_tweakForce.integer & FT_FIXLINEDRAIN))
+		inputs->validValues |= (1u << DUEL_VALUE_DRAIN_TARGET_REGEN_DELAY_MS) |
+			(1u << DUEL_VALUE_DRAIN_SELF_REGEN_DELAY_MS);
+	if (g_flipKick.integer >= 3 && g_flipKickDamageScale.value != 0.0f)
+	{
+		inputs->values[DUEL_VALUE_FLIPKICK_BASE_DAMAGE] = 20;
+		inputs->validValues |= 1u << DUEL_VALUE_FLIPKICK_BASE_DAMAGE;
+	}
+}
+
+static qboolean G_TutorialCurriculumMessage(gentity_t *player, qboolean fullForce,
+	int rotation, qboolean arcade, char *message, size_t messageSize)
+{
+	duel_curriculum_inputs_t inputs;
+	unsigned int available;
+	int selected;
+
+	G_TutorialCurriculumInputs(player, &inputs, &available);
+	selected = G_DuelCurriculumSelect(rotation > 0 ? rotation - 1 : 0,
+		fullForce && !arcade, available, player->client->ps.fd.forcePowerLevel,
+		&inputs, message, messageSize);
+	if (selected < 0)
+	{
+		trap->Print("Tutorial: no eligible curriculum message could be rendered.\n");
+		return qfalse;
+	}
+	return qtrue;
+}
+
+static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
+	tracked_duel_runtime_t *runtime, qboolean canCoach)
+{
+	sqlite3 *db = NULL;
+	duel_tutorial_history_t history;
+	duel_tutorial_observation_t observation;
+	duel_tutorial_patterns_t patterns;
+	duel_sequence_observation_t sequenceObservation;
+	duel_sequence_history_t sequenceHistory;
+	bot_tutorial_queue_t *queue = NULL;
+	int duration, informative, i, rc, pattern;
+	char message[MAX_SAY_TEXT];
+	char sequenceDuel[128];
+	int sequenceChoice = -1;
+	static const char *const sequenceNames[DTS_COUNT] = {
+		"throw-pull-kick", "grip-kick", "pull-kick", "drain-kick",
+		"drain-pull", "drain-swing", "drain", "pull-swing",
+		"grip-swing", "push-swing", "pull vs drain", "push vs drain"
+	};
+	static const char *const powerNames[] = {
+		"push", "pull", "grip", "drain", "rage", "absorb", "protect", "heal", "speed", "seeing"
+	};
+	qboolean fullForce;
+
+	if (!player || !player->client || !opponent || !runtime ||
+		(player->r.svFlags & SVF_BOT) || !runtime->identityKey[0] ||
+		(runtime->identityKind != DUEL_TRACK_ID_LOGIN && runtime->identityKind != DUEL_TRACK_ID_IP))
+		return;
+	duration = runtime->eventCount ? runtime->events[runtime->eventCount - 1].relTime : 0;
+	informative = G_DuelTutorialInformative(runtime->eventCount, duration,
+		G_DuelCaptureCanRankOutcomes(&runtime->capture));
+	if (!informative)
+	{
+		if (canCoach && (opponent->r.svFlags & SVF_BOT) &&
+			g_botTutorialQueues[opponent->s.number].targetClientNum == player->s.number)
+			G_ClearBotTutorialQueue(opponent->s.number);
+		return;
+	}
+	fullForce = runtime->duelType == 1;
+	memset(&sequenceObservation, 0, sizeof(sequenceObservation));
+	memset(&sequenceHistory, 0, sizeof(sequenceHistory));
+	G_DuelTutorialObserveInit(&observation);
+	for (i = 0; i < runtime->eventCount; i++)
+	{
+		const tracked_duel_event_t *event = &runtime->events[i];
+		duel_tutorial_event_t tutorialEvent;
+		vec3_t toward;
+		memset(&tutorialEvent, 0, sizeof(tutorialEvent));
+		tutorialEvent.time = event->relTime;
+		if (event->eventType == DUEL_TRACK_EVENT_FORCE && !event->note[0] &&
+			!(event->tutorialEnemyPowersActive & (1 << FP_DRAIN)) &&
+			event->power >= 0 && event->power < DUEL_TRACK_POWER_UNKNOWN && event->amount > 0)
+		{
+			tutorialEvent.type = DUEL_TUTORIAL_EVENT_SPEND;
+			tutorialEvent.confirmed = 1;
+			tutorialEvent.power = event->power;
+		}
+		else if (event->eventType == DUEL_TRACK_EVENT_KNOCKDOWN &&
+			!Q_stricmp(event->note, "knockdown_by_opponent") &&
+			runtime->opponentKey[0] && !Q_stricmp(event->damageAttackerKey, runtime->opponentKey))
+		{
+			tutorialEvent.type = DUEL_TUTORIAL_EVENT_KNOCKDOWN;
+			tutorialEvent.confirmed = 1;
+		}
+		else if (event->eventType == DUEL_TRACK_EVENT_DAMAGE && event->amount > 0 &&
+			runtime->opponentKey[0] && !Q_stricmp(event->damageAttackerKey, runtime->opponentKey))
+		{
+			tutorialEvent.type = DUEL_TUTORIAL_EVENT_HIT;
+			tutorialEvent.confirmed = 1;
+			tutorialEvent.force = event->selfForce;
+			if (event->hasGeometry)
 			{
-				hits++;
-				lastHit = event->relTime;
+				VectorSubtract(event->enemyOrigin, event->selfOrigin, toward);
+				toward[2] = 0;
+				VectorNormalize(toward);
+				tutorialEvent.straight = DotProduct(event->selfVelocity, toward) >= 40.0f &&
+					event->forwardmove > 0 && !event->rightmove && event->radialSpeed >= 40;
+				tutorialEvent.recovery = tutorialEvent.straight && event->damageSource == MOD_SABER &&
+					G_DuelCaptureRecoveryReentry(event->amount, event->recovery, event->radialSpeed,
+						event->forwardmove, event->rightmove);
 			}
-			if (event->eventType == DUEL_TRACK_EVENT_DAMAGE && event->relTime - lastBrokenHit >= 1000 &&
-				event->selfFooting == BOTLEARN_FOOTING_ADVANCE &&
-				G_DuelCaptureRecoveryReentry(event->amount,
-					BotLearn_IsBrokenOrBouncedDefense(event->saberDefense),
-					event->radialSpeed, event->forwardmove, event->rightmove))
-			{
-				brokenHits++;
-				lastBrokenHit = event->relTime;
-			}
-		}
-		if (brokenHits >= 2)
-			G_QueueRotatingTutorialMessage(botClientNum, loser->s.number, brokenAdvice,
-				1, brokenHits, session);
-		else if (hits >= 2)
-			G_QueueRotatingTutorialMessage(botClientNum, loser->s.number, recoveryAdvice,
-				1, hits, session);
-	}
-
-	basicsWindow = (skillBand == DUEL_TRACK_SKILL_BEGINNER) &&
-		((!loggedIn || (session->historyDuels <= 0)) ||
-			(session->duelsSeen <= TRACKED_DUEL_ADVICE_BASIC_WINDOW));
-	if (basicsWindow)
-	{
-		const int queuedCountBefore = g_botTutorialQueues[botClientNum].queuedCount;
-		const qboolean queueWasEmpty = (queuedCountBefore <= g_botTutorialQueues[botClientNum].nextMessageIndex);
-		const int basicsRotation = (session->duelsSeen > 0) ? (session->duelsSeen - 1) : 0;
-
-		G_QueueManualBasicsAdvice(botClientNum, loser->s.number, basicsRotation, session);
-		G_MaybeQueueTrackedLoginAdvice(botClientNum, loser->s.number, session, loggedIn);
-		if (g_botTutorialQueues[botClientNum].queuedCount > queuedCountBefore)
-		{
-			g_botTutorialQueues[botClientNum].publicBroadcast = (bot_tutorial.integer >= 2) ? qtrue : qfalse;
-			if (queueWasEmpty)
-				G_SetBotTutorialInitialDelay(&g_botTutorialQueues[botClientNum]);
-		}
-		return;
-	}
-
-	{
-		const int queuedCountBefore = g_botTutorialQueues[botClientNum].queuedCount;
-		const qboolean queueWasEmpty = (queuedCountBefore <= g_botTutorialQueues[botClientNum].nextMessageIndex);
-		char sequenceLabel[32];
-		char sequenceMessage[128];
-
-		if (lowSignalDuel)
-		{
-			G_QueueManualGenericAdvice(botClientNum, loser->s.number, loserRuntime, loggedIn, session);
-		}
-		else if (allowSpecificIssue && !suppressRepeatedIssueAdvice)
-		{
-			G_QueueManualIssueAdvice(botClientNum, loser->s.number, issue, session);
-			G_MarkTrackedIssueAdvice(session, loserRuntime, issue);
-		}
-		else if (skillBand == DUEL_TRACK_SKILL_ADVANCED)
-		{
-			G_QueueManualMetaAdvice(botClientNum, loser->s.number, session->duelsSeen + loserRuntime->eventCount, session);
-		}
-		else if (skillBand == DUEL_TRACK_SKILL_INTERMEDIATE || G_IsTrackedIntermediateCandidate(loserRuntime))
-		{
-			G_QueueManualIntermediateAdvice(botClientNum, loser->s.number, session->duelsSeen + loserRuntime->eventCount, session);
 		}
 		else
+			continue;
+		G_DuelTutorialObserve(&observation, &tutorialEvent, DUEL_TRACK_POWER_DRAIN);
+	}
+	if (fullForce)
+	{
+		for (i = 0; i < runtime->eventCount; i++)
 		{
-			G_QueueManualBasicsAdvice(botClientNum, loser->s.number, session->duelsSeen, session);
+			const tracked_duel_event_t *event = &runtime->events[i];
+			const tracked_duel_event_t *previous = i ? &runtime->events[i - 1] : event;
+			duel_sequence_event_t sample;
+			int kicking, wasKicking;
+			memset(&sample, 0, sizeof(sample));
+			if (event->opponentClientNum != runtime->opponentClientNum)
+				continue;
+			sample.time = event->relTime;
+			sample.selfHealth = event->selfHealth; sample.selfArmor = event->selfArmor;
+			sample.selfForce = event->selfForce;
+			sample.enemyHealth = event->enemyHealth; sample.enemyArmor = event->enemyArmor;
+			sample.enemyForce = event->enemyForce;
+			sample.enemyDraining = (event->tutorialEnemyPowersActive & (1 << FP_DRAIN)) != 0;
+			if (event->eventType == DUEL_TRACK_EVENT_DAMAGE_DEALT && event->amount > 0)
+				sample.dealt = event->amount;
+			if (event->eventType == DUEL_TRACK_EVENT_DAMAGE && event->amount > 0 &&
+				runtime->opponentKey[0] && !Q_stricmp(event->damageAttackerKey, runtime->opponentKey))
+				sample.taken = event->amount;
+			kicking = (event->tutorialLegsAnim >= BOTH_A7_KICK_F && event->tutorialLegsAnim <= BOTH_A7_KICK_L_AIR &&
+				event->tutorialLegsAnim != BOTH_A7_KICK_BF_STOP) ||
+				(event->torsoAnim >= BOTH_A7_KICK_F && event->torsoAnim <= BOTH_A7_KICK_L_AIR &&
+				 event->torsoAnim != BOTH_A7_KICK_BF_STOP) ||
+				(event->saberMove >= LS_KICK_F && event->saberMove <= LS_KICK_L_AIR);
+			wasKicking = (previous->tutorialLegsAnim >= BOTH_A7_KICK_F && previous->tutorialLegsAnim <= BOTH_A7_KICK_L_AIR &&
+				previous->tutorialLegsAnim != BOTH_A7_KICK_BF_STOP) ||
+				(previous->torsoAnim >= BOTH_A7_KICK_F && previous->torsoAnim <= BOTH_A7_KICK_L_AIR &&
+				 previous->torsoAnim != BOTH_A7_KICK_BF_STOP) ||
+				(previous->saberMove >= LS_KICK_F && previous->saberMove <= LS_KICK_L_AIR);
+			if (event->eventType == DUEL_TRACK_EVENT_THROW_START)
+				sample.action = DTS_THROW;
+			else if (event->eventType == DUEL_TRACK_EVENT_SWING_START && !Q_stricmp(event->note, "accepted"))
+				sample.action = DTS_SWING;
+			else if (G_DuelSequenceKickEdge(kicking, wasKicking,
+				event->tutorialKickTarget, previous->tutorialKickTarget, runtime->opponentClientNum))
+				sample.action = DTS_KICK;
+			else
+				sample.action = G_DuelSequencePowerAction(previous->tutorialPowersActive,
+					event->tutorialPowersActive, previous->tutorialHandExtend,
+					event->tutorialHandExtend, HANDEXTEND_FORCEPULL, HANDEXTEND_FORCEPUSH,
+					1 << FP_GRIP, 1 << FP_DRAIN);
+			G_DuelSequenceObserve(&sequenceObservation, &sample);
 		}
-		if (loserRuntime->lastBadSequenceLabel[0])
+	}
+	canCoach = canCoach && (opponent->r.svFlags & SVF_BOT) && bot_tutorial.integer && !bot_nochat.integer;
+	if (canCoach)
+	{
+		queue = &g_botTutorialQueues[opponent->s.number];
+		if (queue->queuedCount > queue->nextMessageIndex)
+			canCoach = qfalse;
+	}
+	if (!G_OpenTrackedLocalDB(&db, NULL, 0))
+	{
+		trap->Print("Tutorial: unable to open coaching history; no advice was sent.\n");
+		return;
+	}
+	rc = G_DuelTutorialRecord(db, runtime->identityKey, runtime->identityKind,
+		fullForce ? 1 : 0, observation.count[DUEL_TUTORIAL_RECOVERY] > 0, canCoach, &history);
+	if (rc == SQLITE_OK && history.duels == 1)
+		rc = G_DuelTutorialImportComplete(db, runtime->identityKey, runtime->identityKind, &history);
+	if (rc == SQLITE_OK && history.duels >= 3 && canCoach && history.rotation == 0)
+	{
+		rc = G_DuelTutorialAdvanceRotation(db, runtime->identityKey, runtime->identityKind, fullForce ? 1 : 0);
+		if (rc == SQLITE_OK)
+			history.rotation = 1;
+	}
+	if (rc == SQLITE_OK)
+		rc = G_DuelTutorialRecordPatterns(db, runtime->identityKey, runtime->identityKind,
+			fullForce ? 1 : 0, &observation, &patterns);
+	if (rc == SQLITE_OK && fullForce && g_learningSession[0])
+	{
+		Com_sprintf(sequenceDuel, sizeof(sequenceDuel), "%s:%d", g_learningSession, runtime->duelStartTime);
+		rc = G_DuelTutorialSequenceRecord(db, runtime->identityKey, runtime->identityKind,
+			1, sequenceDuel, &sequenceObservation, &sequenceHistory);
+	}
+	if (rc != SQLITE_OK)
+		G_TrackedDBError("record tutorial history", db, rc);
+	if (rc != SQLITE_OK || !canCoach || !G_DuelTutorialCanTeach(informative, history.duels))
+	{
+		sqlite3_close(db);
+		return;
+	}
+	pattern = G_DuelTutorialSelectPattern(history.duels, history.rotation, &observation, &patterns);
+	if (!G_DuelTutorialPatternAllowedInMode(pattern, fullForce))
+		pattern = -1;
+	message[0] = '\0';
+	if (fullForce)
+		sequenceChoice = G_DuelSequenceSelect(history.duels, history.rotation,
+			&sequenceObservation, &sequenceHistory);
+	if (sequenceChoice >= 0)
+	{
+		const duel_sequence_stat_t *total = &sequenceHistory.stat[sequenceChoice];
+		const duel_sequence_stat_t *sample = &sequenceObservation.stat[sequenceChoice];
+		int n = total->attempts, duels = sequenceHistory.duels[sequenceChoice];
+		int messageKind = G_DuelSequenceMessageKind(history.rotation, total, sample);
+		const char *name = sequenceNames[sequenceChoice];
+		if (messageKind == DTS_MESSAGE_LOSS)
+			Com_sprintf(message, sizeof(message), "%s: %d/%d negative HP/AP trades in %d duels. Latest HP/AP you %+d/%+d, enemy %+d/%+d.",
+				name, total->losses, n, duels, sample->sampleSelfHp, sample->sampleSelfAp,
+				sample->sampleEnemyHp, sample->sampleEnemyAp);
+		else if (messageKind == DTS_MESSAGE_POOR_FORCE)
+			Com_sprintf(message, sizeof(message), "%s: %d/%d no damage, worse FP trade in %d duels. Latest net FP you %+d, enemy %+d; HP you %+d, enemy %+d.",
+				name, total->poorForce, n, duels, sample->sampleSelfFp, sample->sampleEnemyFp,
+				sample->sampleSelfHp, sample->sampleEnemyHp);
+		else if (messageKind == DTS_MESSAGE_REPEAT)
+			Com_sprintf(message, sizeof(message), "%s: %d times in %d duels, %d negative trades. Latest damage dealt/taken %d/%d; net FP you %+d, enemy %+d.",
+				name, n, duels, total->losses, sample->sampleDealt, sample->sampleTaken,
+				sample->sampleSelfFp, sample->sampleEnemyFp);
+		if (strlen(message) >= sizeof(message) - 1)
 		{
-			G_FormatTrackedSequenceLabel(loserRuntime->lastBadSequenceLabel, sequenceLabel, sizeof(sequenceLabel));
-			Com_sprintf(sequenceMessage, sizeof(sequenceMessage),
-				"Sequence read: your %s line broke down. Reset or vary the timing before the collapse frame.",
-				sequenceLabel);
-			G_QueueBotTutorialMessage(botClientNum, loser->s.number, sequenceMessage);
+			if (messageKind == DTS_MESSAGE_POOR_FORCE)
+				Com_sprintf(message, sizeof(message), "%s: %d/%d no damage, worse FP trade in %d duels.",
+					name, total->poorForce, n, duels);
+			else if (messageKind == DTS_MESSAGE_LOSS)
+				Com_sprintf(message, sizeof(message), "%s: %d/%d negative HP/AP trades in %d duels.",
+					name, total->losses, n, duels);
+			else
+				Com_sprintf(message, sizeof(message), "%s: %d attempts in %d duels.", name, n, duels);
 		}
-		else if (loserRuntime->lastGoodSequenceLabel[0])
+		rc = G_DuelSequenceMark(db, runtime->identityKey, runtime->identityKind, 1,
+			sequenceChoice, history.rotation);
+		if (rc != SQLITE_OK)
 		{
-			G_FormatTrackedSequenceLabel(loserRuntime->lastGoodSequenceLabel, sequenceLabel, sizeof(sequenceLabel));
-			Com_sprintf(sequenceMessage, sizeof(sequenceMessage),
-				"Keep the %s shape—it was one of your cleaner conversions this duel.",
-				sequenceLabel);
-			G_QueueBotTutorialMessage(botClientNum, loser->s.number, sequenceMessage);
+			G_TrackedDBError("record sequence tutorial rotation", db, rc);
+			message[0] = '\0';
 		}
-		if ((loserRuntime->spentByState[DUEL_TRACK_STATE_PANIC] >= 20 || loserRuntime->lateDefenseSpends >= 1) &&
-			G_TrackedAdviceIsSpecificAllowed(loserRuntime, session, DUEL_TRACK_ISSUE_LATE_DEFENSE))
+	}
+	else if (pattern >= 0)
+	{
+		int n = patterns.count[pattern], duels = patterns.duels[pattern];
+		switch (pattern)
 		{
-			static const char *lateDefenseFollowups[] = {
-				"I’ve noticed a second leak: defense still comes online too late in pressure windows.",
-				"Another note: set anti-drain structure earlier so you are not reacting at collapse point."
-			};
-			G_QueueRotatingTutorialMessage(botClientNum, loser->s.number, lateDefenseFollowups,
-				(int)(sizeof(lateDefenseFollowups) / sizeof(lateDefenseFollowups[0])), session->duelsSeen, session);
+		case DUEL_TUTORIAL_LOW_FORCE:
+			Com_sprintf(message, sizeof(message), "In %d hits across %d duels, your force fell while using a power, then you were hit low. Latest: %s, %d force left.",
+				n, duels, powerNames[observation.samplePower], observation.sampleForce);
+			break;
+		case DUEL_TUTORIAL_DRAIN:
+			Com_sprintf(message, sizeof(message), "In %d hits across %d duels, you used drain then were hit within three seconds. Try moving or defending afterward.", n, duels);
+			break;
+		case DUEL_TUTORIAL_KNOCKDOWN:
+			Com_sprintf(message, sizeof(message), "In %d hits across %d duels, you were hit soon after being knocked down. Watch the next attack before getting up.", n, duels);
+			break;
+		case DUEL_TUTORIAL_STRAIGHT:
+			Com_sprintf(message, sizeof(message), "You were hit while moving straight toward an opponent %d times across %d duels. Try a sideways step or pause.", n, duels);
+			break;
+		case DUEL_TUTORIAL_RECOVERY:
+			Com_sprintf(message, sizeof(message), "You were hit moving in during saber recovery %d times across %d duels. Let recovery finish before closing in.", n, duels);
+			break;
 		}
-
-		if (g_botTutorialQueues[botClientNum].queuedCount > queuedCountBefore)
+		rc = G_DuelTutorialMarkPattern(db, runtime->identityKey, runtime->identityKind,
+			fullForce ? 1 : 0, pattern, history.rotation);
+		if (rc != SQLITE_OK)
 		{
-			g_botTutorialQueues[botClientNum].publicBroadcast = (bot_tutorial.integer >= 2) ? qtrue : qfalse;
-			if (queueWasEmpty)
-				G_SetBotTutorialInitialDelay(&g_botTutorialQueues[botClientNum]);
+			G_TrackedDBError("record tutorial rotation", db, rc);
+			message[0] = '\0';
 		}
+	}
+	else
+		G_TutorialCurriculumMessage(player, fullForce, history.rotation, qfalse,
+			message, sizeof(message));
+	sqlite3_close(db);
+	if (message[0])
+		G_QueueBotTutorialMessage(opponent->s.number, player->s.number, message);
+	if (queue->queuedCount > queue->nextMessageIndex)
+	{
+		queue->publicBroadcast = bot_tutorial.integer >= 2 ? qtrue : qfalse;
+		G_SetBotTutorialInitialDelay(queue);
 	}
 }
 
@@ -3354,74 +3329,14 @@ static void G_ProcessBotTutorialQueue(gentity_t *ent)
 
 void G_QueueArcadeBotTutorial(gentity_t *speaker, gentity_t *listener, int roundNumber, qboolean betweenRounds)
 {
-	int rotation;
-	bot_tutorial_queue_t *queue;
-
-	if (bot_tutorial.integer < 1 || bot_nochat.integer || !speaker || !listener ||
-		!speaker->client || !listener->client)
-	{
+	(void)roundNumber;
+	if (betweenRounds || !speaker || !listener || !speaker->client || !listener->client ||
+		!(speaker->r.svFlags & SVF_BOT) || (listener->r.svFlags & SVF_BOT) ||
+		speaker->s.number < 0 || speaker->s.number >= MAX_CLIENTS ||
+		listener->s.number < 0 || listener->s.number >= MAX_CLIENTS)
 		return;
-	}
-	if (!(speaker->r.svFlags & SVF_BOT) || (listener->r.svFlags & SVF_BOT))
-	{
-		return;
-	}
-	if (speaker->s.number < 0 || speaker->s.number >= MAX_CLIENTS)
-	{
-		return;
-	}
-	if (bot_tutorial.integer == 1)
-	{
-		// trainer mode at 1 is strict private tell coaching only
-		if (betweenRounds || speaker == listener)
-		{
-			return;
-		}
-	}
-
-	queue = &g_botTutorialQueues[speaker->s.number];
-	if (queue->queuedCount > queue->nextMessageIndex)
-	{
-		return;
-	}
-
-	G_ClearBotTutorialQueue(speaker->s.number);
-	queue = &g_botTutorialQueues[speaker->s.number];
-
-	rotation = roundNumber;
-	if (rotation < 0)
-	{
-		rotation = 0;
-	}
-
-	if (betweenRounds)
-	{
-		if (rotation <= TRACKED_DUEL_ADVICE_BASIC_WINDOW)
-		{
-			G_QueueManualBasicsAdvice(speaker->s.number, listener->s.number, rotation, NULL);
-		}
-		else
-		{
-			G_QueueManualIntermediateAdvice(speaker->s.number, listener->s.number, rotation, NULL);
-		}
-	}
-	else
-	{
-		G_QueueManualGenericAdvice(speaker->s.number, listener->s.number, NULL, qfalse, NULL);
-	}
-
-	if (queue->queuedCount > queue->nextMessageIndex)
-	{
-		if (bot_tutorial.integer >= 2)
-		{
-			queue->publicBroadcast = qtrue;
-		}
-		else
-		{
-			queue->publicBroadcast = qfalse;
-		}
-		G_SetBotTutorialInitialDelay(queue);
-	}
+	if (g_trackedArcadeCombats[listener->s.number].active)
+		g_trackedArcadeCombats[listener->s.number].tutorialSpeaker = speaker->s.number;
 }
 
 static void G_InitTrackedDuelRuntimeForClient(gentity_t *ent, gentity_t *opponent, int duelType)
@@ -5612,10 +5527,20 @@ void G_FinishTrackedDuel(gentity_t *winner, gentity_t *loser, int duelType, qboo
 	G_DuelCaptureMoveRuntime(&winnerRuntime, winnerSlot, sizeof(winnerRuntime));
 	G_DuelCaptureMoveRuntime(&loserRuntime, loserSlot, sizeof(loserRuntime));
 
-	if (!draw)
-		G_MaybeQueueBotTutorial(&loserRuntime, winner, loser);
-	G_RecordTrackedSessionOutcome(winner, &winnerRuntime, draw ? qfalse : qtrue);
-	G_RecordTrackedSessionOutcome(loser, &loserRuntime, qfalse);
+	G_BotCounterFinishDuel(winner->s.number, loser->s.number);
+	{
+		sqlite3 *counterDb = NULL;
+		if (G_OpenTrackedLocalDB(&counterDb, NULL, 0))
+		{
+			if (!G_BotCounterFlush(counterDb))
+				trap->Print("Counter learning: failed to save evidence; pending evidence retained.\n");
+			sqlite3_close(counterDb);
+		}
+		else
+			trap->Print("Counter learning: unable to open database; pending evidence retained.\n");
+	}
+	G_RecordTutorialOutcome(winner, loser, &winnerRuntime, qfalse);
+	G_RecordTutorialOutcome(loser, winner, &loserRuntime, !draw);
 	//Queues the database write (spread over later frames); takes ownership of the events.
 	G_PersistTrackedDuel(&winnerRuntime, &loserRuntime, duelType, draw);
 }
@@ -5964,6 +5889,7 @@ void G_StartTrackedArcadeCombat(gentity_t *ent)
 	G_DuelCaptureClearRuntime(runtime, sizeof(*runtime), runtime->events);
 	runtime->active = qtrue;
 	runtime->startTime = level.time;
+	runtime->tutorialSpeaker = -1;
 	runtime->lastAttackSampleTime = -1;
 	runtime->lastDefense = G_GetTrackedDefenseSignature(ent);
 	runtime->lastForce = ent->client->ps.fd.forcePower;
@@ -6195,6 +6121,58 @@ void G_UpdateTrackedArcadeCombatFrame(gentity_t *ent)
 	}
 }
 
+static void G_RecordArcadeTutorialOutcome(gentity_t *ent, const tracked_arcade_runtime_t *runtime, const char *result)
+{
+	sqlite3 *db = NULL;
+	duel_tutorial_history_t history;
+	bot_tutorial_queue_t *queue = NULL;
+	gentity_t *speaker = NULL;
+	int duration, rc;
+	char message[MAX_SAY_TEXT];
+	qboolean coach = qfalse;
+
+	if (!result || (Q_stricmp(result, "eliminated") && Q_stricmp(result, "level_clear") &&
+		Q_stricmp(result, "arcade_complete")) || !runtime->identityKey[0])
+		return;
+	if (runtime->tutorialSpeaker >= 0 && runtime->tutorialSpeaker < MAX_CLIENTS)
+	{
+		speaker = &g_entities[runtime->tutorialSpeaker];
+		queue = &g_botTutorialQueues[runtime->tutorialSpeaker];
+		coach = !Q_stricmp(result, "eliminated") && speaker->inuse && speaker->client &&
+			(speaker->r.svFlags & SVF_BOT) && bot_tutorial.integer && !bot_nochat.integer &&
+			queue->queuedCount <= queue->nextMessageIndex;
+	}
+	duration = runtime->eventCount ? runtime->events[runtime->eventCount - 1].relTime : 0;
+	if (!G_DuelTutorialInformative(runtime->eventCount, duration, G_DuelCaptureCanRankOutcomes(&runtime->capture)))
+	{
+		if (queue && queue->targetClientNum == ent->s.number)
+			G_ClearBotTutorialQueue(runtime->tutorialSpeaker);
+		return;
+	}
+	if (!G_OpenTrackedLocalDB(&db, NULL, 0))
+	{
+		trap->Print("Tutorial: unable to open arcade coaching history; no advice was sent.\n");
+		return;
+	}
+	rc = G_DuelTutorialRecord(db, runtime->identityKey, runtime->identityKind, 2, 0, coach, &history);
+	if (rc == SQLITE_OK && history.duels == 1)
+		rc = G_DuelTutorialImportComplete(db, runtime->identityKey, runtime->identityKind, &history);
+	if (rc != SQLITE_OK)
+		G_TrackedDBError("record arcade tutorial history", db, rc);
+	sqlite3_close(db);
+	if (rc != SQLITE_OK || !coach || !G_DuelTutorialCanArcadeTeach(1, history.modeDuels))
+		return;
+	if (!G_TutorialCurriculumMessage(ent, qfalse, history.rotation, qtrue,
+		message, sizeof(message)))
+		return;
+	G_QueueBotTutorialMessage(runtime->tutorialSpeaker, ent->s.number, message);
+	if (queue->queuedCount > queue->nextMessageIndex)
+	{
+		queue->publicBroadcast = bot_tutorial.integer >= 2 ? qtrue : qfalse;
+		G_SetBotTutorialInitialDelay(queue);
+	}
+}
+
 void G_FinishTrackedArcadeCombat(gentity_t *ent, const char *result)
 {
 	tracked_arcade_runtime_t runtimeCopy;
@@ -6228,6 +6206,7 @@ void G_FinishTrackedArcadeCombat(gentity_t *ent, const char *result)
 		runtime->killCount = level.arcadeRoundKills[ent->s.number];
 
 	G_ClassifyTrackedAttackOutcomes(runtime->events, runtime->eventCount, &runtime->capture);
+	G_RecordArcadeTutorialOutcome(ent, runtime, result);
 	G_DuelCaptureMoveRuntime(&runtimeCopy, runtime, sizeof(runtimeCopy));
 	G_PersistTrackedArcadeCombat(&runtimeCopy, result, level.arcadeLevel);
 	free(runtimeCopy.events);
@@ -11584,6 +11563,11 @@ void Svcmd_ResetLearningTrack_f(void)
 	result = G_ResetTrackingTables(db, 1, &rows);
 	if (result == SQLITE_OK)
 	{
+		int counterResult = sqlite3_exec(db, "DELETE FROM LocalBotCounterV1", NULL, NULL, NULL);
+		if (counterResult == SQLITE_OK)
+			G_BotCounterCacheClear();
+		else
+			G_TrackedDBError("reset counter learning evidence (other learning was already reset)", db, counterResult);
 		G_BotLearnSaberReset();
 		G_BotLearnLoadCache(db);
 		g_learningCacheDirty = qfalse;
@@ -19168,6 +19152,8 @@ void InitGameAccountStuff( void ) { //Called every mapload , move the create tab
 	if (G_OpenTrackedLocalDB(&db, effectiveDuelTrackPath, sizeof(effectiveDuelTrackPath)))
 	{
 		G_EnsureLocalDuelTrackingSchema(db);
+		if (!G_BotCounterLoad(db))
+			trap->Print("Counter learning: cache load failed; existing pending evidence retained.\n");
 		trap->Print("Duel tracking database: %s\n", effectiveDuelTrackPath);
 		G_ReportLegacyTrackedData(db, effectiveDuelTrackPath);
 		G_BotLearnLoadCache(db);

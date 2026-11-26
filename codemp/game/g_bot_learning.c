@@ -12,6 +12,7 @@
 #include "g_local.h"
 #include "g_bot_learning.h"
 #include "ai_combat_tuning.h"
+#include "g_bot_counter_store.h"
 
 extern qboolean BG_InKnockDown(int anim);
 extern qboolean PM_SaberInReturn(int move);
@@ -92,10 +93,180 @@ typedef struct
 {
 	int active, complete, sequence, stage, enemyNum, contextKey;
 	int startedAt, outcomeAt, netDamage, selfSpawn, enemySpawn, stance, enemyStance;
+	int counterKey, counterTiming, counterMotor;
 } botlearn_saber_attempt_t;
 
 static botlearn_saber_entry_t g_botLearnSaberCache[BOTLEARN_SABER_CACHE_SIZE];
 static botlearn_saber_attempt_t g_botLearnSaberAttempts[MAX_CLIENTS];
+
+typedef struct
+{
+	int active, accepted, enemy, key, choice, family, motor, started, end, net, selfSpawn, enemySpawn;
+} botlearn_counter_trial_t;
+static botlearn_counter_cache_t g_counterCache;
+static botlearn_counter_trial_t g_counterTrials[MAX_CLIENTS];
+static void G_BotLearnSaberOutcome(gentity_t *self);
+
+void G_BotCounterCacheClear(void)
+{
+	memset(&g_counterCache, 0, sizeof(g_counterCache));
+	memset(g_counterTrials, 0, sizeof(g_counterTrials));
+}
+
+int G_BotCounterLoad(sqlite3 *db)
+{
+	static botlearn_counter_cache_t staging;
+	return BotCounter_Load(&g_counterCache, &staging, db);
+}
+
+static void G_BotCounterRecord(int key, int choice, int net)
+{
+	static int lastWarning;
+	static qboolean warned;
+	if (BotCounter_Record(&g_counterCache, key, choice, net))
+		return;
+	if (!warned || level.time < lastWarning || level.time - lastWarning >= 5000)
+	{
+		trap->Print("Counter learning: failed to record trial (cache full or invalid key); evidence dropped.\n");
+		lastWarning = level.time;
+		warned = qtrue;
+	}
+}
+
+int G_BotCounterChoice(int key, int roll)
+{
+	int i, samples[BOTLEARN_COUNTER_CHOICES], net[BOTLEARN_COUNTER_CHOICES];
+	for (i = 0; i < BOTLEARN_COUNTER_CHOICES; i++)
+	{
+		botlearn_counter_entry_t *e = BotCounter_Find(&g_counterCache, key, i, 0);
+		samples[i] = e ? e->samples : 0;
+		net[i] = e ? e->net : 0;
+	}
+	return BotLearn_CounterSelect(samples, net, roll);
+}
+
+int G_BotCounterRecipeBonus(int key, int timing, int sequence)
+{
+	botlearn_counter_entry_t *e;
+	int motor, samples = 0, net = 0, familySamples = 0, familyNet = 0, bonus;
+	if (sequence < 0 || sequence >= BOTLEARN_SABER_SEQUENCE_COUNT)
+		return 0;
+	for (motor = 0; motor < BOTLEARN_COUNTER_MOTORS; motor++)
+	{
+		e = BotCounter_Find(&g_counterCache, key,
+			BotLearn_CounterComboChoice(timing, sequence, motor), 0);
+		if (e) { samples += e->samples; net += e->net; }
+		e = BotCounter_Find(&g_counterCache, key,
+			BotLearn_CounterFamilyChoice(timing, 6 + sequence, motor), 0);
+		if (e) { familySamples += e->samples; familyNet += e->net; }
+	}
+	bonus = BotLearn_CounterRecipeBonus(samples, net) +
+		BotLearn_CounterRecipeBonus(familySamples, familyNet);
+	return Com_Clampi(-15, 15, bonus);
+}
+
+int G_BotCounterMotorChoice(int key, int timing, int family, int roll)
+{
+	int i, samples[BOTLEARN_COUNTER_MOTORS], net[BOTLEARN_COUNTER_MOTORS];
+	for (i = 0; i < BOTLEARN_COUNTER_MOTORS; i++)
+	{
+		botlearn_counter_entry_t *e = BotCounter_Find(&g_counterCache, key,
+			BotLearn_CounterFamilyChoice(timing, family, i), 0);
+		samples[i] = e ? e->samples : 0;
+		net[i] = e ? e->net : 0;
+	}
+	return BotLearn_CounterMotorSelect(samples, net, roll);
+}
+
+int G_BotCounterFlush(sqlite3 *db)
+{
+	return BotCounter_Flush(&g_counterCache, db);
+}
+
+static void G_BotCounterOutcome(gentity_t *self)
+{
+	botlearn_counter_trial_t *t;
+	gentity_t *enemy;
+	int net;
+	if (!self || !self->client || self->s.number < 0 || self->s.number >= MAX_CLIENTS) return;
+	t = &g_counterTrials[self->s.number];
+	if (!t->active) return;
+	enemy = &g_entities[t->enemy];
+	if (!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
+			bot_learninghumansonly.integer) ||
+		!enemy->inuse || !enemy->client ||
+		self->client->ps.persistant[PERS_SPAWN_COUNT] != t->selfSpawn ||
+		enemy->client->ps.persistant[PERS_SPAWN_COUNT] != t->enemySpawn ||
+		self->client->sess.sessionTeam == TEAM_SPECTATOR ||
+		enemy->client->sess.sessionTeam == TEAM_SPECTATOR)
+	{
+		t->active = 0;
+		return;
+	}
+	if (level.time < t->end && self->health > 0 && enemy->health > 0) return;
+	net = t->accepted ? Com_Clampi(-100, 100, t->net) : -10;
+	G_BotCounterRecord(t->key, t->choice, net);
+	G_BotCounterRecord(t->key,
+		BotLearn_CounterFamilyChoice(t->choice, t->family, t->motor), net);
+	t->active = 0;
+}
+
+void G_BotCounterFinishDuel(int clientA, int clientB)
+{
+	int clients[2], i;
+	clients[0] = clientA; clients[1] = clientB;
+	for (i = 0; i < 2; i++)
+	{
+		int client = clients[i];
+		if (client >= 0 && client < MAX_CLIENTS && g_counterTrials[client].active &&
+			g_counterTrials[client].enemy == clients[1 - i])
+		{
+			g_counterTrials[client].end = level.time;
+			G_BotCounterOutcome(&g_entities[client]);
+		}
+		if (client >= 0 && client < MAX_CLIENTS && g_botLearnSaberAttempts[client].active &&
+			g_botLearnSaberAttempts[client].complete &&
+			g_botLearnSaberAttempts[client].enemyNum == clients[1 - i])
+		{
+			g_botLearnSaberAttempts[client].outcomeAt = level.time;
+			G_BotLearnSaberOutcome(&g_entities[client]);
+		}
+	}
+}
+
+void G_BotCounterBegin(gentity_t *self, gentity_t *enemy, int key, int choice, int family, int motor)
+{
+	botlearn_counter_trial_t *t;
+	if (!self || !self->client || !enemy || !enemy->client ||
+		self->s.number < 0 || self->s.number >= MAX_CLIENTS ||
+		enemy->s.number < 0 || enemy->s.number >= MAX_CLIENTS ||
+		key < 0 || !BotLearn_SaberTechniqueEnabled(bot_learning.integer,
+			bot_learningstrength.value, bot_learninghumansonly.integer))
+		return;
+	G_BotCounterOutcome(self);
+	t = &g_counterTrials[self->s.number];
+	if (t->active) return;
+	memset(t, 0, sizeof(*t));
+	t->active = 1; t->enemy = enemy->s.number; t->key = key; t->choice = choice;
+	t->family = family; t->motor = motor;
+	t->started = level.time; t->end = level.time + 400;
+	t->selfSpawn = self->client->ps.persistant[PERS_SPAWN_COUNT];
+	t->enemySpawn = enemy->client->ps.persistant[PERS_SPAWN_COUNT];
+}
+
+int G_BotCounterAccepted(gentity_t *self, gentity_t *enemy)
+{
+	botlearn_counter_trial_t *t;
+	if (!self || !enemy || self->s.number < 0 || self->s.number >= MAX_CLIENTS) return -1;
+	t = &g_counterTrials[self->s.number];
+	if (t->active && !t->accepted && t->enemy == enemy->s.number && level.time <= t->end)
+	{
+		t->accepted = 1;
+		t->end = level.time + BOTLEARN_OUTCOME_WINDOW_MS;
+		return t->motor;
+	}
+	return -1;
+}
 
 #define BOTLEARN_MOTOR_CACHE_SIZE 512
 typedef struct
@@ -278,6 +449,10 @@ static void G_BotLearnSaberOutcome(gentity_t *self)
 		attempt->stance, attempt->enemyStance, 1);
 	if (entry)
 		BotLearn_SaberAccumulate(&entry->stats, attempt->netDamage);
+	if (attempt->counterKey >= 0)
+		G_BotCounterRecord(attempt->counterKey,
+			BotLearn_CounterComboChoice(attempt->counterTiming, attempt->sequence,
+				attempt->counterMotor), attempt->netDamage);
 	attempt->active = 0;
 }
 
@@ -310,6 +485,7 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 	if (stage == 0)
 	{
 		memset(attempt, 0, sizeof(*attempt));
+		attempt->counterKey = -1;
 		contextKey = G_BotLearnLiveContextKey(self, enemy);
 		if (!BotLearn_SaberTechniqueContextAllowed(contextKey))
 			return;
@@ -322,6 +498,15 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 		attempt->enemySpawn = enemy->client->ps.persistant[PERS_SPAWN_COUNT];
 		attempt->stance = self->client->ps.fd.saberAnimLevel;
 		attempt->enemyStance = enemy->client->ps.fd.saberAnimLevel;
+		if (g_counterTrials[self->s.number].active &&
+			g_counterTrials[self->s.number].enemy == enemy->s.number &&
+			!g_counterTrials[self->s.number].accepted &&
+			level.time <= g_counterTrials[self->s.number].end)
+		{
+			attempt->counterKey = g_counterTrials[self->s.number].key;
+			attempt->counterTiming = g_counterTrials[self->s.number].choice;
+			attempt->counterMotor = g_counterTrials[self->s.number].motor;
+		}
 	}
 	if (!attempt->active)
 		return;
@@ -343,6 +528,25 @@ void G_BotLearnSaberAccepted(gentity_t *self, gentity_t *enemy,
 void G_BotLearnSaberDamage(gentity_t *target, gentity_t *attacker, int damage)
 {
 	int i, result;
+	if (target && target->client && target->s.number >= 0 && target->s.number < MAX_CLIENTS)
+	{
+		for (i = 0; i < MAX_CLIENTS; i++)
+		{
+			botlearn_counter_trial_t *t = &g_counterTrials[i];
+			if (!t->active) continue;
+			if (level.time > t->end)
+			{
+				G_BotCounterOutcome(&g_entities[i]);
+				continue;
+			}
+			result = BotLearn_SaberAttributedDamage(i, t->enemy, target->s.number,
+				attacker && attacker->client ? attacker->s.number : ENTITYNUM_WORLD,
+				damage, &t->net);
+			if (result < 0) t->active = 0;
+			else if (result > 0 && target->health <= 0)
+				G_BotCounterOutcome(&g_entities[i]);
+		}
+	}
 	if (!target || !target->client || target->s.number < 0 || target->s.number >= MAX_CLIENTS ||
 		!BotLearn_SaberTechniqueEnabled(bot_learning.integer, bot_learningstrength.value,
 			bot_learninghumansonly.integer))
@@ -388,9 +592,14 @@ void G_BotLearnResetClient(int clientNum)
 		return;
 	memset(&g_botLearnObservers[clientNum], 0, sizeof(g_botLearnObservers[clientNum]));
 	memset(&g_botLearnSaberAttempts[clientNum], 0, sizeof(g_botLearnSaberAttempts[clientNum]));
+	memset(&g_counterTrials[clientNum], 0, sizeof(g_counterTrials[clientNum]));
 	for (i = 0; i < MAX_CLIENTS; i++)
+	{
 		if (g_botLearnSaberAttempts[i].active && g_botLearnSaberAttempts[i].enemyNum == clientNum)
 			g_botLearnSaberAttempts[i].active = 0;
+		if (g_counterTrials[i].active && g_counterTrials[i].enemy == clientNum)
+			g_counterTrials[i].active = 0;
+	}
 }
 
 void G_BotLearnObserveClient(gentity_t *ent)
@@ -406,6 +615,7 @@ void G_BotLearnObserveClient(gentity_t *ent)
 	obs = &g_botLearnObservers[ent->s.number];
 	ps = &ent->client->ps;
 	G_BotLearnSaberOutcome(ent);
+	G_BotCounterOutcome(ent);
 	if (ent->health <= 0 || ent->client->sess.sessionTeam == TEAM_SPECTATOR)
 	{
 		obs->initialized = qfalse;

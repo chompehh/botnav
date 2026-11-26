@@ -70,6 +70,155 @@ typedef enum
 #define BOTLEARN_SABER_SEQUENCE_COUNT 12
 #define BOTLEARN_SABER_SEQUENCE_LENGTH 3
 
+/* Version 1 counter trials are separate from action-token and motor evidence. */
+#define BOTLEARN_COUNTER_CHOICES 3
+#define BOTLEARN_COUNTER_RECIPE_BASE BOTLEARN_COUNTER_CHOICES
+#define BOTLEARN_COUNTER_FAMILIES (6 + BOTLEARN_SABER_SEQUENCE_COUNT)
+#define BOTLEARN_COUNTER_MOTORS 2
+#define BOTLEARN_COUNTER_COMBO_BASE (BOTLEARN_COUNTER_RECIPE_BASE + \
+	BOTLEARN_COUNTER_CHOICES * BOTLEARN_COUNTER_FAMILIES * BOTLEARN_COUNTER_MOTORS)
+#define BOTLEARN_COUNTER_STORE_CHOICES (BOTLEARN_COUNTER_COMBO_BASE + \
+	BOTLEARN_COUNTER_CHOICES * BOTLEARN_SABER_SEQUENCE_COUNT * BOTLEARN_COUNTER_MOTORS)
+static inline int BotLearn_CounterKey(int move, int stance, int enemyStance,
+	int chain, float distance, float closing)
+{
+	int band, speed;
+	if (move < 0 || move >= 7 || stance < 0 || stance > 7 ||
+		enemyStance < 0 || enemyStance > 7 || !isfinite(distance) ||
+		!isfinite(closing) || distance < 0 || distance > 120)
+		return -1;
+	band = distance < 64.0f ? 0 : distance < 96.0f ? 1 : 2;
+	speed = closing < -20.0f ? 0 : closing > 20.0f ? 2 : 1;
+	return move | (stance << 3) | (enemyStance << 6) |
+		((chain >= 3 ? 1 : 0) << 9) | (band << 10) | (speed << 12);
+}
+
+/* V2 has a separate key namespace: an observed animation length band is not
+ * interchangeable with V1's absolute-time-only evidence. */
+static inline int BotLearn_CounterKeyV2(int move, int stance, int enemyStance,
+	int chain, float distance, float closing, int duration)
+{
+	int key = BotLearn_CounterKey(move, stance, enemyStance, chain, distance, closing);
+	int band;
+	if (key < 0 || duration < 100 || duration > 3000)
+		return -1;
+	band = duration < 400 ? 0 : duration < 800 ? 1 : 2;
+	return key | (1 << 14) | (band << 15);
+}
+
+static inline int BotLearn_CounterKeyV3(int move, int stance, int enemyStance,
+	int chain, float distance, float closing, int duration, int phase)
+{
+	int key = BotLearn_CounterKeyV2(move, stance, enemyStance, chain, distance, closing, duration);
+	if (key < 0 || phase < 0 || phase > 3)
+		return -1;
+	return key | (1 << 17) | (phase << 18);
+}
+
+static inline int BotLearn_CounterDelay(int choice)
+{
+	return choice == 1 ? 75 : choice == 2 ? 150 : 0;
+}
+
+static inline int BotLearn_CounterSelect(const int *samples, const int *net, int roll)
+{
+	int i, best = -1, bestScore = -101;
+	/* Bounded exploration is a legal timing variation, not a mistake. */
+	if (roll < 30)
+		return (roll / 10) % BOTLEARN_COUNTER_CHOICES;
+	for (i = 0; i < BOTLEARN_COUNTER_CHOICES; i++)
+	{
+		int score;
+		if (samples[i] < 4)
+			continue;
+		score = net[i] / samples[i] + (i == 0 ? 2 : 0);
+		if (score > bestScore)
+		{
+			bestScore = score;
+			best = i;
+		}
+	}
+	return best < 0 ? 0 : best;
+}
+
+static inline int BotLearn_CounterFamilyChoice(int timing, int family, int motor)
+{
+	if (timing < 0 || timing >= BOTLEARN_COUNTER_CHOICES || family < 0 ||
+		family >= BOTLEARN_COUNTER_FAMILIES || motor < 0 || motor >= BOTLEARN_COUNTER_MOTORS)
+		return -1;
+	return BOTLEARN_COUNTER_RECIPE_BASE +
+		(timing * BOTLEARN_COUNTER_FAMILIES + family) * BOTLEARN_COUNTER_MOTORS + motor;
+}
+
+static inline int BotLearn_CounterComboChoice(int timing, int sequence, int motor)
+{
+	if (timing < 0 || timing >= BOTLEARN_COUNTER_CHOICES || sequence < 0 ||
+		sequence >= BOTLEARN_SABER_SEQUENCE_COUNT || motor < 0 || motor >= BOTLEARN_COUNTER_MOTORS)
+		return -1;
+	return BOTLEARN_COUNTER_COMBO_BASE +
+		(timing * BOTLEARN_SABER_SEQUENCE_COUNT + sequence) * BOTLEARN_COUNTER_MOTORS + motor;
+}
+
+static inline int BotLearn_CounterRecipeBonus(int samples, int net)
+{
+	int score;
+	if (samples < 4)
+		return 0;
+	score = net / samples;
+	return score < -15 ? -15 : score > 15 ? 15 : score;
+}
+
+static inline int BotLearn_CounterMotorSelect(const int *samples, const int *net, int roll)
+{
+	int i, best = 1, bestScore = -101;
+	if (roll < 20)
+		return roll / 10;
+	for (i = 0; i < BOTLEARN_COUNTER_MOTORS; i++)
+	{
+		int score;
+		if (samples[i] < 4)
+			continue;
+		score = net[i] / samples[i];
+		if (score > bestScore) { bestScore = score; best = i; }
+	}
+	return best;
+}
+
+static inline int BotLearn_CounterWindow(int elapsed, int choice)
+{
+	int delay = BotLearn_CounterDelay(choice);
+	return elapsed >= delay && elapsed <= delay + 100;
+}
+
+static inline int BotLearn_CounterPhaseDelay(int choice, int duration, int phase)
+{
+	int percent = choice <= 0 ? 0 : phase == 2 ? (choice == 1 ? 35 : 70) :
+		phase == 0 || phase == 3 ? (choice == 1 ? 20 : 45) : (choice == 1 ? 125 : 250);
+	int delay = phase == 1 ? percent * duration / 1000 : percent * duration / 100;
+	int cap = phase == 1 ? 225 : 1500;
+	return delay > cap ? cap : delay;
+}
+
+static inline int BotLearn_CounterPhaseWindow(int elapsed, int choice, int duration, int phase)
+{
+	int delay = BotLearn_CounterPhaseDelay(choice, duration, phase);
+	return phase >= 0 && phase <= 3 && duration >= 100 && duration <= 3000 &&
+		elapsed >= delay && elapsed <= delay + 100;
+}
+
+struct sqlite3;
+struct gentity_s;
+void G_BotCounterCacheClear(void);
+int G_BotCounterLoad(struct sqlite3 *db);
+int G_BotCounterFlush(struct sqlite3 *db);
+void G_BotCounterFinishDuel(int clientA, int clientB);
+int G_BotCounterChoice(int key, int roll);
+int G_BotCounterRecipeBonus(int key, int timing, int sequence);
+int G_BotCounterMotorChoice(int key, int timing, int family, int roll);
+void G_BotCounterBegin(struct gentity_s *self, struct gentity_s *enemy,
+	int key, int choice, int family, int motor);
+int G_BotCounterAccepted(struct gentity_s *self, struct gentity_s *enemy);
+
 static inline int BotLearn_SaberSequenceAttack(int sequence, int stage)
 {
 	static const int attacks[BOTLEARN_SABER_SEQUENCE_COUNT][BOTLEARN_SABER_SEQUENCE_LENGTH] = {

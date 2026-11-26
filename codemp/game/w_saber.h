@@ -52,6 +52,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #define MAX_GRIP_DISTANCE 256
 #define MAX_TRICK_DISTANCE 512
 #define FORCE_JUMP_CHARGE_TIME 6400//3000.0f
+#define SABER_THROWN_HIT_DAMAGE 30
 #define GRIP_DRAIN_AMOUNT 30
 #define FORCE_LIGHTNING_RADIUS 300
 #define MAX_DRAIN_DISTANCE 512
