@@ -543,7 +543,8 @@ static void CVU_ShowHealth(void) {
 			continue;
 		if (g_entities[i].client->sess.raceMode)
 			continue;
-		g_entities[i].maxHealth = g_entities[i].s.maxhealth = g_entities[i].s.health = health;
+		g_entities[i].maxHealth = health ? g_entities[i].client->pers.maxHealth : 0;
+		G_ScaleNetHealth(&g_entities[i]);
 		//Com_Printf("Setting max health for him %s %i\n", g_entities[i].client->pers.netname, health);
 	}
 }

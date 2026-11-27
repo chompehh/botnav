@@ -24,6 +24,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 // g_utils.c -- misc utility functions for game module
 
 #include "g_local.h"
+#include "g_duel_hud.h"
 #include "bg_saga.h"
 #include "qcommon/q_shared.h"
 
@@ -1250,6 +1251,14 @@ void G_ScaleNetHealth(gentity_t *self)
 
 	if (!self)
 		return;
+
+	if (self->client && self->s.number < level.maxclients &&
+		!self->client->sess.raceMode && g_showHealth.integer == 2)
+	{
+		G_DuelHudNetworkValue(self->client->ps.fd.forcePower,
+			self->client->ps.fd.forcePowerMax, &self->s.health, &self->s.maxhealth);
+		return;
+	}
 
 	maxHealth = self->maxHealth;
 	

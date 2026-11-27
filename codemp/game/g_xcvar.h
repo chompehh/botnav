@@ -301,7 +301,7 @@ XCVAR_DEF(g_unlaggedProjectileTolerance,"135",			CVU_Unlagged,		CVAR_ARCHIVE,			
 XCVAR_DEF( g_allowSaberSwitch,			"0",			CVU_SaberSwitch,	CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( g_allowTeamSuicide,			"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( g_godChat,					"0",			NULL,				CVAR_ARCHIVE,									qtrue )
-XCVAR_DEF( g_showHealth,				"0",			CVU_ShowHealth,	CVAR_ARCHIVE,									qtrue )
+XCVAR_DEF( g_showHealth,				"0",			CVU_ShowHealth,	CVAR_ARCHIVE|CVAR_SERVERINFO,					qtrue )
 XCVAR_DEF( g_damageNumbers,				"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( g_fixKillCredit,				"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( g_stopHealthESP,				"0",			NULL,				CVAR_ARCHIVE,									qtrue )
@@ -595,6 +595,8 @@ XCVAR_DEF( g_showJumpSpot,				"0",			NULL,				CVAR_ARCHIVE,									qtrue )
 #define _ELORANKING 1
 #if _ELORANKING
 XCVAR_DEF( g_eloRanking,					"0",			NULL,				CVAR_ARCHIVE|CVAR_LATCH,						qtrue )
+XCVAR_DEF( bot_eloMiningLimit,			"0",			NULL,				CVAR_ARCHIVE,									qtrue )
+XCVAR_DEF( bot_botEloMiningLimit,		"5",			NULL,				CVAR_ARCHIVE,									qtrue )
 XCVAR_DEF( g_eloNewUserCutoff,				"-1",			NULL,				CVAR_ARCHIVE,									qfalse )
 XCVAR_DEF( g_eloProvisionalCutoff,			"10",			NULL,				CVAR_ARCHIVE,									qfalse )
 XCVAR_DEF( g_eloProvisionalChangeBig,		"2",			NULL,				CVAR_ARCHIVE,									qfalse )

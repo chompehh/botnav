@@ -1134,7 +1134,7 @@ Notes:
 - After a bot-vs-bot duel ends, both bots temporarily blacklist each other so they search for a new opponent instead of immediately rematching.
 - Recorded duels are saved in small steps over several frames after the duel ends (summary, events in chunks, aggregates, learning), on one persistent database connection in WAL mode. Pending saves are flushed on map change or shutdown. The bot-learning cache reload is also deferred to quiet frames. This describes persistence scheduling, not a measured guarantee against frame stalls.
 - Persistence acquires its write lock before each step; transient BUSY/LOCKED errors retain queued saves and retry later. Queue-overflow draining is bounded (128 steps / 10ms, apart from an individual database call), rather than spinning on a blocked writer. If all eight slots remain occupied, the new incoming duel is explicitly rejected and logged; existing queued saves are not overwritten. Shutdown flushing has a one-second budget; remaining unsaved recordings are reported as lost and their snapshots freed, while committed learning is unchanged. Avoid prolonged external writer locks and inspect these warnings before resetting or shutting down.
-- Ranked bot-vs-bot ELO progression is limited to 5 ranked duels per bot level per UTC day/session bucket; extra bot-vs-bot duels still run but are logged unranked.
+- Ranked bot-vs-bot ELO progression defaults to 5 duels per bot level per UTC day, across all opposing bot levels. Extra duels are recorded unranked.
 
 ## Miscellaneous
 
@@ -1145,6 +1145,9 @@ Notes:
 | `bot_tutorial` | `0` | Enable Force-duel coaching; `1` private, `2+` public. A bot automatically sends the first two unheard introductory lessons to an active player with beginner signals, without requiring a duel. Subsequent advice starts after the first human Force-duel loss, including losses to humans and short or incomplete captures; personalized evidence still requires three complete informative tracked Force duels (at least 10 events and 12s), including prior history. Session wins/losses, Force levels and observed flipkicks influence beginner versus targeted advice. Related lessons can be sent in batches of up to five, at least seven seconds apart, with longer pauses for longer messages. Lesson cursors persist by tracking identity; session results and flipkick evidence reset on disconnect. After ten saber duels in a session, a bot may suggest a Force duel once. No saber-duel or arcade coaching is otherwise sent. `bot_nochat` and queue/cooldown apply. See `docs/tutorial-curriculum.md` and `docs/tutorial-sequence-evidence.md`. |
 | `bot_learninglog` | `0` | Opt-in recording of accepted public chat in the existing events export, independently of tutorial chat and learned weight consumption. Private tells, team, clan and admin chat are excluded. Human explanations remain untrusted annotations, not automatic behavior rules. |
 | `bot_dueltracking` | `1` | Record duel summaries, per-player force-spend stats, and sequential duel events for eligible human-vs-human and human-vs-bot duels (bot-vs-bot excluded). `0` disables this recording; it does not disable use of already stored learned preferences. |
+| `bot_eloMiningLimit` | `0` | Maximum ranked human-vs-bot duels per human per UTC day, across bot levels and duel types. `0` or less disables the limit. Extra duels are recorded without changing either rating. |
+| `bot_botEloMiningLimit` | `5` | Maximum ranked bot-vs-bot duels per bot skill level per UTC day, across opponents and duel types. `0` or less disables the limit. Either level reaching the limit leaves the duel unranked. |
+
 | `bot_dueltracking_geometry` | `2` | Optional geometry on tracked duel events. `0` disables geometry; `1` captures it for damage/range/air/knockdown, attack and swing, counter/punish/follow-up, input, throw, dodge, defense, attack-sample and decision events; `2` captures geometry for all tracked non-command-sample events. Geometry is supplementary to duel recording and does not enable tracking by itself. |
 | `bot_yawswitch` | `10` | Legacy/unused cvar; current wall-escape yaw behavior is hardcoded in `ai_main.c`. |
 | `bot_forcepowers` | `1` | Enable bots using force powers. |
@@ -1155,6 +1158,8 @@ Notes:
 | `bot_team` | `0` | Force bot team. |
 | `g_flipKickDamageScale` | `1` | Scale flipkick damage. |
 | `g_movementStyle` | `1` | Movement physics style (affects bot movement code paths). |
+
+`rebuildElo` reapplies the current mining limits to recorded duels in chronological order, so changing a limit before rebuilding can change historical ratings.
 
 Tracked duel data access:
 - Stored in `fs_homepath/fs_game/dueltracks.db` (fallback: `fs_game/dueltracks.db`); Elo and account data remain in `data.db`.

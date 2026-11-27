@@ -20,6 +20,13 @@ stock advice even if the opponent was human or the capture was incomplete.
 Personalized advice requires three informative tracked Force duels. After ten
 saber duels in a session, a bot may suggest a Force duel once.
 Arcade and saber duels do not otherwise produce tutorial advice.
+In-game lesson text highlights Force points in cyan (`^5`), health and
+damage in red (`^1`), and concepts such as PK, GK and drainlock in yellow
+(`^3`). The catalog below omits the color codes for readability.
+
+The Drain example describes ten successful processed ticks, not a fixed
+full-hold duration: available Force, target Force, missing health and actual
+tick cadence limit the result.
 
 ## Integration and safety
 
@@ -167,26 +174,26 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 2 | B | force | none | literal | Choose level 3 Push, Pull and Saber Throw; take level 3 Drain for dark side, or Heal and Absorb for light side. |
 | 3 | B | force | Push@1 | cost PUSH | Push spends %d FP. It can stun a ready defender during their counter, leaving an opening for saber throw. |
 | 4 | B | force | Pull@1 | cost PULL | Pull spends %d FP. Its counter stun briefly exposes a ready defender to saber throw. |
-| 5 | B | force | Push@1, Pull@1 | literal | Push's counter stun lasts longer than Pull's. An airborne or attacking opponent cannot use that automatic counter. |
-| 6 | B | force | Push@1, Pull@1 | literal | Below 20 FP, a target cannot normally counter Push or Pull: Pull can set up PK, and Push can send them over a ledge. |
-| 7 | B | force | Throw@1 | value THROW_BASE_DAMAGE | A saber throw can deal %d base damage on contact; blocks, misses and damage reductions change the result. |
+| 5 | B | force | Push@1, Pull@1 | literal | Push and Pull can stun a grounded opponent. Push has a slightly longer stun than Pull. |
+| 6 | B | force | Push@1, Pull@1 | literal | Airborne or attacking opponents, or those below 20 FP, can be moved by Push or Pull instead of stunned. |
+| 7 | B | force | Throw@1 | value THROW_BASE_DAMAGE | A saber throw can deal %d base damage on contact. |
 | 8 | B | force | Throw@1 | literal | A throw can catch an opponent while they attack, recover or cannot block; watch for their defense. |
 | 9 | B | force | Throw@3 | literal | Think of your crosshair as a laser pointer: the flying saber steers toward the traced point. |
-| 10 | B | force | Push@1, Throw@1 | literal | Push can stun the opponent during their counter; throw into that opening for up to 30 base damage, not a guaranteed hit. |
+| 10 | B | force | Push@1, Throw@1 | literal | Push can stun the opponent during their counter; throw into that opening for up to 30 base damage. |
 | 11 | B | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d FP plus throw %d FP costs %d FP; an unblocked throw deals %d base damage. |
 | 12 | B | any | none | literal | A flipkick is a wall-flip off your opponent: get close and jump into them as if they were a wall. |
 | 13 | B | any | none | literal | For a front flipkick, hold forward and tap jump again while rising near your opponent. For a side flip, strafe and jump. |
 | 14 | B | any | none | value FLIPKICK_BASE_DAMAGE | A flipkick can deal %d base damage; it bypasses armor and can knock the opponent down. |
 | 15 | B | any | none | literal | If you use TaystJK, you can bind flipkick in the JAPro menu instead of timing the jumps manually. |
-| 16 | B | force | Pull@1 | literal | Pullkick (PK): Pull, then flipkick as they reach you. A 20-damage kick takes 20 HP if it lands. |
+| 16 | B | force | Pull@1 | literal | Pullkick (PK): Pull, then flipkick as the opponent reaches you. |
 | 17 | B | force | Pull@1, Throw@1 | literal | PTK: throw, Pull into the blade, then flipkick. If the hits deal 30 and 20, that totals 50 damage. |
 | 18 | B | force | Grip@1 | threshold GRIP; cost GRIP | Grip needs %d FP available; acquiring a target spends %d FP, then holding spends more. |
-| 19 | B | force | Grip@1 | literal | Gripkick (GK): Grip the target and flipkick while holding them. Each 20-damage kick removes 20 HP if it lands. |
+| 19 | B | force | Grip@1 | literal | Gripkick (GK): Grip the target, look down to bring them closer, and flipkick while holding them. |
 | 20 | B | force | Grip@3 | literal | Level 3 Grip deals 40 base choke damage after about 3 seconds; reductions or escape can change the outcome. |
 | 21 | B | force | Grip@1 | literal | Example: three 20-damage kicks plus a level 3 Grip's 40 choke total 100 HP, enough to defeat a 100-HP target. |
-| 22 | B | force | Rage@1 | literal | Rage before choke damage can help you survive a gripkick; it costs FP and drains HP, so escape afterward. |
-| 23 | B | force | Drain@1 | value DRAIN_SHOT_COST; value DRAIN_HEAL_GAIN; value DRAIN_TARGET_LOSS | Each processed Drain shot costs %d FP; a clean hit can heal up to %d HP and remove up to %d enemy FP. |
-| 24 | B | force | Drain@1 | literal | Example: five clean hits at 5 FP per shot and 4 HP/FP per hit spend 25 FP and gain 20 HP while removing 20 FP. |
+| 22 | B | force | Rage@1 | minimum RAGE; action cost RAGE | Rage needs %d FP and spends %d FP to activate; use it before Grip's choke damage, then escape. |
+| 23 | B | force | Drain@2 | 10 x DRAIN_SHOT_COST; 10 x DRAIN_HEAL_GAIN; 10 x DRAIN_TARGET_LOSS | Ten clean Drain ticks cost %d FP, heal up to %d HP and remove up to %d enemy FP. |
+| 24 | B | force | Drain@1 | literal | A held Drain has no fixed total: its effect depends on your FP, missing HP, target FP and time held. |
 | 25 | B | force | Pull@1, Drain@1 | literal | A drainlock delays FP recovery. Keeping an opponent below 20 FP can deny their Pull and expose them to your pullkick. |
 | 26 | B | force | Heal@1 | cost HEAL; value HEAL_GAIN | Heal spends %d FP for up to %d HP at your level, capped by missing HP. |
 | 27 | B | force | Heal@1 | literal | If you have 40 HP and the opponent has 80, create space and Heal rather than charging into another exchange. |
@@ -221,7 +228,7 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 56 | B | force | Pull@1 | literal | A close Pull can change the spacing quickly. Leave room to react rather than holding forward. |
 | 57 | B | force | Pull@1 | literal | Against Absorb, Pull may be weakened; do not assume the opponent will move. |
 | 58 | B | force | Pull@1, Throw@1 | literal | Pull-throw can catch a target moving toward the blade; a clean throw has 30 base damage before reductions. |
-| 59 | B | force | Pull@1 | literal | After Pull, a kick can threaten the opponent at close range; a miss exposes you too. |
+| 59 | B | force | Pull@1 | literal | After Pull, a close-range kick can knock the opponent down and open a saber follow-up. |
 | 60 | B | force | Pull@1 | literal | Vary a Pull approach with movement so the opponent cannot prepare for the same entry each time. |
 | 61 | B | force | Grip@1 | literal | Gripkick: hold Grip and flipkick. A 20-damage kick plus level 3 Grip's 40 choke can total 60 HP if both land. |
 | 62 | B | force | Grip@1 | literal | You can steer a gripped target with your view; abrupt turns can make their movement hard to predict. |
@@ -280,19 +287,19 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 115 | B | force | Grip@1 | literal | A Grip attempt followed by a saber attack needs both FP and a clear route to the opponent. |
 | 116 | B | force | Drain@1 | literal | Use Drain to pressure FP, then judge whether the opponent has closed into saber range. |
 | 117 | B | force | Heal@1, Push@1 | cost PUSH; cost HEAL; sum | Push and Heal spend %d plus %d FP, or %d FP; use the separation to restore HP. |
-| 118 | B | force | Pull@1 | literal | Pull and a kick require close spacing; do not assume a Pull guarantees the kick will connect. |
+| 118 | B | force | Pull@1 | literal | Pull and a kick require close spacing; time the flipkick as the opponent reaches you. |
 | 119 | B | force | Throw@1 | literal | A thrown saber may return while you reposition. Watch its path before starting another approach. |
 | 120 | B | force | Push@1, Lightning@1 | cost PUSH | Push costs %d FP; reserve that much after using Lightning if you need Push to escape. |
 | 121 | B | any | none | literal | A flipkick can knock an opponent down, creating an opening for a follow-up. |
 | 122 | B | any | none | value FLIPKICK_BASE_DAMAGE | A flipkick can deal %d base damage; the actual hit can differ. |
-| 123 | B | any | none | literal | A kick may miss or fail to knock down; be ready to defend instead of assuming a follow-up. |
+| 123 | B | any | none | literal | After a kick, watch the opponent's recovery before committing to a saber follow-up. |
 | 124 | B | any | none | literal | A kick that misses leaves you close to the opponent. Plan your landing direction. |
 | 125 | B | any | none | literal | After a knockdown, watch the opponent's recovery before committing to another close attack. |
 | 126 | B | any | none | literal | If you are knocked down, watch the attacker and choose a recovery direction away from hazards. |
 | 127 | B | any | none | literal | A wall behind you reduces retreat space after a kick. Move away from it before re-engaging. |
-| 128 | B | force | Pull@1 | literal | For a pullkick, Pull first and kick as the target reaches you; a 20-damage kick takes 20 HP if it lands. |
-| 129 | B | force | Pull@1, Throw@1 | example swing; value THROW_BASE_DAMAGE; value FLIPKICK_BASE_DAMAGE; sum | Example: if swing, throw and kick deal %d, %d and %d, swing + PTK totals %d damage. Hits can miss. |
-| 130 | B | any | none | literal | Spacing matters for kicks: too far misses, while too close leaves little room to evade. |
+| 128 | B | force | Pull@1 | literal | For a pullkick, Pull first and kick as the target reaches you. |
+| 129 | B | force | Pull@1, Throw@1 | example swing; value THROW_BASE_DAMAGE; value FLIPKICK_BASE_DAMAGE; sum | Example: swing, throw and kick deal %d, %d and %d; swing + PTK totals %d damage. |
+| 130 | B | any | none | literal | Approach at an angle to leave room to evade after a close-range kick. |
 | 131 | B | any | none | literal | Track the opponent's position while retreating; turning away can hide their approach. |
 | 132 | B | any | none | literal | Move sideways as well as backward to avoid being driven into a wall. |
 | 133 | B | any | none | literal | A missed attack is a cue to restore distance before starting another one. |
@@ -320,7 +327,7 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 155 | A | force | Pull@1, Protect@1 | cost PROTECT; cost PULL; sum | Protect and Pull cost %d and %d FP, totaling %d FP before Protect's ongoing drain. |
 | 156 | A | force | Grip@1 | value GRIP_START_COST; value GRIP_HOLD_COST | Grip spends %d FP on acquisition and %d per hold tick; its starting threshold is a separate check. |
 | 157 | A | force | Drain@1 | literal | After Drain, both players have a recovery delay; repeated clean hits can keep the target's delay refreshed. |
-| 158 | A | force | Lightning@1 | literal | Lightning spends FP while firing; stop if the opponent reaches cover rather than continuing into it. |
+| 158 | A | force | Lightning@1 | literal | Lightning can interrupt an opponent's approach; combine it with movement to control the distance. |
 | 159 | A | force | Throw@1 | cost THROW | Throw spends %d FP on launch; normal FP regeneration is suppressed while the blade is in flight. |
 | 160 | A | force | Heal@1 | cost HEAL; value HEAL_GAIN | Heal spends %d FP for at most %d HP at your level. The health cap can reduce that return. |
 | 161 | A | force | Drain@1 | literal | A drainlock is repeated Drain pressure that delays an opponent's FP recovery and limits their options. |
@@ -328,11 +335,11 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 163 | A | force | Drain@1 | literal | A successful Drain delays the target's FP regeneration, helping you create a temporary Force advantage. |
 | 164 | A | force | Drain@1 | value DRAIN_TARGET_LOSS | A clean Drain hit can remove up to %d FP; Absorb and the target's remaining FP affect the result. |
 | 165 | A | force | Drain@1 | value DRAIN_HEAL_GAIN | A clean Drain hit can restore up to %d HP; your missing HP and target conditions limit the gain. |
-| 166 | A | any | none | literal | Example: 30 AP minus 20 armor damage leaves 10 AP; the same hit may also damage HP. |
+| 166 | A | any | none | literal | A flipkick can knock an opponent down; use the opening to control the next exchange. |
 | 167 | A | force | Drain@1 | literal | In a drainlock, short taps can refresh the target's recovery delay without spending as much as a long hold. |
 | 168 | A | force | Drain@1 | literal | Drain costs FP too: holding it too long can leave you unable to capitalize on your opponent's low FP. |
 | 169 | A | force | Drain@1 | literal | Escape Drain by breaking line of sight or moving out of range; avoid spending the FP you need for defense. |
-| 170 | A | any | none | literal | Measure a trade in HP lost, AP lost and position gained; one number does not describe the exchange. |
+| 170 | A | any | none | literal | After an exchange, consider your remaining health and position before committing again. |
 | 171 | A | force | Heal@3 | literal | Example: at 75 of 100 HP, level 3 Heal can restore 25 HP; at 95 it restores only 5. |
 | 172 | A | force | Heal@2 | literal | Example: at 88 of 100 HP, a level 2 Heal restores 10 HP, leaving 98 HP. |
 | 173 | A | force | Heal@1 | literal | Example: at 97 of 100 HP, even a level 1 Heal is capped to 3 HP restored. |
@@ -348,7 +355,7 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 183 | A | force | Push@1 | literal | If the opponent activates Absorb, test their response with movement rather than repeatedly spending on Push. |
 | 184 | A | force | Push@1 | literal | Use Push to interrupt an entry, then move off the line the opponent used to approach. |
 | 185 | A | force | Heal@1, Push@1 | literal | Use the space after Push to decide between healing and preserving FP for a counter. |
-| 186 | A | force | Pull@1, Drain@1 | literal | A quick pullkick can interrupt an opponent trying to close for Drain; a miss leaves you exposed. |
+| 186 | A | force | Pull@1, Drain@1 | literal | A quick pullkick can interrupt an opponent trying to close for Drain. |
 | 187 | A | force | Push@1 | literal | If Push fails, retreat around cover rather than continuing the same close-range approach. |
 | 188 | A | force | Push@1 | literal | Against a close gripper, Push can be a response; face the attacker and check available FP. |
 | 189 | A | force | Push@1 | literal | Push toward open ground and keep a different path for your own retreat. |
@@ -418,13 +425,13 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 253 | A | force | Throw@3 | literal | A throw that never connects still costs FP and delays recovery; recall before committing to the same entry. |
 | 254 | A | force | Throw@3 | literal | Watch the flying saber as well as the pointer: it approaches the traced point from its location. |
 | 255 | A | force | Throw@3 | literal | Push and Pull stun through a defender's counter animation; the blade still needs an unblocked contact to deal 30 base damage. |
-| 256 | A | force | Throw@3 | literal | Pressure a low-FP target with Pull or a saber attack rather than assuming they remain helpless after a stun. |
+| 256 | A | force | Throw@3 | literal | Use Push or Pull to stun opponents and open them up to incoming attacks. |
 | 257 | A | force | Throw@1 | literal | Release alternate attack after the initial flight period to call the saber back rather than hold it out. |
 | 258 | A | force | Throw@1 | literal | The saber also returns at its range limit or after its maximum flight time; do not plan an indefinite hold. |
 | 259 | A | force | Throw@1 | literal | During the return, move to avoid the opponent while tracking where your saber will reach you. |
 | 260 | A | force | Drain@1, Throw@1 | literal | A throw used to deny Drain also delays your own FP recovery; recall before you need a Force response. |
 | 261 | A | force | Push@1, Throw@1 | cost PUSH; cost THROW; sum | Push then throw spends %d plus %d FP, or %d FP; Push's counter stun can expose the target to 30 base damage. |
-| 262 | A | force | Throw@3 | literal | Pull's counter stun and a flying blade can combine for 30 base damage; a moving target may be pulled instead. |
+| 262 | A | force | Throw@3 | literal | Pull's counter stun and a flying blade can combine for 30 damage. |
 | 263 | A | force | Throw@3 | literal | After a Grip release, a 30-base-damage throw is another threat, but spending its FP can leave no reserve for escape. |
 | 264 | A | force | Throw@3 | literal | A throw can punish a Force counter's stun without committing you to a close kick; its clean base damage is 30. |
 | 265 | A | force | Throw@3 | literal | After a blocked throw, repeated Pull attempts may spend FP without any HP return; change the next response. |
@@ -449,7 +456,7 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 284 | A | force | Pull@1 | cost PULL | Pull spends %d FP; confirm displacement before committing to a close kick. |
 | 285 | A | force | Grip@1 | value GRIP_START_COST | Grip spends %d FP on acquisition, plus hold ticks; release and track the target before swinging. |
 | 286 | A | force | Push@1, Lightning@1 | cost PUSH | Push spends %d FP; keep that reserve after Lightning if you plan to Push away. |
-| 287 | A | force | Pull@1, Throw@1 | literal | After a saber hit, PTK adds another throw and kick threat; each component can miss or be blocked. |
+| 287 | A | force | Pull@1, Throw@1 | literal | After a saber hit, PTK adds a throw and kick threat while the opponent recovers. |
 | 288 | A | force | Absorb@1 | literal | Absorb, close distance, then use the saber: active defense does not guarantee the opponent cannot counter. |
 | 289 | A | force | Protect@1 | literal | Protect, move off the attack line, then reassess FP: absorbing damage consumes resources. |
 | 290 | A | force | Pull@1, Throw@1 | literal | Example: a 30 swing, 20 kick, 50 PTK and 30 throw total 130 damage if every hit deals those amounts. |
@@ -457,7 +464,7 @@ pushing an opponent into the blade: its longer counter stun is the opening.
 | 292 | A | force | Speed@1, Throw@1 | cost SPEED; cost THROW; sum | Speed plus throw costs %d + %d = %d FP; the low reserve can deny Drain healing but leaves you exposed. |
 | 293 | A | force | Heal@1, Absorb@1 | cost ABSORB; cost HEAL; sum | Absorb and Heal cost %d plus %d FP, or %d FP before Absorb's ongoing drain. |
 | 294 | A | force | Drain@1 | literal | An opponent can counter a long Drain hold: leave enough FP and space to react. |
-| 295 | A | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d plus throw %d FP totals %d FP; a clean throw has %d base damage, not a guaranteed hit. |
+| 295 | A | force | Pull@1, Throw@1 | cost PULL; cost THROW; sum; value THROW_BASE_DAMAGE | Pull %d plus throw %d FP totals %d FP; a clean throw has %d base damage. |
 | 296 | A | force | Push@1, Pull@1, Grip@1 | literal | Break an enemy Grip with Push or Pull if you can target the attacker and have enough FP. |
 | 297 | A | force | Drain@1 | literal | After escaping a drainlock, regenerate enough FP for a counter before entering the same Drain range. |
 | 298 | A | force | none | literal | If the opponent moves behind cover, cancel the aimed follow-up and choose a new line. |
@@ -489,10 +496,10 @@ exchange, not just saber hits.
 | C003 | Poor Force | matching windows; all observations | %s: %d/%d attempts: zero credited damage, worse Force balance; save Force for defense. |
 | C004 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses; don't pay for a second Pull before the first throw arrives. |
 | C005 | Poor Force | matching windows; all observations | %s: %d/%d attempts had no credited damage and worse net Force; reset before another attack. |
-| C006 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses. Pull+Throw example: 40 FP for 30 damage, only if it lands. |
+| C006 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses. Pull+Throw costs 40 FP for 30 damage. |
 | C007 | Poor Force | matching windows; all observations | %s: %d/%d attempts: no damage credited, net Force down; break off and recover. |
 | C008 | Poor Force | matching windows; all observations | %s: %d/%d no-damage FP losses; let my kick finish, then test a saber reply instead of casting. |
-| C009 | Poor Force | matching windows; all observations | %s: %d/%d attempts paired no damage credit with Force loss; let Force recover before returning. |
+| C009 | Poor Force | matching windows; all observations | %s: %d/%d attempts had no damage and lost Force; recover before returning. |
 | C010 | Poor Force | matching windows; all observations | %s: No damage credited, Force balance worsened in %d/%d attempts; test a low-cost saber option. |
 | C011 | Drain Exposure | matching windows; all observations | %s: Drain active in %d/%d attempts; net Force fell, own Force ended under 20. Make space. |
 | C012 | Drain Exposure | matching windows; all observations | %s: Drain active in %d/%d attempts; net Force fell, your Force ended under 20. Reset. |
@@ -500,8 +507,8 @@ exchange, not just saber hits.
 | C014 | Drain Exposure | matching windows; all observations | %s: Drain active, net Force down, your Force under 20 at end: %d/%d attempts. Save reserve. |
 | C015 | Drain Exposure | matching windows; all observations | %s: %d/%d attempts: Drain active, net Force fell, your Force ended below 20; break contact. |
 | C016 | Drain Exposure | matching windows; all observations | %s: %d/%d fell below 20 FP with my Drain earlier; break range before spending on a reply. |
-| C017 | Drain Exposure | matching windows; all observations | %s: %d/%d fell below 20 FP with my Drain earlier; a clean Drain hit removes up to 4 FP. |
-| C018 | Drain Exposure | matching windows; all observations | %s: %d/%d attempts paired active Drain, falling net Force, and Force ending below 20; break contact. |
+| C017 | Drain Exposure | matching windows; all observations | %s: %d/%d fell below 20 FP with my Drain earlier; break line of sight to recover. |
+| C018 | Drain Exposure | matching windows; all observations | %s: %d/%d attempts ended below 20 Force after Drain; break contact. |
 | C019 | Drain Exposure | matching windows; all observations | %s: %d/%d FP losses under 20 with my Drain earlier; rebuild first, not another costly PTK. |
 | C020 | Drain Exposure | matching windows; all observations | %s: Net Force fell in %d/%d attempts with Drain active and your Force under 20; reset. |
 | C021 | Low Health | trainee HP; opponent HP | %s: Attack at %d HP vs %d; no recovery followed. Use the available Heal or Drain. |
@@ -544,7 +551,7 @@ exchange, not just saber hits.
 | C058 | Vs Pk | matching windows; all observations | %s: %d/%d bad PK trades; let the kick pass, then test a saber hit instead of matching Pulls. |
 | C059 | Vs Pk | matching windows; all observations | %s: Observed PK and %d/%d bad trades; make space, then return with a different plan. |
 | C060 | Vs Pk | matching windows; all observations | %s: %d/%d negative trades alongside observed PK; don't spend Force just to repeat a plan. |
-| C061 | Vs Gk | matching windows; all observations | %s: Observed GK with bad HP/AP trades in %d/%d attempts; if grip starts, break hold before choke. |
+| C061 | Vs Gk | matching windows; all observations | %s: GK observed in %d/%d bad HP/AP trades; break the hold before choke. |
 | C062 | Vs Gk | matching windows; all observations | %s: %d/%d bad GK trades; level-3 choke adds 40 base damage. Break the hold before that arrives. |
 | C063 | Vs Gk | matching windows; all observations | %s: %d/%d negative trades with observed GK; if gripped, break hold first, then make space. |
 | C064 | Vs Gk | matching windows; all observations | %s: Bad trades in %d/%d attempts with GK observed; if gripped, save Force for escape. |

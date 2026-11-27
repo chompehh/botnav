@@ -9257,6 +9257,12 @@ void Cmd_Nearby_f(gentity_t* ent);
 void Cmd_InvalidateRace_f(gentity_t* ent);
 void Cmd_Haste_f(gentity_t* ent);
 
+static void Cmd_BnDuelHud_f(gentity_t *ent)
+{
+	ent->client->pers.duelHudClient = qtrue;
+	ent->client->pers.duelHudNextSend = 0;
+}
+
 /* This array MUST be sorted correctly by alphabetical name field */
 command_t commands[] = {
 	{ "addbot",				Cmd_AddBot_f,				0 },
@@ -9318,6 +9324,7 @@ command_t commands[] = {
 
 	//{ "best",				Cmd_PersonalBest_f,			CMD_NOINTERMISSION },
 	{ "blink",				Cmd_Blink_f,				CMD_NOINTERMISSION },//change for admin?
+	{ "bnduelhud",			Cmd_BnDuelHud_f,			0 },
 
 	{ "callteamvote",		Cmd_CallTeamVote_f,			CMD_NOINTERMISSION },
 	{ "callvote",			Cmd_CallVote_f,				CMD_NOINTERMISSION },
