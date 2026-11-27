@@ -185,6 +185,7 @@ void CG_ParseServerinfo( void ) {
 	cgs.siegeTeamSwitch = atoi( Info_ValueForKey( info, "g_siegeTeamSwitch" ) );
 
 	cgs.showDuelHealths = atoi( Info_ValueForKey( info, "g_showDuelHealths" ) );
+	cgs.showHealthMode = atoi( Info_ValueForKey( info, "g_showHealth" ) );
 
 	cgs.gametype = atoi( Info_ValueForKey( info, "g_gametype" ) );
 	trap->Cvar_Set("g_gametype", va("%i", cgs.gametype));
@@ -1790,6 +1791,19 @@ static void CG_ClientLevelShot_f( void ) {
 	cg.levelShot = qtrue;
 }
 
+static void CG_DuelHud_f(void)
+{
+	if (trap->Cmd_Argc() != 7)
+		return;
+	cg.duelHudOpponent = atoi(CG_Argv(1));
+	cg.duelHudMode = atoi(CG_Argv(2));
+	cg.duelHudHealth = atoi(CG_Argv(3));
+	cg.duelHudMaxHealth = atoi(CG_Argv(4));
+	cg.duelHudForce = atoi(CG_Argv(5));
+	cg.duelHudMaxForce = atoi(CG_Argv(6));
+	cg.duelHudTime = cg.time;
+}
+
 typedef struct serverCommand_s {
 	const char	*cmd;
 	void		(*func)(void);
@@ -1800,6 +1814,7 @@ int svcmdcmp( const void *a, const void *b ) {
 }
 
 static serverCommand_t	commands[] = {
+	{ "bnduelstats",		CG_DuelHud_f },
 	{ "chat",				CG_Chat_f },
 	{ "clientLevelShot",	CG_ClientLevelShot_f },
 	{ "cp",					CG_CenterPrint_f },

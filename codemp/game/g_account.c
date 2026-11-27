@@ -1,6 +1,7 @@
 #include "g_local.h"
 #include "g_duel_identity.h"
 #include "g_duel_elo.h"
+#include "g_duel_elo_limits.h"
 #include "g_duel_capture.h"
 #include "g_duel_session.h"
 #include "g_duel_tutorial.h"
@@ -38,7 +39,6 @@ extern void saberBackToOwner(gentity_t *saberent);
 
 static char LOCAL_DB_PATH[MAX_OSPATH];
 static char LOCAL_DUELTRACK_DB_PATH[MAX_OSPATH];
-#define BOT_DUEL_RANKED_LIMIT_PER_LEVEL 5
 #define BOT_DUEL_LEVEL_MIN 1
 #define BOT_DUEL_LEVEL_MAX 10
 #define BOT_DUEL_SEED_ELO_MIN 800.0f
@@ -3404,7 +3404,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 	duel_tutorial_session_t *session;
 	qboolean preferBasics;
 	static const char *const sequenceNames[DTS_COUNT] = {
-		"throw-pull-kick", "grip-kick", "pull-kick", "drain-kick",
+		"^3throw-pull-kick^7", "^3grip-kick^7", "^3pull-kick^7", "drain-kick",
 		"drain-pull", "drain-swing", "drain", "pull-swing",
 		"grip-swing", "push-swing", "pull vs drain", "push vs drain"
 	};
@@ -3658,24 +3658,24 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 		int messageKind = G_DuelSequenceMessageKind(history.rotation, total, sample);
 		const char *name = sequenceNames[sequenceChoice];
 		if (messageKind == DTS_MESSAGE_LOSS)
-			Com_sprintf(message, sizeof(message), "%s: %d/%d negative HP/AP trades in %d duels. Latest HP/AP you %+d/%+d, enemy %+d/%+d.",
+			Com_sprintf(message, sizeof(message), "%s: %d/%d negative ^1HP/AP^7 trades in %d duels. Latest ^1HP/AP^7 you %+d/%+d, enemy %+d/%+d.",
 				name, total->losses, n, duels, sample->sampleSelfHp, sample->sampleSelfAp,
 				sample->sampleEnemyHp, sample->sampleEnemyAp);
 		else if (messageKind == DTS_MESSAGE_POOR_FORCE)
-			Com_sprintf(message, sizeof(message), "%s: %d/%d no damage, worse FP trade in %d duels. Latest net FP you %+d, enemy %+d; HP you %+d, enemy %+d.",
+			Com_sprintf(message, sizeof(message), "%s: %d/%d no ^1damage^7, worse ^5FP^7 trade in %d duels. Net ^5FP^7 you %+d, enemy %+d; ^1HP^7 you %+d, enemy %+d.",
 				name, total->poorForce, n, duels, sample->sampleSelfFp, sample->sampleEnemyFp,
 				sample->sampleSelfHp, sample->sampleEnemyHp);
 		else if (messageKind == DTS_MESSAGE_REPEAT)
-			Com_sprintf(message, sizeof(message), "%s: %d times in %d duels, %d negative trades. Latest damage dealt/taken %d/%d; net FP you %+d, enemy %+d.",
+			Com_sprintf(message, sizeof(message), "%s: %d times in %d duels, %d negative trades. ^1Damage^7 dealt/taken %d/%d; net ^5FP^7 you %+d, enemy %+d.",
 				name, n, duels, total->losses, sample->sampleDealt, sample->sampleTaken,
 				sample->sampleSelfFp, sample->sampleEnemyFp);
 		if (strlen(message) >= sizeof(message) - 1)
 		{
 			if (messageKind == DTS_MESSAGE_POOR_FORCE)
-				Com_sprintf(message, sizeof(message), "%s: %d/%d no damage, worse FP trade in %d duels.",
+				Com_sprintf(message, sizeof(message), "%s: %d/%d no ^1damage^7, worse ^5FP^7 trade in %d duels.",
 					name, total->poorForce, n, duels);
 			else if (messageKind == DTS_MESSAGE_LOSS)
-				Com_sprintf(message, sizeof(message), "%s: %d/%d negative HP/AP trades in %d duels.",
+				Com_sprintf(message, sizeof(message), "%s: %d/%d negative ^1HP/AP^7 trades in %d duels.",
 					name, total->losses, n, duels);
 			else
 				Com_sprintf(message, sizeof(message), "%s: %d attempts in %d duels.", name, n, duels);
@@ -3710,7 +3710,7 @@ static void G_RecordTutorialOutcome(gentity_t *player, gentity_t *opponent,
 			Com_sprintf(message, sizeof(message), "You were hit moving in during saber recovery %d times across %d duels. Let recovery finish before closing in.", n, duels);
 			break;
 		case DUEL_TUTORIAL_LOW_HEALTH_ATTACK:
-			Com_sprintf(message, sizeof(message), "%d attacks in %d duels while low on HP and behind. Latest: %d HP vs %d. Make space to Heal before re-entering.",
+			Com_sprintf(message, sizeof(message), "%d attacks in %d duels at low ^1HP^7. Latest: ^1%d^7 vs ^1%d HP^7. Make space to Heal.",
 				n, duels, observation.sampleSelfHealth, observation.sampleEnemyHealth);
 			break;
 		}
@@ -7226,7 +7226,8 @@ int GetDuelCount(char *username, int type, int end_time, sqlite3 * db) {
 	int count = 0;
 
 	//Get Current Count, Get last duel id, get new duel id
-	sql = "SELECT COUNT(*) FROM LocalDuel WHERE type = ? AND (winner = ? OR loser = ?) AND end_time < ?";
+	sql = "SELECT COUNT(*) FROM LocalDuel WHERE type = ? AND (winner = ? OR loser = ?) "
+		"AND end_time < ? AND winner_elo > -998 AND loser_elo > -998";
 	CALL_SQLITE (prepare_v2 (db, sql, strlen (sql) + 1, & stmt, NULL));
 	CALL_SQLITE (bind_int (stmt, 1, type));
 	CALL_SQLITE (bind_text (stmt, 2, username, -1, SQLITE_STATIC));
@@ -7350,96 +7351,14 @@ int GetEloKValue(int numDuels) { //Also take rank into account
 	return k3;
 }
 
-static int G_GetRankedBotVsBotLevelDuelsToday(int botLevel, int opponentLevel, int end_time, sqlite3 *db)
+static qboolean G_ShouldRankBotDuel(const char *winner, const char *loser,
+	int winnerLevel, int loserLevel, int end_time, sqlite3 *db)
 {
-	char *sql;
-	sqlite3_stmt *stmt;
-	int s;
-	int count = 0;
-	sqlite3_int64 dayStart;
-	sqlite3_int64 dayEnd;
-	sqlite3_int64 endTime64;
-	char botLevelName[16];
-	char botLevelTaggedName[32];
-	char opponentLevelName[16];
-	char opponentLevelTaggedName[32];
-
-	if (!db ||
-		botLevel < BOT_DUEL_LEVEL_MIN || botLevel > BOT_DUEL_LEVEL_MAX ||
-		opponentLevel < BOT_DUEL_LEVEL_MIN || opponentLevel > BOT_DUEL_LEVEL_MAX)
-	{
-		return 0;
-	}
-
-	// end_time is a Unix epoch timestamp (UTC seconds from time()).
-	endTime64 = (sqlite3_int64)end_time;
-	dayStart = endTime64 - (endTime64 % 86400);
-	dayEnd = dayStart + 86400;
-	Com_sprintf(botLevelName, sizeof(botLevelName), "botlvl%i", botLevel);
-	Com_sprintf(botLevelTaggedName, sizeof(botLevelTaggedName), "%% [bot L%i]", botLevel);
-	Com_sprintf(opponentLevelName, sizeof(opponentLevelName), "botlvl%i", opponentLevel);
-	Com_sprintf(opponentLevelTaggedName, sizeof(opponentLevelTaggedName), "%% [bot L%i]", opponentLevel);
-
-	sql = "SELECT COUNT(*) FROM LocalDuel "
-		"WHERE end_time >= ? AND end_time < ? "
-		"AND winner_elo > -998 AND loser_elo > -998 "
-		"AND ("
-			"(((winner = ? OR winner LIKE ?) AND (loser = ? OR loser LIKE ?)))"
-			" OR "
-			"(((loser = ? OR loser LIKE ?) AND (winner = ? OR winner LIKE ?)))"
-		")";
-	CALL_SQLITE (prepare_v2 (db, sql, strlen (sql) + 1, & stmt, NULL));
-	CALL_SQLITE (bind_int64 (stmt, 1, dayStart));
-	CALL_SQLITE (bind_int64 (stmt, 2, dayEnd));
-	CALL_SQLITE (bind_text (stmt, 3, botLevelName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 4, botLevelTaggedName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 5, opponentLevelName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 6, opponentLevelTaggedName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 7, botLevelName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 8, botLevelTaggedName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 9, opponentLevelName, -1, SQLITE_TRANSIENT));
-	CALL_SQLITE (bind_text (stmt, 10, opponentLevelTaggedName, -1, SQLITE_TRANSIENT));
-
-	s = sqlite3_step(stmt);
-	if (s == SQLITE_ROW) {
-		count = sqlite3_column_int(stmt, 0);
-	}
-	else if (s != SQLITE_DONE) {
-		G_ErrorPrint("ERROR: SQL Select Failed (G_GetRankedBotVsBotLevelDuelsToday)", s);
-	}
-
-	CALL_SQLITE (finalize(stmt));
-	return count;
-}
-
-static qboolean G_ShouldRankBotVsBotDuel(int winnerLevel, int loserLevel, int end_time, sqlite3 *db)
-{
-	int winnerDailyCount;
-	int loserDailyCount;
-
-	if (!winnerLevel || !loserLevel)
-	{
-		return qtrue;
-	}
-
-	winnerDailyCount = G_GetRankedBotVsBotLevelDuelsToday(winnerLevel, loserLevel, end_time, db);
-	loserDailyCount = (loserLevel == winnerLevel) ? winnerDailyCount :
-		G_GetRankedBotVsBotLevelDuelsToday(loserLevel, winnerLevel, end_time, db);
-
-	if (loserLevel == winnerLevel)
-	{
-		if (winnerDailyCount >= BOT_DUEL_RANKED_LIMIT_PER_LEVEL)
-		{
-			return qfalse;
-		}
-	}
-	else if (winnerDailyCount >= BOT_DUEL_RANKED_LIMIT_PER_LEVEL ||
-		loserDailyCount >= BOT_DUEL_RANKED_LIMIT_PER_LEVEL)
-	{
-		return qfalse;
-	}
-
-	return qtrue;
+	int allowed = G_DuelBotRatingAllowed(db, winner, loser, winnerLevel, loserLevel,
+		bot_eloMiningLimit.integer, bot_botEloMiningLimit.integer, end_time);
+	if (allowed < 0)
+		trap->Print("ERROR: Unable to count rated bot duels; duel left unranked.\n");
+	return allowed > 0 ? qtrue : qfalse;
 }
 
 static void G_AddDuelToDBWithHandle(sqlite3 *db, char *winner, char *loser, int type, int duration, int winner_hp, int winner_shield, int end_time)
@@ -7580,13 +7499,19 @@ void SV_RebuildElo_f() {
 	}
 	CALL_SQLITE (finalize(stmt));
 
-	sql = "SELECT winner, loser, type, id, end_time from LocalDuel ORDER BY end_time ASC";
+	sql = "SELECT winner, loser, type, id, end_time from LocalDuel ORDER BY end_time ASC, id ASC";
 	CALL_SQLITE (prepare_v2 (db, sql, strlen (sql) + 1, & stmt, NULL));
 	
     while (1) {
         s = sqlite3_step(stmt);
         if (s == SQLITE_ROW) {
-			G_AddDuelElo((char*)sqlite3_column_text(stmt, 0), (char*)sqlite3_column_text(stmt, 1), sqlite3_column_int(stmt, 2), 0, 0, 0, sqlite3_column_int(stmt, 3), sqlite3_column_int(stmt, 4), db);
+			char *winner = (char*)sqlite3_column_text(stmt, 0);
+			char *loser = (char*)sqlite3_column_text(stmt, 1);
+			int type = sqlite3_column_int(stmt, 2);
+			int endTime = sqlite3_column_int(stmt, 4);
+			if (type != 21 && G_ShouldRankBotDuel(winner, loser,
+				G_ParseBotLevelName(winner), G_ParseBotLevelName(loser), endTime, db))
+				G_AddDuelElo(winner, loser, type, 0, 0, 0, sqlite3_column_int(stmt, 3), endTime, db);
         }
         else if (s == SQLITE_DONE) {
             break;
@@ -8036,7 +7961,7 @@ void G_AddDuel(char *winner, char *loser, int winnerLevel, int loserLevel, int s
 		if (!G_OpenSQLiteFile(LOCAL_DB_PATH, &db, "account"))
 			return;
 		{
-			const qboolean shouldRankDuel = G_ShouldRankBotVsBotDuel(winnerLevel, loserLevel, rawtime, db);
+			const qboolean shouldRankDuel = G_ShouldRankBotDuel(winner, loser, winnerLevel, loserLevel, rawtime, db);
 			if (shouldRankDuel)
 			{
 				G_AddDuelElo(winner, loser, duelLogType, duration, winner_hp, winner_shield, 0, rawtime, db);
@@ -19558,6 +19483,13 @@ void InitGameAccountStuff( void ) { //Called every mapload , move the create tab
 	if (s != SQLITE_DONE)
 		G_ErrorPrint("ERROR: SQL Create Failed (InitGameAccountStuff 3)", s);
 	CALL_SQLITE (finalize(stmt));
+
+	sql = "CREATE INDEX IF NOT EXISTS idx_localduel_end_time ON LocalDuel(end_time)";
+	CALL_SQLITE(prepare_v2(db, sql, strlen(sql) + 1, &stmt, NULL));
+	s = sqlite3_step(stmt);
+	if (s != SQLITE_DONE)
+		G_ErrorPrint("ERROR: SQL Create Failed (InitGameAccountStuff idx_localduel_end_time)", s);
+	CALL_SQLITE(finalize(stmt));
 
 	G_FoldBotLadderKeysToLevels(db);
 

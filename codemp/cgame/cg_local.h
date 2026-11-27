@@ -1212,6 +1212,14 @@ typedef struct cg_s {
 	int			centerPrintY;
 	char		centerPrint[1024];
 	int			centerPrintLines;
+	qboolean	duelHudRegistered;
+	int			duelHudTime;
+	int			duelHudOpponent;
+	int			duelHudMode;
+	int			duelHudHealth;
+	int			duelHudMaxHealth;
+	int			duelHudForce;
+	int			duelHudMaxForce;
 
 	//idk
 	int			oldammo;
@@ -2208,6 +2216,7 @@ typedef struct cgs_s {
 	// parsed from serverinfo
 	int				siegeTeamSwitch;
 	int				showDuelHealths;
+	int				showHealthMode;
 	gametype_t		gametype;
 	int				debugMelee;
 	int				stepSlideFix;

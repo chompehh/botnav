@@ -28,6 +28,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 #include "hud_tribes.h"
 
 #include "game/bg_saga.h"
+#include "game/g_duel_hud.h"
 
 #include "ui/ui_shared.h"
 #include "ui/ui_public.h"
@@ -11503,12 +11504,55 @@ static void CG_AutoDemoRaceRecord(void)
 	cg.lastStartTime = cg.predictedPlayerState.duelTime;
 }
 
+static void CG_DrawDuelResourceBar(float x, float y, const char *label,
+	int value, int maximum, const float *color)
+{
+	float fraction;
+	if (maximum < 1)
+		maximum = 1;
+	if (value < 0)
+		value = 0;
+	if (value > maximum)
+		value = maximum;
+	fraction = (float)value / maximum;
+	CG_DrawSmallString(x, y, va("%s %i/%i", label, value, maximum), 1.0f);
+	CG_FillRect(x, y + 13, 100, 6, colorTable[CT_BLACK]);
+	CG_FillRect(x + 1, y + 14, 98 * fraction, 4, color);
+}
+
+static void CG_DrawDuelResources(void)
+{
+	static const vec4_t forceColor = { 0.1f, 0.8f, 1.0f, 0.9f };
+	static const vec4_t healthColor = { 1.0f, 0.15f, 0.15f, 0.9f };
+	int opponent;
+	float x = SCREEN_WIDTH / 2.0f - 50.0f;
+	float y = 42.0f;
+
+	opponent = G_DuelHudOpponent(cg.snap->ps.clientNum, cg.snap->ps.duelInProgress,
+		cg.snap->ps.duelIndex, cgs.gametype == GT_DUEL, cgs.duelist1, cgs.duelist2);
+	if ((cg.snap->ps.pm_flags & PMF_FOLLOW) ||
+		!G_DuelHudDisplayValid(cgs.showHealthMode, cg.duelHudMode, cg.time, cg.duelHudTime,
+			cg.snap->ps.stats[STAT_HEALTH], opponent, cg.duelHudOpponent, MAX_CLIENTS))
+		return;
+	CG_DrawDuelResourceBar(x, y, "^5Opponent FP^7", cg.duelHudForce,
+		cg.duelHudMaxForce, forceColor);
+	if (cg.duelHudMode == 3)
+		CG_DrawDuelResourceBar(x, y + 22, "^1Opponent HP^7", cg.duelHudHealth,
+			cg.duelHudMaxHealth, healthColor);
+}
+
 static void CG_Draw2D( void ) {
 	float			inTime = cg.invenSelectTime+WEAPON_SELECT_TIME;
 	float			wpTime = cg.weaponSelectTime+WEAPON_SELECT_TIME;
 	float			fallTime;
 	float			bestTime;
 	int				drawSelect = 0;
+
+	if (!cg.duelHudRegistered && (cgs.showHealthMode == 2 || cgs.showHealthMode == 3))
+	{
+		trap->SendClientCommand("bnduelhud");
+		cg.duelHudRegistered = qtrue;
+	}
 
 	// if we are taking a levelshot for the menu, don't draw anything
 	if ( cg.levelShot ) {
@@ -11551,6 +11595,8 @@ static void CG_Draw2D( void ) {
 		CG_ChatBox_DrawStrings();
 		return;
 	}
+
+	CG_DrawDuelResources();
 
     if (cg_killfeed.integer) CG_Draw2DNew();
 

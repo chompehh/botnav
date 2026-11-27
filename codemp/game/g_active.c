@@ -23,6 +23,7 @@ along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
 
 #include "g_local.h"
+#include "g_duel_hud.h"
 #include "bg_saga.h"
 #include "g_unlagged.h"
 
@@ -6306,6 +6307,35 @@ void SpectatorClientEndFrame( gentity_t *ent ) {
 	}
 }
 
+static void G_SendDuelHud(gentity_t *ent)
+{
+	int opponentNum;
+	gentity_t *opponent;
+
+	if (!ent->client->pers.duelHudClient ||
+		(g_showHealth.integer != 2 && g_showHealth.integer != 3) ||
+		ent->client->sess.raceMode || level.intermissiontime ||
+		level.time < ent->client->pers.duelHudNextSend)
+		return;
+	opponentNum = G_DuelHudOpponent(ent->s.number, ent->client->ps.duelInProgress,
+		ent->client->ps.duelIndex, level.gametype == GT_DUEL && level.numPlayingClients >= 2,
+		level.sortedClients[0], level.sortedClients[1]);
+	if (opponentNum < 0 || opponentNum >= level.maxclients || opponentNum == ent->s.number)
+		return;
+	opponent = &g_entities[opponentNum];
+	if (!opponent->inuse || !opponent->client ||
+		opponent->client->pers.connected != CON_CONNECTED ||
+		opponent->client->sess.sessionTeam == TEAM_SPECTATOR ||
+		(ent->client->ps.duelInProgress &&
+		 (!opponent->client->ps.duelInProgress || opponent->client->ps.duelIndex != ent->s.number)))
+		return;
+	trap->SendServerCommand(ent->s.number, va("bnduelstats %i %i %i %i %i %i",
+		opponentNum, g_showHealth.integer, opponent->health,
+		opponent->client->ps.stats[STAT_MAX_HEALTH],
+		opponent->client->ps.fd.forcePower, opponent->client->ps.fd.forcePowerMax));
+	ent->client->pers.duelHudNextSend = level.time + 100;
+}
+
 /*
 ==============
 ClientEndFrame
@@ -6415,6 +6445,10 @@ void ClientEndFrame( gentity_t *ent ) {
 	*/
 		BG_PlayerStateToEntityState( &ent->client->ps, &ent->s, qfalse );
 	//}
+	if (!isNPC && g_showHealth.integer == 2 && !ent->client->sess.raceMode)
+		G_ScaleNetHealth(ent);
+	if (!isNPC)
+		G_SendDuelHud(ent);
 
 	if (isNPC)
 	{

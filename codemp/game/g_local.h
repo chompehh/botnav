@@ -821,6 +821,8 @@ typedef struct clientPersistant_s {
 	int			connectTime;
 
 	qboolean	isJAPRO;//JAPRO - Serverside - Add Clientside Version
+	qboolean	duelHudClient;
+	int			duelHudNextSend;
 	qboolean	JAWARUN;//JAPRO - Serverside - Add Clientside Version
 	qboolean	centerMuzzle;//JAPRO - Serverside - Check if client wants to center muzzlepoint.
 	qboolean	noDamageNumbers;//Japro

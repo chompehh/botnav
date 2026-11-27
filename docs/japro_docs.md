@@ -109,7 +109,9 @@ and aim without sending chat messages. Disable it after investigation.
 	g_allowTeamSuicide		0	
 	g_emotesDisable			0//Configured with /toggleEmotes command
 	g_godChat				0	
-	g_showHealth			0 //Show healthbars above players heads when aimed at.  Requires map restart.	
+	g_showHealth			0 //0 off; 1 crosshair health; 2 crosshair Force; 3 crosshair health plus Force/health HUD on compatible clients.
+	// Modes 2 and 3 show a persistent opponent FP bar in private duels and GT_DUEL on the bundled client; 3 also shows HP.
+	// Stock clients only show the crosshair bar: FP in mode 2, HP in mode 3. Other HUD/scoreboard visibility settings still apply.
 	g_damageNumbers			0 //1-7.  Controls different types of damagenumber printouts.
 	g_fixKillCredit			0 //1=Award kill credit after target suicides/spectates. 2=Also for disconnects/reconnects.
 	g_stopHealthESP			0 //Don't send health info to other players (pain sounds can't be used to count health now).

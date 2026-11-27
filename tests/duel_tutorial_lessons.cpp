@@ -1,4 +1,5 @@
 #include "g_duel_tutorial_lessons.h"
+#include "g_duel_hud.h"
 #include <boost/test/unit_test.hpp>
 #include <algorithm>
 #include <cctype>
@@ -6,6 +7,50 @@
 #include <string>
 
 BOOST_AUTO_TEST_SUITE(duel_tutorial_curriculum)
+
+BOOST_AUTO_TEST_CASE(duel_hud_network_values_are_clamped_and_scaled)
+{
+	int value, maximum;
+	G_DuelHudNetworkValue(45, 100, &value, &maximum);
+	BOOST_CHECK_EQUAL(value, 45);
+	BOOST_CHECK_EQUAL(maximum, 100);
+	G_DuelHudNetworkValue(-2, 100, &value, &maximum);
+	BOOST_CHECK_EQUAL(value, 0);
+	G_DuelHudNetworkValue(200, 100, &value, &maximum);
+	BOOST_CHECK_EQUAL(value, 100);
+	G_DuelHudNetworkValue(1000, 2000, &value, &maximum);
+	BOOST_CHECK_EQUAL(value, 511);
+	BOOST_CHECK_EQUAL(maximum, 1023);
+	G_DuelHudNetworkValue(0, 0, &value, &maximum);
+	BOOST_CHECK_EQUAL(value, 0);
+	BOOST_CHECK_EQUAL(maximum, 1);
+	BOOST_CHECK_EQUAL(G_DuelHudOpponent(1, 1, 7, 0, 0, 0), 7);
+	BOOST_CHECK_EQUAL(G_DuelHudOpponent(1, 0, 7, 1, 1, 2), 2);
+	BOOST_CHECK_EQUAL(G_DuelHudOpponent(2, 0, 7, 1, 1, 2), 1);
+	BOOST_CHECK_EQUAL(G_DuelHudOpponent(3, 0, 7, 1, 1, 2), -1);
+	BOOST_CHECK_EQUAL(G_DuelHudOpponent(1, 0, 7, 0, 1, 2), -1);
+	BOOST_CHECK(G_DuelHudDisplayValid(2, 2, 1100, 1000, 100, 4, 4, 32));
+	BOOST_CHECK(G_DuelHudDisplayValid(3, 3, 1100, 1000, 100, 4, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(1, 1, 1100, 1000, 100, 4, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(3, 2, 1100, 1000, 100, 4, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(2, 2, 2501, 1000, 100, 4, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(2, 2, 1100, 1000, 0, 4, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(2, 2, 1100, 1000, 100, 5, 4, 32));
+	BOOST_CHECK(!G_DuelHudDisplayValid(2, 2, 1100, 1000, 100, -1, -1, 32));
+}
+
+static std::string withoutColors(const char *text)
+{
+	std::string result;
+	for (size_t i = 0; text[i]; ++i)
+	{
+		if (text[i] == '^' && text[i + 1] >= '0' && text[i + 1] <= '9')
+			++i;
+		else
+			result += text[i];
+	}
+	return result;
+}
 
 BOOST_AUTO_TEST_CASE(catalog_is_complete_unique_and_fits_chat)
 {
@@ -33,7 +78,7 @@ BOOST_AUTO_TEST_CASE(catalog_is_complete_unique_and_fits_chat)
 		BOOST_CHECK_LT(std::string(rendered).size(), 150u);
 		BOOST_CHECK(std::string(rendered).find("when safe") == std::string::npos);
 		BOOST_CHECK(std::string(rendered).find("when possible") == std::string::npos);
-		std::string text(rendered);
+		std::string text = withoutColors(rendered);
 		std::transform(text.begin(), text.end(), text.begin(),
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		for (const char *phrase : {"server", "setting", "rules", "push then pull",
@@ -59,7 +104,10 @@ BOOST_AUTO_TEST_CASE(catalog_is_complete_unique_and_fits_chat)
 	BOOST_CHECK(std::string(g_duelCurriculumLessons[2].text).find("stun") != std::string::npos);
 	BOOST_CHECK(std::string(g_duelCurriculumLessons[3].text).find("stun") != std::string::npos);
 	BOOST_CHECK(std::string(g_duelCurriculumLessons[4].text).find("longer") != std::string::npos);
-	BOOST_CHECK(std::string(g_duelCurriculumLessons[5].text).find("Below 20 FP") != std::string::npos);
+	BOOST_CHECK(withoutColors(g_duelCurriculumLessons[5].text).find("below 20 FP") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[15].text).find("^3PK^7") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[22].text).find("^5FP^7") != std::string::npos);
+	BOOST_CHECK(std::string(g_duelCurriculumLessons[22].text).find("^1HP^7") != std::string::npos);
 }
 
 BOOST_AUTO_TEST_CASE(combo_examples_require_live_components_and_show_base_math)
@@ -82,13 +130,13 @@ BOOST_AUTO_TEST_CASE(combo_examples_require_live_components_and_show_base_math)
 	inputs.validValues = 1u << DUEL_VALUE_THROW_BASE_DAMAGE;
 	inputs.values[DUEL_VALUE_THROW_BASE_DAMAGE] = 30;
 	BOOST_REQUIRE(G_DuelCurriculumRender(pair, &inputs, message, sizeof(message)));
-	BOOST_CHECK(std::string(message).find("40 FP") != std::string::npos);
-	BOOST_CHECK(std::string(message).find("30 base") != std::string::npos);
+	BOOST_CHECK(withoutColors(message).find("40 FP") != std::string::npos);
+	BOOST_CHECK(withoutColors(message).find("30 base") != std::string::npos);
 	BOOST_CHECK(!G_DuelCurriculumRender(ptk, &inputs, message, sizeof(message)));
 	inputs.validValues |= 1u << DUEL_VALUE_FLIPKICK_BASE_DAMAGE;
 	inputs.values[DUEL_VALUE_FLIPKICK_BASE_DAMAGE] = 20;
 	BOOST_REQUIRE(G_DuelCurriculumRender(ptk, &inputs, message, sizeof(message)));
-	BOOST_CHECK(std::string(message).find("80 damage") != std::string::npos);
+	BOOST_CHECK(withoutColors(message).find("80 damage") != std::string::npos);
 	inputs.values[DUEL_VALUE_FLIPKICK_BASE_DAMAGE] = -1;
 	BOOST_CHECK(!G_DuelCurriculumRender(ptk, &inputs, message, sizeof(message)));
 }
@@ -207,9 +255,9 @@ BOOST_AUTO_TEST_CASE(selection_introduces_then_mixes_eligible_renderable_tiers)
 		BOOST_CHECK(output[0]);
 	}
 	BOOST_REQUIRE_EQUAL(G_DuelCurriculumSelect(22, 1, ~0u, levels, &inputs, output, sizeof(output)), 22);
-	BOOST_CHECK(std::string(output).find("costs 5 FP") != std::string::npos);
-	BOOST_CHECK(std::string(output).find("heal up to 4 HP") != std::string::npos);
-	BOOST_CHECK(std::string(output).find("remove up to 4 enemy FP") != std::string::npos);
+	BOOST_CHECK(withoutColors(output).find("cost 50 FP") != std::string::npos);
+	BOOST_CHECK(withoutColors(output).find("heal up to 40 HP") != std::string::npos);
+	BOOST_CHECK(withoutColors(output).find("remove up to 40 enemy FP") != std::string::npos);
 	inputs.validValues &= ~(1u << DUEL_VALUE_DRAIN_TARGET_LOSS);
 	BOOST_CHECK(!G_DuelCurriculumRender(&g_duelCurriculumLessons[22], &inputs, output, sizeof(output)));
 	BOOST_CHECK_EQUAL(G_DuelCurriculumSelect(22, 1, ~0u, levels, &inputs, output, sizeof(output)), 23);
